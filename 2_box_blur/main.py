@@ -14,7 +14,7 @@ module = torch.utils.cpp_extension.load(
 # Example usage
 input = torch.randn(1, 1000, 1000, device="cuda")
 kernel_size = 5
-output = module.box_blur(input, kernel_size)
+output = module.box_blur_v1(input, kernel_size)
 
 cached_kernels = dict()
 
@@ -46,4 +46,4 @@ def benchmark(fn, *args):
 
 
 benchmark(box_blur_ref, input, kernel_size)
-benchmark(module.box_blur, input, kernel_size)
+benchmark(module.box_blur_v1, input, kernel_size)
