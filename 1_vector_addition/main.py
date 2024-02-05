@@ -3,7 +3,7 @@ import torch.utils.cpp_extension
 
 module = torch.utils.cpp_extension.load(
     "module",
-    sources=["add.cpp", "add.cu"],
+    sources=["add.cu"],
     extra_cuda_cflags=["-O3"],
     verbose=True,
 )
