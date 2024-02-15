@@ -12,8 +12,8 @@ module = torch.utils.cpp_extension.load(
 )
 
 # Example usage
-input = torch.randn(1, 1000, 1000, device="cuda")
-kernel_size = 5
+input = torch.randn(4, 1000, 800, device="cuda")
+kernel_size = 3
 output_v1 = module.box_blur_v1(input, kernel_size)
 output_v2 = module.box_blur_v2(input, kernel_size)
 
@@ -28,7 +28,7 @@ def box_blur_ref(input: torch.Tensor, kernel_size: int) -> torch.Tensor:
 
     kernel = cached_kernels[kernel_size]
     padding = (kernel_size - 1) // 2
-    return F.conv2d(input.unsqueeze(0), kernel, padding=padding).squeeze(0)
+    return F.conv2d(input.unsqueeze(1), kernel, padding=padding).squeeze(1)
 
 
 output_ref = box_blur_ref(input, kernel_size)
