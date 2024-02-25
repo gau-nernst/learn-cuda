@@ -26,7 +26,7 @@ torch::Tensor matmul_v1(torch::Tensor input1, torch::Tensor input2) {
   CHECK_INPUT(input1);
   CHECK_INPUT(input2);
   int m = input1.size(0);
-  int n = input1.size(1);;
+  int n = input1.size(1);
   TORCH_CHECK(n == input2.size(0), "dim1 of input2 should be equal to dim2 of input1");
   int k = input2.size(1);
   torch::Tensor output = torch::empty({m, k}, input1.options());
@@ -40,7 +40,7 @@ torch::Tensor matmul_v1(torch::Tensor input1, torch::Tensor input2) {
   return output;
 }
 
-constexpr int BLOCK_SIZE = 16;
+constexpr int BLOCK_SIZE = 32;
 
 __global__ void matmul_kernel_v2(const float *input1, const float *input2, float *output, int m, int n, int k) {
   const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;

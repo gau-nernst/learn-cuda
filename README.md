@@ -12,7 +12,32 @@ Name | Description
 1\. [Vector addition](1_vector_addition/) | Simple example to get everything working.
 2\. [Box blur](2_box_blur/) | 2D CUDA blocks/threads. TODO: optimize with separable filters, moving average.
 3\. [Matrix multiplication](3_matmul/) | Tiling.
-4\. Softmax | TODO
+4\. [Sum](4_sum/) | Reduction in general.  Prepare for softmax (max and sum).
+5\. [Softmax](5_softmax) | TODO
+... optimizers, quantization, flash attention | TODO
+
+To profile a CUDA kernel, run
+
+```bash
+ncu -o profile python main.py
+```
+
+and open the generated `profile.ncu-rep` file in Nsight Compute. See more here: https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html
+
+To profile PyTorch program, run
+
+```python
+with torch.profiler.profile(
+    activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+) as prof:
+    # PyTorch program here
+    ...
+
+print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+prof.export_chrome_trace("trace.json")
+```
+
+and open the generated `trace.json` file in Chrome's `about:tracing`. See more here: https://pytorch.org/docs/stable/profiler.html#torch.profiler.profile
 
 ## Learnings
 

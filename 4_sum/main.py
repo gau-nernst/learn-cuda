@@ -5,21 +5,18 @@ import torch.utils.cpp_extension
 
 module = torch.utils.cpp_extension.load(
     "module",
-    sources=["matmul.cu"],
+    sources=["sum.cu"],
     extra_cuda_cflags=["-O3", "--use_fast_math", "--ptxas-options=-v"],
     verbose=True,
 )
 
 # for large n, there will be a larger deviation, since sum of many small elements are not accurate
-input1 = torch.randn(1000, 200, device="cuda")
-input2 = torch.randn(200, 1000, device="cuda")
+input = torch.randn(1000, 1000, device="cuda")
 
-output_v1 = module.matmul_v1(input1, input2)
-output_v2 = module.matmul_v2(input1, input2)
+output_v1 = module.sum_v1(input)
 
-output_ref = torch.matmul(input1, input2)
-torch.testing.assert_close(output_v1, output_ref)
-torch.testing.assert_close(output_v2, output_ref)
+output_ref = torch.sum(input, dim=-1)
+torch.testing.assert_close(output_v1, output_ref, atol=3e-5, rtol=3e-5)
 
 
 def benchmark(fn, *args):
@@ -34,6 +31,5 @@ def benchmark(fn, *args):
     print(N / (time.time() - time0))
 
 
-benchmark(torch.matmul, input1, input2)
-benchmark(module.matmul_v1, input1, input2)
-benchmark(module.matmul_v2, input1, input2)
+benchmark(torch.sum, input, -1)
+benchmark(module.sum_v1, input)
