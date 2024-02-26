@@ -7,16 +7,23 @@
 
 #define cdiv(a, b) ((a) + (b) - 1) / (b)
 
+// Kahan sum to reduce errors
 __global__ void sum_kernel_v1(const float *input, float *output, int m, int n) {
   const int row_idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (row_idx >= m)
     return;
 
-  float result = 0.0f;
-  for (int i = 0; i < n; i++)
-    result += input[row_idx  * n + i];
+  float sum = 0.0f;
+  float error = 0.0f;
+
+  for (int i = 0; i < n; i++) {
+    float item = input[row_idx * n + i] - error;
+    float new_sum = sum + item;
+    error = new_sum - sum - item;
+    sum = new_sum;
+  }
   
-  output[row_idx] = result;
+  output[row_idx] = sum;
 }
 
 torch::Tensor sum_v1(torch::Tensor input) {

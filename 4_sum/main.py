@@ -16,7 +16,7 @@ input = torch.randn(1000, 1000, device="cuda")
 output_v1 = module.sum_v1(input)
 
 output_ref = torch.sum(input, dim=-1)
-torch.testing.assert_close(output_v1, output_ref, atol=3e-5, rtol=3e-5)
+torch.testing.assert_close(output_v1, output_ref)
 
 
 def benchmark(fn, *args):
