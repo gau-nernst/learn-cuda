@@ -1,5 +1,4 @@
 #include <torch/extension.h>
-#include <cmath>
 
 #define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
@@ -39,6 +38,42 @@ torch::Tensor sum_v1(torch::Tensor input) {
   return output;
 }
 
+#define BLOCK_SIZE 1024
+
+__global__ void sum_kernel_v2(const float *input, float *output, int m, int n) {
+  const int tid = threadIdx.x;
+  const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int row_idx = blockIdx.y;
+  __shared__ float shmem[BLOCK_SIZE];
+
+  // load data to shared memory
+  shmem[tid] = col_idx < n ? input[row_idx * n + col_idx] : 0.0f;
+  __syncthreads();
+
+  // parallel sum
+  for (int stride = BLOCK_SIZE / 2; stride > 0; stride /= 2) {
+    if (tid < stride)
+      shmem[tid] += shmem[tid + stride];
+    __syncthreads();
+  }
+
+  if (tid == 0)
+    atomicAdd(output + row_idx, shmem[0]);
+}
+
+torch::Tensor sum_v2(torch::Tensor input) {
+  CHECK_INPUT(input);
+  int m = input.size(0);
+  int n = input.size(1);
+  torch::Tensor output = torch::zeros({m}, input.options());
+
+  int n_blocks = cdiv(n, BLOCK_SIZE);
+  sum_kernel_v2<<<dim3(n_blocks, m), dim3(BLOCK_SIZE, 1)>>>(input.data_ptr<float>(), output.data_ptr<float>(), m, n);
+
+  return output;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("sum_v1", &sum_v1, "Sum v1");
+  m.def("sum_v2", &sum_v2, "Sum v2");
 }
