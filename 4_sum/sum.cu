@@ -1,5 +1,7 @@
+#define cdiv(a, b) ((a) + (b)-1) / (b)
+
 // Kahan sum to reduce errors
-__global__ void sum_kernel_v1(const float *input, float *output, int m, int n) {
+__global__ void sum_v1_kernel(const float *input, float *output, int m, int n) {
   const int row_idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (row_idx >= m)
     return;
@@ -13,12 +15,17 @@ __global__ void sum_kernel_v1(const float *input, float *output, int m, int n) {
     error = new_sum - sum - item;
     sum = new_sum;
   }
-  
+
   output[row_idx] = sum;
 }
 
-template <int BLOCK_SIZE>
-__global__ void sum_kernel_v2(const float *input, float *output, int m, int n) {
+void sum_v1_launch(const float *input, float *output, int m, int n) {
+  int n_threads = 256;
+  int n_blocks = cdiv(m, n_threads);
+  sum_v1_kernel<<<n_blocks, n_threads>>>(input, output, m, n);
+}
+
+template <int BLOCK_SIZE> __global__ void sum_v2_kernel(const float *input, float *output, int m, int n) {
   const int tid = threadIdx.x;
   const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int row_idx = blockIdx.y;
@@ -39,36 +46,50 @@ __global__ void sum_kernel_v2(const float *input, float *output, int m, int n) {
     atomicAdd(output + row_idx, shmem[0]);
 }
 
-template __global__ void sum_kernel_v2<256>(const float *input, float *output, int m, int n);
-template __global__ void sum_kernel_v2<512>(const float *input, float *output, int m, int n);
-template __global__ void sum_kernel_v2<1024>(const float *input, float *output, int m, int n);
-
-template <int BLOCK_SIZE, int COARSE_FACTOR>
-__global__ void sum_kernel_v3(const float *input, float *output, int m, int n) {
-  const int tid = threadIdx.x;
-  const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
-  const int row_idx = blockIdx.y;
-  __shared__ float shmem[BLOCK_SIZE];
-
-  float sum = 0.0f;
-  for (int tile = 0; tile < COARSE_FACTOR; tile++)
-    sum += col_idx + BLOCK_SIZE < n ? input[row_idx * n + col_idx + BLOCK_SIZE] : 0.0f;
-
-  // load data to shared memory
-  shmem[tid] = sum;
-  __syncthreads();
-
-  // parallel sum
-  for (int stride = BLOCK_SIZE / 2; stride > 0; stride /= 2) {
-    if (tid < stride)
-      shmem[tid] += shmem[tid + stride];
-    __syncthreads();
+void sum_v2_launch(const float *input, float *output, int m, int n, int tpb) {
+  int n_blocks = cdiv(n, tpb);
+  switch (tpb) {
+  case 256:
+    sum_v2_kernel<256><<<dim3(n_blocks, m), dim3(tpb, 1)>>>(input, output, m, n);
+    break;
+  case 512:
+    sum_v2_kernel<512><<<dim3(n_blocks, m), dim3(tpb, 1)>>>(input, output, m, n);
+    break;
+  case 1024:
+    sum_v2_kernel<1024><<<dim3(n_blocks, m), dim3(tpb, 1)>>>(input, output, m, n);
+    break;
   }
-
-  if (tid == 0)
-    atomicAdd(output + row_idx, shmem[0]);
 }
 
-template __global__ void sum_kernel_v3<256>(const float *input, float *output, int m, int n);
-template __global__ void sum_kernel_v3<512>(const float *input, float *output, int m, int n);
-template __global__ void sum_kernel_v3<1024>(const float *input, float *output, int m, int n);
+// template <int BLOCK_SIZE, int COARSE_FACTOR>
+// __global__ void sum_kernel_v3(const float *input, float *output, int m, int
+// n) {
+//   const int tid = threadIdx.x;
+//   const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
+//   const int row_idx = blockIdx.y;
+//   __shared__ float shmem[BLOCK_SIZE];
+
+//   float sum = 0.0f;
+//   for (int tile = 0; tile < COARSE_FACTOR; tile++)
+//     sum += col_idx + BLOCK_SIZE < n ? input[row_idx * n + col_idx +
+//     BLOCK_SIZE] : 0.0f;
+
+//   // load data to shared memory
+//   shmem[tid] = sum;
+//   __syncthreads();
+
+//   // parallel sum
+//   for (int stride = BLOCK_SIZE / 2; stride > 0; stride /= 2) {
+//     if (tid < stride)
+//       shmem[tid] += shmem[tid + stride];
+//     __syncthreads();
+//   }
+
+//   if (tid == 0)
+//     atomicAdd(output + row_idx, shmem[0]);
+// }
+
+// template __global__ void sum_kernel_v3<256>(const float *input, float
+// *output, int m, int n); template __global__ void sum_kernel_v3<512>(const
+// float *input, float *output, int m, int n); template __global__ void
+// sum_kernel_v3<1024>(const float *input, float *output, int m, int n);
