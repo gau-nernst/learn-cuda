@@ -99,7 +99,7 @@ __global__ void sum_v3_kernel(const float *input, float *output, int m, int n, i
     // }
 
     // approach 3: use warp-level primitives
-    int val = shmem[tid] + shmem[tid + 32];
+    float val = shmem[tid] + shmem[tid + 32];
     for (int offset = 16; offset > 0; offset /= 2)
       val += __shfl_down_sync(0xffffffff, val, offset);
     shmem[tid] = val;
