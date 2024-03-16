@@ -87,16 +87,22 @@ __global__ void sum_v3_kernel(const float *input, float *output, int m, int n, i
     // for (int stride = 32; stride > 0; stride /= 2)
     //   shmem[tid] += shmem[tid + stride];
 
-    // approach 1: cast shared memory as volatile -> memory is not cached
-    volatile float *_shmem = shmem;
-    for (int stride = 32; stride > 0; stride /= 2)
-      _shmem[tid] += _shmem[tid + stride];
+    // approach 1: cast shared memory as volatile -> compiler will issue a true memory read
+    // volatile float *_shmem = shmem;
+    // for (int stride = 32; stride > 0; stride /= 2)
+    //   _shmem[tid] += _shmem[tid + stride];
 
-    // approach 2: use __syncwarp() -> compiler will issue a true memory read
+    // approach 2: use __syncwarp() -> wait for shared memory update, and issue a true memory read
     // for (int stride = 32; stride > 0; stride /= 2) {
     //   shmem[tid] += shmem[tid + stride];
     //   __syncwarp();
     // }
+
+    // approach 3: use warp-level primitives
+    int val = shmem[tid] + shmem[tid + 32];
+    for (int offset = 16; offset > 0; offset /= 2)
+      val += __shfl_down_sync(0xffffffff, val, offset);
+    shmem[tid] = val;
   }
 
   // reduction across blocks
