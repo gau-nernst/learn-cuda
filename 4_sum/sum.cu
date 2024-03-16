@@ -54,6 +54,7 @@ void sum_v2_launch(const float *input, float *output, int m, int n, int block_si
 }
 
 // thread coarsening and warp-level reduction
+// NOTE: block_size must be >= 64 for this kernel
 __global__ void sum_v3_kernel(const float *input, float *output, int m, int n, int coarse_factor) {
   const int tid = threadIdx.x;
   const int col_idx = blockIdx.x * blockDim.x * coarse_factor + threadIdx.x;
