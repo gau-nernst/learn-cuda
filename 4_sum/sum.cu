@@ -1,11 +1,3 @@
-#include <torch/extension.h>
-
-#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
-
-#define cdiv(a, b) ((a) + (b) - 1) / (b)
-
 // Kahan sum to reduce errors
 __global__ void sum_kernel_v1(const float *input, float *output, int m, int n) {
   const int row_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -25,21 +17,7 @@ __global__ void sum_kernel_v1(const float *input, float *output, int m, int n) {
   output[row_idx] = sum;
 }
 
-torch::Tensor sum_v1(torch::Tensor input) {
-  CHECK_INPUT(input);
-  int m = input.size(0);
-  int n = input.size(1);
-  torch::Tensor output = torch::empty({m}, input.options());
-
-  int n_threads = 256;
-  int n_blocks = cdiv(m, n_threads);
-  sum_kernel_v1<<<n_blocks, n_threads>>>(input.data_ptr<float>(), output.data_ptr<float>(), m, n);
-
-  return output;
-}
-
-#define BLOCK_SIZE 1024
-
+template <int BLOCK_SIZE>
 __global__ void sum_kernel_v2(const float *input, float *output, int m, int n) {
   const int tid = threadIdx.x;
   const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -61,19 +39,36 @@ __global__ void sum_kernel_v2(const float *input, float *output, int m, int n) {
     atomicAdd(output + row_idx, shmem[0]);
 }
 
-torch::Tensor sum_v2(torch::Tensor input) {
-  CHECK_INPUT(input);
-  int m = input.size(0);
-  int n = input.size(1);
-  torch::Tensor output = torch::zeros({m}, input.options());
+template __global__ void sum_kernel_v2<256>(const float *input, float *output, int m, int n);
+template __global__ void sum_kernel_v2<512>(const float *input, float *output, int m, int n);
+template __global__ void sum_kernel_v2<1024>(const float *input, float *output, int m, int n);
 
-  int n_blocks = cdiv(n, BLOCK_SIZE);
-  sum_kernel_v2<<<dim3(n_blocks, m), dim3(BLOCK_SIZE, 1)>>>(input.data_ptr<float>(), output.data_ptr<float>(), m, n);
+template <int BLOCK_SIZE, int COARSE_FACTOR>
+__global__ void sum_kernel_v3(const float *input, float *output, int m, int n) {
+  const int tid = threadIdx.x;
+  const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int row_idx = blockIdx.y;
+  __shared__ float shmem[BLOCK_SIZE];
 
-  return output;
+  float sum = 0.0f;
+  for (int tile = 0; tile < COARSE_FACTOR; tile++)
+    sum += col_idx + BLOCK_SIZE < n ? input[row_idx * n + col_idx + BLOCK_SIZE] : 0.0f;
+
+  // load data to shared memory
+  shmem[tid] = sum;
+  __syncthreads();
+
+  // parallel sum
+  for (int stride = BLOCK_SIZE / 2; stride > 0; stride /= 2) {
+    if (tid < stride)
+      shmem[tid] += shmem[tid + stride];
+    __syncthreads();
+  }
+
+  if (tid == 0)
+    atomicAdd(output + row_idx, shmem[0]);
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("sum_v1", &sum_v1, "Sum v1");
-  m.def("sum_v2", &sum_v2, "Sum v2");
-}
+template __global__ void sum_kernel_v3<256>(const float *input, float *output, int m, int n);
+template __global__ void sum_kernel_v3<512>(const float *input, float *output, int m, int n);
+template __global__ void sum_kernel_v3<1024>(const float *input, float *output, int m, int n);

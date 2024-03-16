@@ -5,13 +5,13 @@ import torch.utils.cpp_extension
 
 module = torch.utils.cpp_extension.load(
     "module",
-    sources=["sum.cu"],
+    sources=["sum.cu", "sum_pt.cu"],
     extra_cuda_cflags=["-O3", "--use_fast_math", "--ptxas-options=-v"],
     verbose=True,
 )
 
 # for large n, there will be a larger deviation, since sum of many small elements are not accurate
-input = torch.randn(1000, 10000, device="cuda")
+input = torch.randn(1000, 1000, device="cuda")
 
 output_v1 = module.sum_v1(input)
 output_v2 = module.sum_v2(input)

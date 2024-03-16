@@ -19,7 +19,7 @@ Name | Description
 To profile a CUDA kernel, run
 
 ```bash
-ncu -o profile python main.py
+ncu --set full python main.py
 ```
 
 and open the generated `profile.ncu-rep` file in Nsight Compute. See more here: https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html
