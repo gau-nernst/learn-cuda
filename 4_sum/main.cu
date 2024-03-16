@@ -2,7 +2,8 @@
 #include <iostream>
 
 void sum_v1_launch(const float *input, float *output, int m, int n);
-void sum_v2_launch(const float *input, float *output, int m, int n, int tpb);
+void sum_v2_launch(const float *input, float *output, int m, int n, int block_size);
+void sum_v3_launch(const float *input, float *output, int m, int n, int block_size, int coarse_factor);
 
 int main() {
   // Size of the input data
@@ -31,8 +32,9 @@ int main() {
   cudaMemcpy(d_input, h_input, bytes, cudaMemcpyHostToDevice);
 
   // Launch the kernel
-  int tpb = 1024;
-  sum_v2_launch(d_input, d_output, 1, size, tpb);
+  int block_size = 1024;
+  int coarse_factor = 4;
+  sum_v3_launch(d_input, d_output, 1, size, block_size, coarse_factor);
 
   // Copy result back to host
   cudaMemcpy(h_output, d_output, sizeof(float), cudaMemcpyDeviceToHost);

@@ -38,7 +38,8 @@ __global__ void sum_v2_kernel(const float *input, float *output, int m, int n) {
 
   // parallel sum
   for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
-    shmem[tid] += tid < stride ? shmem[tid + stride] : 0.0f;
+    if (tid < stride)
+      shmem[tid] += shmem[tid + stride];
     __syncthreads();
   }
 
@@ -52,7 +53,7 @@ void sum_v2_launch(const float *input, float *output, int m, int n, int block_si
   sum_v2_kernel<<<n_blocks, block_size, shmem_size>>>(input, output, m, n);
 }
 
-// thread coarsening -> increase compute load for each thread
+// thread coarsening and warp-level reduction
 __global__ void sum_v3_kernel(const float *input, float *output, int m, int n, int coarse_factor) {
   const int tid = threadIdx.x;
   const int col_idx = blockIdx.x * blockDim.x * coarse_factor + threadIdx.x;
@@ -60,18 +61,42 @@ __global__ void sum_v3_kernel(const float *input, float *output, int m, int n, i
   extern __shared__ float shmem[];
 
   // reduction within a thread
+  // store results to shared memory
   float sum = 0.0f;
   for (int tile = 0; tile < coarse_factor; tile++) {
     int new_col_idx = col_idx + blockDim.x * tile;
-    sum += new_col_idx < n ? input[row_idx * n + new_col_idx] : 0.0f;
+    if (new_col_idx < n)
+      sum += input[row_idx * n + new_col_idx];
   }
   shmem[tid] = sum;
   __syncthreads();
 
   // reduction within a block
-  for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
-    shmem[tid] += tid < stride ? shmem[tid + stride] : 0.0f;
+  // no warp divergence since all threads in a 32-thread warp will either do the addition or not.
+  for (int stride = blockDim.x / 2; stride > 32; stride /= 2) {
+    if (tid < stride)
+      shmem[tid] += shmem[tid + stride];
     __syncthreads();
+  }
+
+  // reduction within a warp
+  if (tid < 32) {
+    // approach 0: this won't work, even though all reads and writes are done at the same time (no race condition).
+    // this is because the compiler will optimize memory read of shmem[tid + stride] -> cache the data instead of
+    // reading the updated shared memory.
+    // for (int stride = 32; stride > 0; stride /= 2)
+    //   shmem[tid] += shmem[tid + stride];
+
+    // approach 1: cast shared memory as volatile -> memory is not cached
+    volatile float *_shmem = shmem;
+    for (int stride = 32; stride > 0; stride /= 2)
+      _shmem[tid] += _shmem[tid + stride];
+
+    // approach 2: use __syncwarp() -> compiler will issue a true memory read
+    // for (int stride = 32; stride > 0; stride /= 2) {
+    //   shmem[tid] += shmem[tid + stride];
+    //   __syncwarp();
+    // }
   }
 
   // reduction across blocks
