@@ -1,13 +1,13 @@
-#include <torch/extension.h>
 #include <cmath>
+#include <torch/extension.h>
 
 #define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x) CHECK_CUDA(x); CHECK_CONTIGUOUS(x)
+#define CHECK_INPUT(x)                                                                                                 \
+  CHECK_CUDA(x);                                                                                                       \
+  CHECK_CONTIGUOUS(x)
 
-int cdiv(int a, int b) {
-  return (a + b - 1) / b;
-}
+int cdiv(int a, int b) { return (a + b - 1) / b; }
 
 __global__ void box_blur_kernel_v1(const float *input, float *output, int width, int height, int kernel_size) {
   const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -38,7 +38,8 @@ torch::Tensor box_blur_v1(torch::Tensor input, int kernel_size) {
 
   dim3 n_threads(16, 16, 1);
   dim3 n_blocks(cdiv(width, 16), cdiv(height, 16), bsize);
-  box_blur_kernel_v1<<<n_blocks, n_threads>>>(input.data_ptr<float>(), output.data_ptr<float>(), width, height, kernel_size);
+  box_blur_kernel_v1<<<n_blocks, n_threads>>>(input.data_ptr<float>(), output.data_ptr<float>(), width, height,
+                                              kernel_size);
 
   return output;
 }
@@ -69,7 +70,7 @@ __global__ void box_blur_kernel_v2_row(const float *input, float *output, int wi
 __global__ void box_blur_kernel_v2_col(const float *input, float *output, int width, int height, int kernel_size) {
   const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int batch_idx = blockIdx.y * blockDim.y + threadIdx.y;
-  
+
   if (col_idx >= width)
     return;
 
@@ -100,8 +101,10 @@ torch::Tensor box_blur_v2(torch::Tensor input, int kernel_size) {
   torch::Tensor output2 = torch::empty_like(input);
 
   int n_threads = 256;
-  box_blur_kernel_v2_row<<<dim3(cdiv(height, n_threads), bsize), n_threads>>>(input.data_ptr<float>(), output1.data_ptr<float>(), width, height, kernel_size);
-  box_blur_kernel_v2_col<<<dim3(cdiv(width, n_threads), bsize), n_threads>>>(output1.data_ptr<float>(), output2.data_ptr<float>(), width, height, kernel_size);
+  box_blur_kernel_v2_row<<<dim3(cdiv(height, n_threads), bsize), n_threads>>>(
+      input.data_ptr<float>(), output1.data_ptr<float>(), width, height, kernel_size);
+  box_blur_kernel_v2_col<<<dim3(cdiv(width, n_threads), bsize), n_threads>>>(
+      output1.data_ptr<float>(), output2.data_ptr<float>(), width, height, kernel_size);
 
   return output2;
 }
