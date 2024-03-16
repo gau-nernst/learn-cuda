@@ -5,7 +5,7 @@ import torch.utils.cpp_extension
 
 module = torch.utils.cpp_extension.load(
     "module",
-    sources=["sum.cu", "sum_pt.cpp"],
+    sources=["sum.cu", "sum.cpp"],
     extra_cuda_cflags=["-O3", "--use_fast_math", "--ptxas-options=-v"],
     verbose=True,
 )
