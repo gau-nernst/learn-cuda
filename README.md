@@ -39,6 +39,18 @@ prof.export_chrome_trace("trace.json")
 
 and open the generated `trace.json` file in Chrome's `about:tracing`. See more here: https://pytorch.org/docs/stable/profiler.html#torch.profiler.profile
 
+To support syntax highlighting and code suggestion in IDE, add the following include paths (can be seen in the command that PyTorch uses to compile inline C++ code).
+
+```
+"/home/thien/miniconda3/envs/dev/lib/python3.10/site-packages/torch/include",
+"/home/thien/miniconda3/envs/dev/lib/python3.10/site-packages/torch/include/torch/csrc/api/include",
+"/home/thien/miniconda3/envs/dev/lib/python3.10/site-packages/torch/include/THC",
+"/usr/local/cuda/include",
+"/home/thien/miniconda3/envs/dev/include/python3.10"
+```
+
+Change the paths appropriately for your system. For Windows, the paths are slightly different, but then again, you can see them in the PyTorch compile command. For VSCode, add the paths to `.vscode/c_cpp_properties.json` (VSCode will prompt you to create one if it does not exist).
+
 ## Learnings
 
 - CUDA architecture: a GPU consists of multiple Streaming Multiprocessors (SMs). Each SM contains several warps. Each warp contains 32 CUDA threads.
