@@ -6,13 +6,13 @@ import torch.utils.cpp_extension
 
 module = torch.utils.cpp_extension.load(
     "module",
-    sources=["softmax.cu"],
+    sources=["softmax.cu", "softmax.cpp"],
     extra_cuda_cflags=["-O3", "--use_fast_math", "--ptxas-options=-v"],
     verbose=True,
 )
 
 # for large n, there will be a larger deviation, since sum of many small elements are not accurate
-input = torch.randn(1000, 1024, device="cuda")
+input = torch.randn(10, 10_000, device="cuda")
 
 output_v1 = module.softmax_v1(input)
 
