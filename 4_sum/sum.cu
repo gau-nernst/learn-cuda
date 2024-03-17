@@ -74,34 +74,34 @@ __global__ void sum_v3_kernel(const float *input, float *output, int m, int n, i
 
   // reduction within a block
   // no warp divergence since all threads in a 32-thread warp will either do the addition or not.
-  for (int stride = blockDim.x / 2; stride > 32; stride /= 2) {
+  for (int stride = blockDim.x / 2; stride > warpSize; stride /= 2) {
     if (tid < stride)
       shmem[tid] += shmem[tid + stride];
     __syncthreads();
   }
 
   // reduction within a warp
-  if (tid < 32) {
+  if (tid < warpSize) {
     // approach 0: this won't work, even though all reads and writes are done at the same time (no race condition).
     // this is because the compiler will optimize memory read of shmem[tid + stride] -> cache the data instead of
     // reading the updated shared memory.
-    // for (int stride = 32; stride > 0; stride /= 2)
+    // for (int stride = warpSize; stride > 0; stride /= 2)
     //   shmem[tid] += shmem[tid + stride];
 
     // approach 1: cast shared memory as volatile -> compiler will issue a true memory read
     // volatile float *_shmem = shmem;
-    // for (int stride = 32; stride > 0; stride /= 2)
+    // for (int stride = warpSize; stride > 0; stride /= 2)
     //   _shmem[tid] += _shmem[tid + stride];
 
     // approach 2: use __syncwarp() -> wait for shared memory update, and issue a true memory read
-    // for (int stride = 32; stride > 0; stride /= 2) {
+    // for (int stride = warpSize; stride > 0; stride /= 2) {
     //   shmem[tid] += shmem[tid + stride];
     //   __syncwarp();
     // }
 
     // approach 3: use warp-level primitives -> register-to-register communication
-    float val = shmem[tid] + shmem[tid + 32];
-    for (int offset = 16; offset > 0; offset /= 2)
+    float val = shmem[tid] + shmem[tid + warpSize];
+    for (int offset = warpSize / 2; offset > 0; offset /= 2)
       val += __shfl_down_sync(0xffffffff, val, offset);
     shmem[tid] = val;
   }
