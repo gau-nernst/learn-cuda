@@ -99,7 +99,7 @@ __global__ void sum_v3_kernel(const float *input, float *output, int m, int n, i
     //   __syncwarp();
     // }
 
-    // approach 3: use warp-level primitives
+    // approach 3: use warp-level primitives -> register-to-register communication
     float val = shmem[tid] + shmem[tid + 32];
     for (int offset = 16; offset > 0; offset /= 2)
       val += __shfl_down_sync(0xffffffff, val, offset);
@@ -107,6 +107,10 @@ __global__ void sum_v3_kernel(const float *input, float *output, int m, int n, i
   }
 
   // reduction across blocks
+  // alternatives:
+  // - write to global memory, and call 1 more reduction kernel
+  // - thread fence reduction
+  // - cooperative groups
   if (tid == 0)
     atomicAdd(output + row_idx, shmem[0]);
 }
