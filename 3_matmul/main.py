@@ -1,7 +1,9 @@
 import time
 
+import matmul_triton
 import torch
 import torch.utils.cpp_extension
+
 
 module = torch.utils.cpp_extension.load(
     "module",
@@ -16,10 +18,12 @@ input2 = torch.randn(200, 1000, device="cuda")
 
 output_v1 = module.matmul_v1(input1, input2)
 output_v2 = module.matmul_v2(input1, input2)
+output_triton = matmul_triton.matmul(input1, input2)
 
 output_ref = torch.matmul(input1, input2)
 torch.testing.assert_close(output_v1, output_ref)
 torch.testing.assert_close(output_v2, output_ref)
+torch.testing.assert_close(output_triton, output_ref)
 
 
 def benchmark(fn, *args):
@@ -37,3 +41,4 @@ def benchmark(fn, *args):
 benchmark(torch.matmul, input1, input2)
 benchmark(module.matmul_v1, input1, input2)
 benchmark(module.matmul_v2, input1, input2)
+benchmark(matmul_triton.matmul, input1, input2)
