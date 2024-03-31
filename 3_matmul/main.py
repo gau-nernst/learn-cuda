@@ -7,7 +7,7 @@ import torch.utils.cpp_extension
 
 module = torch.utils.cpp_extension.load(
     "module",
-    sources=["matmul.cu"],
+    sources=["matmul.cu", "matmul.cpp"],
     extra_cuda_cflags=["-O3", "--use_fast_math", "--ptxas-options=-v"],
     verbose=True,
 )

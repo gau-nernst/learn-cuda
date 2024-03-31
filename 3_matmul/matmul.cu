@@ -1,15 +1,8 @@
 #include <cmath>
-#include <torch/extension.h>
-
-#define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
-#define CHECK_INPUT(x)                                                                                                 \
-  CHECK_CUDA(x);                                                                                                       \
-  CHECK_CONTIGUOUS(x)
 
 #define cdiv(a, b) ((a) + (b)-1) / (b)
 
-__global__ void matmul_kernel_v1(const float *input1, const float *input2, float *output, int m, int n, int k) {
+__global__ void matmul_v1_kernel(const float *input1, const float *input2, float *output, int m, int n, int k) {
   const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int row_idx = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -24,28 +17,16 @@ __global__ void matmul_kernel_v1(const float *input1, const float *input2, float
   output[row_idx * k + col_idx] = total;
 }
 
-torch::Tensor matmul_v1(torch::Tensor input1, torch::Tensor input2) {
-  CHECK_INPUT(input1);
-  CHECK_INPUT(input2);
-  int m = input1.size(0);
-  int n = input1.size(1);
-  TORCH_CHECK(n == input2.size(0), "dim1 of input2 should be equal to dim2 of input1");
-  int k = input2.size(1);
-  torch::Tensor output = torch::empty({m, k}, input1.options());
-
+void matmul_v1_launch(const float *input1, const float *input2, float *output, int m, int n, int k) {
   // NOTE: blockIdx.x is the fastest changing dimension. thus, we assign column index to it
   // intuitively, block dimensions will be PyTorch's dimensions in reverse.
-  dim3 n_threads(16, 16);
-  dim3 n_blocks(cdiv(k, 16), cdiv(m, 16));
-  matmul_kernel_v1<<<n_blocks, n_threads>>>(input1.data_ptr<float>(), input2.data_ptr<float>(),
-                                            output.data_ptr<float>(), m, n, k);
-
-  return output;
+  dim3 block_size(16, 16);
+  dim3 grid_size(cdiv(k, 16), cdiv(m, 16));
+  matmul_v1_kernel<<<grid_size, block_size>>>(input1, input2, output, m, n, k);
 }
 
-constexpr int BLOCK_SIZE = 32;
-
-__global__ void matmul_kernel_v2(const float *input1, const float *input2, float *output, int m, int n, int k) {
+template <int BLOCK_SIZE>
+__global__ void matmul_v2_kernel(const float *input1, const float *input2, float *output, int m, int n, int k) {
   const int col_idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int row_idx = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -78,24 +59,14 @@ __global__ void matmul_kernel_v2(const float *input1, const float *input2, float
     output[row_idx * k + col_idx] = total;
 }
 
-torch::Tensor matmul_v2(torch::Tensor input1, torch::Tensor input2) {
-  CHECK_INPUT(input1);
-  CHECK_INPUT(input2);
-  int m = input1.size(0);
-  int n = input1.size(1);
-  TORCH_CHECK(n == input2.size(0), "dim1 of input2 should be equal to dim2 of input1");
-  int k = input2.size(1);
-  torch::Tensor output = torch::empty({m, k}, input1.options());
+void matmul_v2_launch(const float *input1, const float *input2, float *output, int m, int n, int k) {
+  int BLOCK_SIZE = 32;
+  dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
+  dim3 grid_size(cdiv(k, BLOCK_SIZE), cdiv(m, BLOCK_SIZE));
 
-  dim3 n_threads(BLOCK_SIZE, BLOCK_SIZE);
-  dim3 n_blocks(cdiv(k, BLOCK_SIZE), cdiv(m, BLOCK_SIZE));
-  matmul_kernel_v2<<<n_blocks, n_threads>>>(input1.data_ptr<float>(), input2.data_ptr<float>(),
-                                            output.data_ptr<float>(), m, n, k);
-
-  return output;
-}
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("matmul_v1", &matmul_v1, "Matrix multiplication v1");
-  m.def("matmul_v2", &matmul_v2, "Matrix multiplication v2");
+  switch (BLOCK_SIZE) {
+  case 32:
+    matmul_v2_kernel<32><<<grid_size, block_size>>>(input1, input2, output, m, n, k);
+    break;
+  }
 }
