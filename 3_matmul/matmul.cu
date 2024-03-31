@@ -2,6 +2,9 @@
 
 #define cdiv(a, b) ((a) + (b)-1) / (b)
 
+// warpSize is not accessible from host code
+constexpr int WARP_SIZE = 32;
+
 __global__ void matmul_v1_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -11,17 +14,26 @@ __global__ void matmul_v1_kernel(const float *A, const float *B, float *C, int M
 
   float total = 0.0f;
 
+  // broadcast read from A since each warp reads the same A value
+  // coalesce read from B since each warp reads consecutive B values
   for (int i = 0; i < K; i++)
     total += A[row * K + i] * B[i * N + col];
 
+  // coalesce write to C since each warp writes consecutive C values
   C[row * N + col] = total;
 }
 
 void matmul_v1_launch(const float *A, const float *B, float *C, int M, int N, int K) {
+  // determine optimal block size at runtime
+  int block_size_total;
+  int min_grid_size; // we don't need this
+  cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &block_size_total, matmul_v1_kernel, 0, 0);
+
   // NOTE: blockIdx.x is the fastest changing dimension. thus, we assign column index to it
   // intuitively, block dimensions will be PyTorch's dimensions in reverse.
-  dim3 block_size(16, 16);
-  dim3 grid_size(cdiv(N, 16), cdiv(M, 16));
+  // NOTE: blockDim.x must be multiple of 32 (warpSize) to ensure coalesce memory access
+  dim3 block_size(WARP_SIZE, block_size_total / WARP_SIZE);
+  dim3 grid_size(cdiv(N, WARP_SIZE), cdiv(M, block_size.y));
   matmul_v1_kernel<<<grid_size, block_size>>>(A, B, C, M, N, K);
 }
 
