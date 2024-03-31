@@ -12,17 +12,17 @@ void matmul_v2_launch(const float *input1, const float *input2, float *output, i
 template <int version> torch::Tensor matmul(torch::Tensor input1, torch::Tensor input2) {
   CHECK_INPUT(input1);
   CHECK_INPUT(input2);
-  int m = input1.size(0);
-  int n = input1.size(1);
-  TORCH_CHECK(n == input2.size(0), "dim1 of input2 should be equal to dim2 of input1");
-  int k = input2.size(1);
-  torch::Tensor output = torch::empty({m, k}, input1.options());
+  TORCH_CHECK(input1.size(1) == input2.size(0), "dim1 of input2 should be equal to dim2 of input1");
+  int M = input1.size(0);
+  int K = input1.size(1);
+  int N = input2.size(1);
+  torch::Tensor output = torch::empty({M, N}, input1.options());
 
   switch (version) {
   case 1:
-    matmul_v1_launch(input1.data_ptr<float>(), input2.data_ptr<float>(), output.data_ptr<float>(), m, n, k);
+    matmul_v1_launch(input1.data_ptr<float>(), input2.data_ptr<float>(), output.data_ptr<float>(), M, N, K);
   case 2:
-    matmul_v2_launch(input1.data_ptr<float>(), input2.data_ptr<float>(), output.data_ptr<float>(), m, n, k);
+    matmul_v2_launch(input1.data_ptr<float>(), input2.data_ptr<float>(), output.data_ptr<float>(), M, N, K);
   }
   return output;
 }
