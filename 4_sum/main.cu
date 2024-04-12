@@ -5,6 +5,7 @@ void sum_v1(const float *input, float *output, int m, int n, int block_size);
 void sum_v2(const float *input, float *output, int m, int n, int block_size);
 void sum_v3(const float *input, float *output, int m, int n, int block_size, int coarse_factor);
 void sum_v4(const float *input, float *output, int m, int n, int block_size, int coarse_factor);
+void sum_v5(const float *input, float *output, int m, int n, int block_size, int coarse_factor);
 
 int main() {
   // Size of the input data

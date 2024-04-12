@@ -164,3 +164,44 @@ void sum_v4(const float *input, float *output, int m, int n, int block_size, int
   int shmem_size = sizeof(float) * block_size;
   sum_v4_kernel<<<grid_size, block_size, shmem_size>>>(input, output, m, n, coarse_factor);
 }
+
+// vectorized load. n must be divisible by 4
+__global__ void sum_v5_kernel(const float *input, float *output, int m, int n, int coarse_factor) {
+  cg::thread_block block = cg::this_thread_block();
+
+  const int row = blockIdx.y;
+  const int tid = threadIdx.x;
+  extern __shared__ float shmem[];
+  input += row * n;
+
+  // thread-level reduction w/ vectorized load
+  float sum = 0.0f;
+  for (int tile = 0; tile < coarse_factor; tile++) {
+    int input_col = (blockIdx.x * coarse_factor + tile) * blockDim.x + tid;
+    if (input_col < n / 4) {
+      float4 in = reinterpret_cast<const float4 *>(input)[input_col];
+      sum += in.x + in.y + in.z + in.w;
+    }
+  }
+
+  for (int stride = block.size() / 2; stride >= 32; stride /= 2) {
+    shmem[tid] = sum;
+    block.sync();
+    if (tid < stride)
+      sum += shmem[tid + stride];
+    block.sync();
+  }
+
+  cg::thread_block_tile warp = cg::tiled_partition<32>(block);
+  sum = cg::reduce(warp, sum, cg::plus<float>());
+
+  // grid-level reduction
+  if (block.thread_rank() == 0)
+    atomicAdd(output + row, sum);
+}
+
+void sum_v5(const float *input, float *output, int m, int n, int block_size, int coarse_factor) {
+  dim3 grid_size(cdiv(n, block_size * coarse_factor * 4), m);
+  int shmem_size = sizeof(float) * block_size;
+  sum_v5_kernel<<<grid_size, block_size, shmem_size>>>(input, output, m, n, coarse_factor);
+}

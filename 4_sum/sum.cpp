@@ -10,6 +10,7 @@ void sum_v1(const float *input, float *output, int m, int n, int block_size);
 void sum_v2(const float *input, float *output, int m, int n, int block_size);
 void sum_v3(const float *input, float *output, int m, int n, int block_size, int coarse_factor);
 void sum_v4(const float *input, float *output, int m, int n, int block_size, int coarse_factor);
+void sum_v5(const float *input, float *output, int m, int n, int block_size, int coarse_factor);
 
 torch::Tensor sum_v1_pt(torch::Tensor input) {
   CHECK_INPUT(input);
@@ -57,9 +58,22 @@ torch::Tensor sum_v4_pt(torch::Tensor input) {
   return output;
 }
 
+torch::Tensor sum_v5_pt(torch::Tensor input) {
+  CHECK_INPUT(input);
+  int m = input.size(0);
+  int n = input.size(1);
+  torch::Tensor output = torch::zeros({m}, input.options());
+
+  int block_size = 256;
+  int coarse_factor = 4;
+  sum_v5(input.data_ptr<float>(), output.data_ptr<float>(), m, n, block_size, coarse_factor);
+  return output;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("sum_v1", &sum_v1_pt, "Sum v1");
   m.def("sum_v2", &sum_v2_pt, "Sum v2");
   m.def("sum_v3", &sum_v3_pt, "Sum v3");
   m.def("sum_v4", &sum_v4_pt, "Sum v4");
+  m.def("sum_v5", &sum_v5_pt, "Sum v5");
 }
