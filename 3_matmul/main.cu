@@ -1,9 +1,8 @@
 #include <cuda.h>
 #include <iostream>
 
-__global__ void matmul_v1_kernel(const float *A, const float *B, float *C, int M, int N, int K);
-void matmul_v1_launch(const float *A, const float *B, float *C, int M, int N, int K);
-void matmul_v2_launch(const float *A, const float *B, float *C, int M, int N, int K);
+void matmul_v1(const float *A, const float *B, float *C, int M, int N, int K);
+void matmul_v2(const float *A, const float *B, float *C, int M, int N, int K);
 
 int main() {
   // Size of the input data
@@ -34,11 +33,17 @@ int main() {
   cudaMemcpy(d_B, B, N * N * sizeof(float), cudaMemcpyHostToDevice);
 
   // Launch the kernel
-  matmul_v1_launch(d_A, d_B, d_C, N, N, N);
-  matmul_v2_launch(d_A, d_B, d_C, N, N, N);
+  // matmul_v1(d_A, d_B, d_C, N, N, N);
+  matmul_v2(d_A, d_B, d_C, N, N, N);
 
   // Copy result back to host
   cudaMemcpy(C, d_C, N * N * sizeof(float), cudaMemcpyDeviceToHost);
+
+  // Check results
+  for (int col = 0; col < N; col++)
+    for (int row = 0; row < N; row++)
+      if (C[row * N + col] != N)
+        std::cout << "Wrong result at (" << row << ", " << col << ")" << std::endl;
 
   // Cleanup
   delete[] A;
