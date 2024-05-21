@@ -14,6 +14,7 @@ Name | Description
 3\. [Matrix multiplication](3_matmul/) | Tiling.
 4\. [Sum](4_sum/) | Reduction in general.  Prepare for softmax (max and sum).
 5\. [Softmax](5_softmax) | TODO
+6\. [FP6](6_fp6) | FP6 primitives (FP32/FP16/BF16->FP6 and vice versa).
 ... optimizers, quantization, flash attention | TODO
 
 To profile a CUDA kernel, run
