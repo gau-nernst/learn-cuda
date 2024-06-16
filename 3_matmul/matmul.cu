@@ -155,8 +155,8 @@ __global__ void matmul_v3_kernel(const float *A, const float *B, float *C, int M
   // write (TILE_M, TILE_N) to C
   for (int idx = tid; idx < TILE_M * TILE_N; idx += BLOCK_SIZE) {
     const int local_idx = idx / BLOCK_SIZE;
-    const int col = idx % TILE_N;
     const int row = idx / TILE_N;
+    const int col = idx % TILE_N;
 
     if (row < (M - m_offset) && col < (N - n_offset))
       C[row * N + col] = acc[local_idx];
@@ -164,6 +164,8 @@ __global__ void matmul_v3_kernel(const float *A, const float *B, float *C, int M
 }
 
 void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K) {
+  // we are limited by the amount of shared memory
+  // 128 * 32 * 2 * 4 = 32kB
   const int TILE_M = 128, TILE_N = 128, TILE_K = 32;
   const int block_size = 256;
   const int grid_size = cdiv(M * N, TILE_M * TILE_N);
