@@ -1,6 +1,8 @@
 #include <cmath>
 
-#define cdiv(a, b) ((a) + (b)-1) / (b)
+__host__ __device__ int cdiv(int a, int b) {
+  return (a + b - 1) / b;
+}
 
 __global__ void matmul_v1_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
   const int col = blockIdx.x * blockDim.x + threadIdx.x;

@@ -15,7 +15,7 @@ Name | Description
 4\. [Sum](4_sum/) | Reduction in general.  Prepare for softmax (max and sum).
 5\. [Softmax](5_softmax) | TODO
 6\. [FP6](6_fp6) | FP6 primitives (FP32/FP16/BF16<->FP6).
-... optimizers, quantization, flash attention | TODO
+... optimizers, quantization, flash attention, gemv (split-K, stream-K) | TODO
 
 To profile a CUDA kernel, run
 
