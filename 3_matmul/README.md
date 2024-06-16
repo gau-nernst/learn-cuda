@@ -7,8 +7,9 @@ Resources:
 
 For M = N = K = 4096
 
-Kernel name                      | Latency (ms) | % of CuBLAS
----------------------------------|--------------|-------------
-CuBLAS (via PyTorch)             |              |        100%
-v1 (naive 1 row dot 1 column)    |
-v2 (block read to shared memory) |
+Kernel name                            | Latency (ms) | % of CuBLAS | Bandwidth (GB/s)
+---------------------------------------|--------------|-------------|-----------------
+CuBLAS (via PyTorch)                   |              |        100% |
+v1 (naive 1 row dot 1 column)          |
+v2 (shared memory cache with 2D block) |
+v3 (thread coarsening)                 |

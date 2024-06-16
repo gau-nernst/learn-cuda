@@ -41,9 +41,11 @@ int main() {
 
   // Check results
   for (int col = 0; col < N; col++)
-    for (int row = 0; row < N; row++)
-      if (C[row * N + col] != N)
-        std::cout << "Wrong result at (" << row << ", " << col << ")" << std::endl;
+    for (int row = 0; row < N; row++) {
+      float val = C[row * N + col];
+      if (val != N)
+        std::cout << "Wrong result " << val << " at (" << row << ", " << col << ")" << std::endl;
+  }
 
   // Cleanup
   delete[] A;

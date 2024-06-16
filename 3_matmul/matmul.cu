@@ -1,9 +1,11 @@
 #include <cmath>
+#include <stdio.h>
 
-__host__ __device__ int cdiv(int a, int b) {
-  return (a + b - 1) / b;
-}
+#define PRINT_IF(cond, ...) if (cond) printf(__VA_ARGS__);
 
+__host__ __device__ constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
+
+// naive kernel. 1 row dot 1 column
 __global__ void matmul_v1_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -39,38 +41,47 @@ void matmul_v1(const float *A, const float *B, float *C, int M, int N, int K) {
 // we can't use a larger block size since we are limited by 1024 threads per block
 constexpr int V2_BLOCK_SIZE = 32;
 
+// read 2D block into shared memory for caching
 __global__ void matmul_v2_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
-  const int C_col = blockIdx.x * blockDim.x + threadIdx.x;
-  const int C_row = blockIdx.y * blockDim.y + threadIdx.y;
+  const int tid_x = threadIdx.x;
+  const int tid_y = threadIdx.y;
+
+  const int m_offset = blockIdx.y * V2_BLOCK_SIZE;
+  const int n_offset = blockIdx.x * V2_BLOCK_SIZE;
+
+  A += m_offset * K;             // skip x rows
+  B += n_offset;                 // skip y columns
+  C += m_offset * N + n_offset;  // skip x rows and y columns
 
   // we cannot return early since all threads need to synchronize
   __shared__ float A_shmem[V2_BLOCK_SIZE][V2_BLOCK_SIZE];
   __shared__ float B_shmem[V2_BLOCK_SIZE][V2_BLOCK_SIZE];
-  float total = 0.0f;
+  float acc = 0.0f;
 
-  // we move block by block along K dim 
-  for (int k_start = 0; k_start < K; k_start += V2_BLOCK_SIZE) {
+  // we move block by block along K dim
+  for (int k_offset = 0; k_offset < K; k_offset += V2_BLOCK_SIZE) {
     // load data from global memory (DDR/HBM) to shared memory (SRAM)
     // notice now each thread only loads 2 x n_blocks elements
     // coalesced memory read for both A and B
-    int A_col = k_start + threadIdx.x;
-    int B_row = k_start + threadIdx.y;
-    A_shmem[threadIdx.y][threadIdx.x] = C_row < M && A_col < K ? A[C_row * K + A_col] : 0.0f;
-    B_shmem[threadIdx.y][threadIdx.x] = B_row < K && C_col < N ? B[B_row * N + C_col] : 0.0f;
+    A_shmem[tid_y][tid_x] = tid_y < (M - m_offset) && tid_x < (K - k_offset) ? A[tid_y * K + tid_x] : 0.0f;
+    B_shmem[tid_y][tid_x] = tid_y < (K - k_offset) && tid_x < (N - n_offset) ? B[tid_y * N + tid_x] : 0.0f;
 
     // wait for all threads in a block to load data
     __syncthreads();
 
     // compute from shared memory
-    for (int tile_k = 0; tile_k < V2_BLOCK_SIZE; tile_k++)
-      total += A_shmem[threadIdx.y][tile_k] * B_shmem[tile_k][threadIdx.x];
+    for (int k = 0; k < V2_BLOCK_SIZE; k++)
+      acc += A_shmem[tid_y][k] * B_shmem[k][tid_x];
 
     // wait to finish before moving to the next tile
     __syncthreads();
+
+    A += V2_BLOCK_SIZE;      // stride 1 in K dim
+    B += V2_BLOCK_SIZE * N;  // stride N in K dim
   }
 
-  if (C_row < M && C_col < N)
-    C[C_row * N + C_col] = total;
+  if (tid_y < (M - m_offset) && tid_x < (N - n_offset))
+    C[tid_y * N + tid_x] = acc;
 }
 
 void matmul_v2(const float *A, const float *B, float *C, int M, int N, int K) {
@@ -79,65 +90,82 @@ void matmul_v2(const float *A, const float *B, float *C, int M, int N, int K) {
   matmul_v2_kernel<<<grid_size, block_size>>>(A, B, C, M, N, K);
 }
 
-// we want to load a tile of size (height, width) from global to shared memory
-// assume there are enough threads (each thread loads 1 element)
-template <int height, int width>
-__device__ void load_shared_memory(const float *in, int in_max_row, int in_max_col, int row_stride,
-                                   float out[height][width], int tid) {
-  const int col = tid % width;
-  const int row = tid / width;
-  out[row][col] = row < in_max_row && col < in_max_col ? in[row * row_stride + col] : 0.0f;
+// NOTE: to make it clear, BLOCK now only refers to block of threads. TILE refers to tile of data.
+// we want to load a (HEIGHT, WIDTH) tile from global to shared memory.
+// just load a BLOCK_SIZE of data until the whole tile is loaded.
+template <int HEIGHT, int WIDTH, int BLOCK_SIZE>
+__device__ void load_shmem(const float *in, int in_row_stride, int in_max_row, int in_max_col,
+                           float out[HEIGHT][WIDTH], int tid) {
+  for (int idx = tid; idx < HEIGHT * WIDTH; idx += BLOCK_SIZE) {
+    const int row = idx / WIDTH;
+    const int col = idx % WIDTH;
+    out[row][col] = row < in_max_row && col < in_max_col ? in[row * in_row_stride + col] : 0.0f;
+  }
 }
 
-// 1D thread tiling
-// we only use 1D threadIdx so that we can partition row/column differently for A and B tiles.
-// NOTE: TILE_SIZE is a multiple of TILE_SIZE_K
-template <int TILE_SIZE, int TILE_SIZE_K>
+// thread coarsening
+template <int TILE_M, int TILE_N, int TILE_K, int BLOCK_SIZE>
 __global__ void matmul_v3_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
   const int tid = threadIdx.x;
-  const int row_start = blockIdx.y * TILE_SIZE;
-  const int col_start = blockIdx.x * TILE_SIZE;
-  A += row_start * K;
-  B += col_start;
-  C += row_start * N + col_start;
+  const int block_id = blockIdx.x;
 
-  __shared__ float A_tile[TILE_SIZE][TILE_SIZE_K]; // vertical rectangle
-  __shared__ float B_tile[TILE_SIZE_K][TILE_SIZE]; // horizontal rectangle
+  // assign block linearly
+  const int grid_width = cdiv(N, TILE_N);
+  const int block_id_m = block_id / grid_width;
+  const int block_id_n = block_id % grid_width;
 
-  // each block calculates a (TILE_SIZE, TILE_SIZE) tile of C
-  // each block has (TILE_SIZE x TILE_SIZE_K) threads -> each thread calculates multiple elements
-  // each thread calculates consecutive elements in a column [tile_row_start, tile_row_start + n_elems_per_thread)
-  const int n_elems_per_thread = TILE_SIZE / TILE_SIZE_K;
-  const int tile_row_start = tid / TILE_SIZE * n_elems_per_thread;
-  const int tile_col = tid % TILE_SIZE;
-  float total[n_elems_per_thread] = {0.0};
+  const int m_offset = block_id_m * TILE_M;
+  const int n_offset = block_id_n * TILE_N;
 
-  for (int k_start = 0; k_start < K; k_start += TILE_SIZE_K) {
-    load_shared_memory<TILE_SIZE, TILE_SIZE_K>(A, M - row_start, K - k_start, K, A_tile, tid);
-    load_shared_memory<TILE_SIZE_K, TILE_SIZE>(B, K - k_start, N - col_start, N, B_tile, tid);
+  A += m_offset * K;
+  B += n_offset;
+  C += m_offset * N + n_offset;
+
+  __shared__ float A_shmem[TILE_M][TILE_K];
+  __shared__ float B_shmem[TILE_K][TILE_N];
+
+  // each thread is responsible for (TILE_M * TILE_N / BLOCK_SIZE) output elements
+  float acc[TILE_M * TILE_N / BLOCK_SIZE] = {0.0f};
+
+  // we move block by block along K dim
+  for (int k_offset = 0; k_offset < K; k_offset += TILE_K) {
+    // decouple global memory read, so we don't need to care about assigning which thread
+    // to read which element.
+    // load (TILE_M, TILE_K) from A and (TILE_K, TILE_N) from B
+    load_shmem<TILE_M, TILE_K, BLOCK_SIZE>(A, K, M - m_offset, K - k_offset, A_shmem, tid);
+    load_shmem<TILE_K, TILE_N, BLOCK_SIZE>(B, N, K - k_offset, N - n_offset, B_shmem, tid);
     __syncthreads();
 
-    A += TILE_SIZE_K;
-    B += TILE_SIZE_K * N;
+    // do a mini matmul of (TILE_M, TILE_K) x (TILE_K, TILE_N) = (TILE_M, TILE_N)
+    // simply assign a BLOCK_SIZE of threads to a BLOCK_SIZE of elements in output tile
+    for (int idx = tid; idx < TILE_M * TILE_N; idx += BLOCK_SIZE) {
+      const int local_idx = idx / BLOCK_SIZE;
+      const int col = idx % TILE_N;
+      const int row = idx / TILE_N;
 
-    for (int tile_k = 0; tile_k < TILE_SIZE_K; tile_k++) {
-      const float B_val = B_tile[tile_k][tile_col]; // cache B_val in register
-
-      for (int out_idx = 0; out_idx < n_elems_per_thread; out_idx++)
-        total[out_idx] += A_tile[tile_row_start + out_idx][tile_k] * B_val;
+      for (int k = 0; k < TILE_K; k++)
+        acc[local_idx] += A_shmem[row][k] * B_shmem[k][col];
     }
     __syncthreads();
+
+    A += TILE_K;
+    B += TILE_K * N;
   }
 
-  for (int out_idx = 0; out_idx < n_elems_per_thread; out_idx++)
-    if (row_start + tile_row_start + out_idx < M && col_start + tile_col < N)
-      C[(tile_row_start + out_idx) * N + tile_col] = total[out_idx];
+  // write (TILE_M, TILE_N) to C
+  for (int idx = tid; idx < TILE_M * TILE_N; idx += BLOCK_SIZE) {
+    const int local_idx = idx / BLOCK_SIZE;
+    const int col = idx % TILE_N;
+    const int row = idx / TILE_N;
+
+    if (row < (M - m_offset) && col < (N - n_offset))
+      C[row * N + col] = acc[local_idx];
+  }
 }
 
 void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K) {
-  const int TILE_SIZE = 64;
-  const int TILE_SIZE_K = 8;
-  dim3 block_size(TILE_SIZE * TILE_SIZE_K);
-  dim3 grid_size(cdiv(N, TILE_SIZE), cdiv(M, TILE_SIZE));
-  matmul_v3_kernel<TILE_SIZE, TILE_SIZE_K><<<grid_size, block_size>>>(A, B, C, M, N, K);
+  const int TILE_M = 128, TILE_N = 128, TILE_K = 32;
+  const int block_size = 256;
+  const int grid_size = cdiv(M * N, TILE_M * TILE_N);
+  matmul_v3_kernel<TILE_M, TILE_N, TILE_K, block_size><<<grid_size, block_size>>>(A, B, C, M, N, K);
 }
