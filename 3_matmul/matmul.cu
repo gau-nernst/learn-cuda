@@ -171,3 +171,79 @@ void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K) {
   const int grid_size = cdiv(M * N, TILE_M * TILE_N);
   matmul_v3_kernel<TILE_M, TILE_N, TILE_K, block_size><<<grid_size, block_size>>>(A, B, C, M, N, K);
 }
+
+// register cache with 2D thread tiling
+// only mini matmul is different from v3
+template <int TILE_M, int TILE_N, int TILE_K, int BLOCK_SIZE, int THREAD_N>
+__global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
+  const int tid = threadIdx.x;
+  const int block_id = blockIdx.x;
+
+  const int grid_width = cdiv(N, TILE_N);
+  const int block_id_m = block_id / grid_width;
+  const int block_id_n = block_id % grid_width;
+
+  const int m_offset = block_id_m * TILE_M;
+  const int n_offset = block_id_n * TILE_N;
+
+  A += m_offset * K;
+  B += n_offset;
+
+  __shared__ float A_shmem[TILE_M][TILE_K];
+  __shared__ float B_shmem[TILE_K][TILE_N];
+
+  // each thread will calculate (THREAD_M, THREAD_N) mini-tile of output (TILE_M, TILE_N) tile
+  constexpr int THREAD_M = TILE_M * TILE_N / BLOCK_SIZE / THREAD_N;
+  float acc[THREAD_M][THREAD_N] = {0.0f};
+
+  const int mini_grid_width = TILE_N / THREAD_N;
+  const int mini_tile_id_m = tid / mini_grid_width;
+  const int mini_tile_id_n = tid % mini_grid_width;
+
+  const int mini_tile_offset_m = mini_tile_id_m * THREAD_M;
+  const int mini_tile_offset_n = mini_tile_id_n * THREAD_N;
+
+  const float *A_mini_tile = reinterpret_cast<const float *>(A_shmem) + mini_tile_offset_m * TILE_K;
+  const float *B_mini_tile = reinterpret_cast<const float *>(B_shmem) + mini_tile_offset_n;
+
+  for (int k_offset = 0; k_offset < K; k_offset += TILE_K) {
+    load_shmem<TILE_M, TILE_K, BLOCK_SIZE>(A, K, M - m_offset, K - k_offset, A_shmem, tid);
+    load_shmem<TILE_K, TILE_N, BLOCK_SIZE>(B, N, K - k_offset, N - n_offset, B_shmem, tid);
+    __syncthreads();
+
+    // mini-matmul with mini-tile
+    // notice that we put k as the outermost loop.
+    // column of A_mini_tile and row of B_mini_tile is cached.
+    // there is shared memory bank conflict
+    for (int k = 0; k < TILE_K; k++) {
+      for (int m = 0; m < THREAD_M; m++) {
+        for (int n = 0; n < THREAD_N; n++) {
+          acc[m][n] += A_mini_tile[m * TILE_K + k] * B_mini_tile[k * TILE_N + n];
+        }
+      }
+    }
+    __syncthreads();
+
+    A += TILE_K;
+    B += TILE_K * N;
+  }
+
+  C += (m_offset + mini_tile_offset_m) * N + (n_offset + mini_tile_offset_n);
+
+  // uncoalesced memory write
+  for (int m = 0; m < THREAD_M; m++) {
+    for (int n = 0; n < THREAD_N; n++) {
+      if (m < (M - (m_offset + mini_tile_offset_m)) && n < (N - (n_offset + mini_tile_offset_n))) {
+        C[m * N + n] = acc[m][n];
+      }
+    }
+  }
+}
+
+void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K) {
+  const int TILE_M = 128, TILE_N = 128, TILE_K = 32;
+  const int THREAD_N = 8;  // THREAD_M will be 8
+  const int block_size = 256;
+  const int grid_size = cdiv(M * N, TILE_M * TILE_N);
+  matmul_v4_kernel<TILE_M, TILE_N, TILE_K, block_size, THREAD_N><<<grid_size, block_size>>>(A, B, C, M, N, K);
+}

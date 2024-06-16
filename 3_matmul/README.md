@@ -11,5 +11,7 @@ Kernel name                                                        | Latency (ms
 -------------------------------------------------------------------|--------------|-------------|------------------
 CuBLAS (via PyTorch) `cutlass_80_simt_sgemm_256x128_8x4_nn_align1` |         4.77 |     100.00% |           104.25
 v1 (naive 1 row dot 1 column)                                      |        56.21 |       8.49% |           195.98
-v2 (shared memory cache with 2D block)                             |        44.38 |      10.75% |           387.27
+v2 (shared memory cache with 2D block tiling)                      |        44.38 |      10.75% |           387.27
 v3 (thread coarsening)                                             |        39.03 |      12.22% |            38.49
+v4 (register cache with 2D thread tiling)                          |         8.91 |      53.53% |            77.00
+v5 (warp tiling)
