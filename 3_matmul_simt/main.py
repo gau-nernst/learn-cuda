@@ -13,8 +13,8 @@ module = torch.utils.cpp_extension.load(
 )
 
 # for large n, there will be a larger deviation, since sum of many small elements are not accurate
-input1 = torch.randn(4096, 4096, device="cuda")
-input2 = torch.randn(4096, 4096, device="cuda")
+input1 = torch.randn(4096, 4096).cuda()
+input2 = torch.randn(4096, 4096).cuda()
 
 output_v1 = module.matmul_v1(input1, input2)
 output_v2 = module.matmul_v2(input1, input2)
