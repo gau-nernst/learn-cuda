@@ -254,7 +254,7 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
 
 void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K) {
   const int TILE_M = 128, TILE_N = 128, TILE_K = 32;
-  const int THREAD_N = 8;  // THREAD_M will be 8
+  const int THREAD_N = 32;  // THREAD_M will be 2
   const int block_size = 256;
   const int grid_size = cdiv(M * N, TILE_M * TILE_N);
   matmul_v4_kernel<TILE_M, TILE_N, TILE_K, block_size, THREAD_N><<<grid_size, block_size>>>(A, B, C, M, N, K);
