@@ -4,6 +4,7 @@ Resources:
 - https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#shared-memory
 - https://siboehm.com/articles/22/CUDA-MMM
 - https://leimao.github.io/article/CUDA-Matrix-Multiplication-Optimization/
+- https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md
 
 For M = N = K = 4096, 4070Ti SUPER, compile with `-O3 --use_fast_math`
 
