@@ -38,28 +38,26 @@ void matmul_v1(const float *A, const float *B, float *C, int M, int N, int K) {
   matmul_v1_kernel<<<grid_size, block_size>>>(A, B, C, M, N, K);
 }
 
-// we can't use a larger block size since we are limited by 1024 threads per block
-constexpr int V2_BLOCK_SIZE = 32;
-
 // read 2D block into shared memory for caching
+template <int BLOCK_SIZE>
 __global__ void matmul_v2_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
   const int tid_x = threadIdx.x;
   const int tid_y = threadIdx.y;
 
-  const int m_offset = blockIdx.y * V2_BLOCK_SIZE;
-  const int n_offset = blockIdx.x * V2_BLOCK_SIZE;
+  const int m_offset = blockIdx.y * BLOCK_SIZE;
+  const int n_offset = blockIdx.x * BLOCK_SIZE;
 
   A += m_offset * K;             // skip x rows
   B += n_offset;                 // skip y columns
   C += m_offset * N + n_offset;  // skip x rows and y columns
 
   // we cannot return early since all threads need to synchronize
-  __shared__ float A_shmem[V2_BLOCK_SIZE][V2_BLOCK_SIZE];
-  __shared__ float B_shmem[V2_BLOCK_SIZE][V2_BLOCK_SIZE];
+  __shared__ float A_shmem[BLOCK_SIZE][BLOCK_SIZE];
+  __shared__ float B_shmem[BLOCK_SIZE][BLOCK_SIZE];
   float acc = 0.0f;
 
   // we move block by block along K dim
-  for (int k_offset = 0; k_offset < K; k_offset += V2_BLOCK_SIZE) {
+  for (int k_offset = 0; k_offset < K; k_offset += BLOCK_SIZE) {
     // load data from global memory (DDR/HBM) to shared memory (SRAM)
     // notice now each thread only loads 2 x n_blocks elements
     // coalesced memory read for both A and B
@@ -70,14 +68,14 @@ __global__ void matmul_v2_kernel(const float *A, const float *B, float *C, int M
     __syncthreads();
 
     // compute from shared memory
-    for (int k = 0; k < V2_BLOCK_SIZE; k++)
+    for (int k = 0; k < BLOCK_SIZE; k++)
       acc += A_shmem[tid_y][k] * B_shmem[k][tid_x];
 
     // wait to finish before moving to the next tile
     __syncthreads();
 
-    A += V2_BLOCK_SIZE;      // stride 1 in K dim
-    B += V2_BLOCK_SIZE * N;  // stride N in K dim
+    A += BLOCK_SIZE;      // stride 1 in K dim
+    B += BLOCK_SIZE * N;  // stride N in K dim
   }
 
   if (tid_y < (M - m_offset) && tid_x < (N - n_offset))
@@ -85,9 +83,11 @@ __global__ void matmul_v2_kernel(const float *A, const float *B, float *C, int M
 }
 
 void matmul_v2(const float *A, const float *B, float *C, int M, int N, int K) {
-  dim3 block_size(V2_BLOCK_SIZE, V2_BLOCK_SIZE);
-  dim3 grid_size(cdiv(N, V2_BLOCK_SIZE), cdiv(M, V2_BLOCK_SIZE));
-  matmul_v2_kernel<<<grid_size, block_size>>>(A, B, C, M, N, K);
+  // we can't use a larger block size since we are limited by 1024 threads per block
+  constexpr int BLOCK_SIZE = 32;
+  dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
+  dim3 grid_size(cdiv(N, BLOCK_SIZE), cdiv(M, BLOCK_SIZE));
+  matmul_v2_kernel<BLOCK_SIZE><<<grid_size, block_size>>>(A, B, C, M, N, K);
 }
 
 // NOTE: to make it clear, BLOCK now only refers to block of threads. TILE refers to tile of data.
@@ -213,14 +213,21 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
 
     // mini-matmul with mini-tile
     // notice that we put k as the outermost loop.
-    // column of A_mini_tile and row of B_mini_tile is cached.
+    // column of A_mini_tile and row of B_mini_tile is cached to A_reg[] and B_reg[].
     // there is shared memory bank conflict
     for (int k = 0; k < TILE_K; k++) {
-      for (int m = 0; m < THREAD_M; m++) {
-        for (int n = 0; n < THREAD_N; n++) {
-          acc[m][n] += A_mini_tile[m * TILE_K + k] * B_mini_tile[k * TILE_N + n];
-        }
-      }
+      float A_reg[THREAD_M];
+      float B_reg[THREAD_N];
+
+      for (int m = 0; m < THREAD_M; m++)
+        A_reg[m] = A_mini_tile[m * TILE_K + k];
+      
+      for (int n = 0; n < THREAD_N; n++)
+        B_reg[n] = B_mini_tile[k * TILE_N + n];
+
+      for (int m = 0; m < THREAD_M; m++)
+        for (int n = 0; n < THREAD_N; n++)
+          acc[m][n] += A_reg[m] * B[n];
     }
     __syncthreads();
 
@@ -231,6 +238,7 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
   C += (m_offset + mini_tile_offset_m) * N + (n_offset + mini_tile_offset_n);
 
   // uncoalesced memory write
+  // fixing it doesn't seem to make the kernel faster.
   for (int m = 0; m < THREAD_M; m++) {
     for (int n = 0; n < THREAD_N; n++) {
       if (m < (M - (m_offset + mini_tile_offset_m)) && n < (N - (n_offset + mini_tile_offset_n))) {
