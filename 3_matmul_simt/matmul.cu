@@ -236,14 +236,18 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
   }
 
   C += (m_offset + mini_tile_offset_m) * N + (n_offset + mini_tile_offset_n);
+  float4 *C_float4 = reinterpret_cast<float4 *>(C);
 
   // uncoalesced memory write
   // fixing it doesn't seem to make the kernel faster.
+  // using vectorized write will help with uncoalesced memory write (issue fewer txn).
   for (int m = 0; m < THREAD_M; m++) {
-    for (int n = 0; n < THREAD_N; n++) {
-      if (m < (M - (m_offset + mini_tile_offset_m)) && n < (N - (n_offset + mini_tile_offset_n))) {
-        C[m * N + n] = acc[m][n];
-      }
+    for (int n = 0; n < THREAD_N; n += 4) {
+      float4 tmp = {acc[m][n], acc[m][n+1], acc[m][n+2], acc[m][n+3]};
+
+      // TODO: handle n % 4 != 0
+      if (m < (M - (m_offset + mini_tile_offset_m)) && n < (N - (n_offset + mini_tile_offset_n)))
+        C_float4[(m * N + n) / 4] = tmp;
     }
   }
 }
