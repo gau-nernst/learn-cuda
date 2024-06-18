@@ -173,7 +173,7 @@ void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K) {
 
 // register cache with 2D thread tiling
 // only mini matmul is different from v3
-template <int BLOCK_SIZE, int BLOCK_M, int BLOCK_N, int BLOCK_K, int THREAD_N>
+template <int BLOCK_SIZE, int BLOCK_M, int BLOCK_N, int BLOCK_K, int THREAD_N, bool VECTORIZED_WRITE>
 __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
   const int tid = threadIdx.x;
   const int block_id = blockIdx.x;
@@ -192,12 +192,13 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
   __shared__ float B_shmem[BLOCK_K][BLOCK_N];
 
   // each thread will calculate (THREAD_M, THREAD_N) thread-tile of output (BLOCK_M, BLOCK_N) block-tile
-  constexpr int THREAD_M = BLOCK_M * BLOCK_N / BLOCK_SIZE / THREAD_N;
+  constexpr int num_thread_tiles = BLOCK_M * BLOCK_N / BLOCK_SIZE;
+  constexpr int THREAD_M = num_thread_tiles / THREAD_N;
   float acc[THREAD_M][THREAD_N] = {0.0f};
 
-  const int mini_grid_width = BLOCK_N / THREAD_N;
-  const int thread_tile_id_m = tid / mini_grid_width;
-  const int thread_tile_id_n = tid % mini_grid_width;
+  const int thread_tile_grid_width = BLOCK_N / THREAD_N;
+  const int thread_tile_id_m = tid / thread_tile_grid_width;
+  const int thread_tile_id_n = tid % thread_tile_grid_width;
 
   const int thread_tile_offset_m = thread_tile_id_m * THREAD_M;
   const int thread_tile_offset_n = thread_tile_id_n * THREAD_N;
@@ -235,26 +236,43 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
   }
 
   C += (offset_m + thread_tile_offset_m) * N + (offset_n + thread_tile_offset_n);
-  float4 *C_float4 = reinterpret_cast<float4 *>(C);
 
   // uncoalesced memory write
   // fixing it doesn't seem to make the kernel faster.
-  // using vectorized write will help with uncoalesced memory write (issue fewer txn).
-  for (int m = 0; m < THREAD_M; m++) {
-    for (int n = 0; n < THREAD_N; n += 4) {
-      float4 tmp = {acc[m][n], acc[m][n+1], acc[m][n+2], acc[m][n+3]};
+  if (!VECTORIZED_WRITE) {
+    for (int m = 0; m < THREAD_M; m++)
+      for (int n = 0; n < THREAD_N; n++)
+        if (m < (M - (offset_m + thread_tile_offset_m)) && n < (N - (offset_n + thread_tile_offset_n)))
+          C[m * N + n] = acc[m][n];
 
-      // TODO: handle n % 4 != 0
-      if (m < (M - (offset_m + thread_tile_offset_m)) && n < (N - (offset_n + thread_tile_offset_n)))
-        C_float4[(m * N + n) / 4] = tmp;
+  } else {
+    // using vectorized write will help with uncoalesced memory write (issue fewer txn).
+    float4 *C_float4 = reinterpret_cast<float4 *>(C);
+
+    for (int m = 0; m < THREAD_M; m++) {
+      for (int n = 0; n < THREAD_N; n += 4) {
+        float4 tmp = {acc[m][n], acc[m][n+1], acc[m][n+2], acc[m][n+3]};
+
+        // TODO: handle n % 4 != 0
+        if (m < (M - (offset_m + thread_tile_offset_m)) && n < (N - (offset_n + thread_tile_offset_n)))
+          C_float4[(m * N + n) / 4] = tmp;
+      }
     }
   }
 }
 
-void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K) {
+void matmul_v4_1(const float *A, const float *B, float *C, int M, int N, int K) {
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
   const int THREAD_N = 32;  // THREAD_M will be 2
   const int BLOCK_SIZE = 256;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  matmul_v4_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, THREAD_N><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+  matmul_v4_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, THREAD_N, false><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+}
+
+void matmul_v4_2(const float *A, const float *B, float *C, int M, int N, int K) {
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
+  const int THREAD_N = 32;  // THREAD_M will be 2
+  const int BLOCK_SIZE = 256;
+  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  matmul_v4_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, THREAD_N, true><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }
