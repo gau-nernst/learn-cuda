@@ -5,6 +5,8 @@
 
 __host__ __device__ constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
 
+constexpr int WARP_SIZE = 32;
+
 // naive kernel. 1 row dot 1 column
 __global__ void matmul_v1_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -33,8 +35,8 @@ void matmul_v1(const float *A, const float *B, float *C, int M, int N, int K) {
   // NOTE: blockIdx.x is the fastest changing dimension. thus, we assign column index to it
   // intuitively, block dimensions will be PyTorch's dimensions in reverse.
   // NOTE: blockDim.x must be multiple of 32 (warpSize) to ensure coalesce memory access
-  dim3 block_size(32, block_size_total / 32);
-  dim3 grid_size(cdiv(N, 32), cdiv(M, block_size.y));
+  dim3 block_size(WARP_SIZE, block_size_total / WARP_SIZE);
+  dim3 grid_size(cdiv(N, WARP_SIZE), cdiv(M, block_size.y));
   matmul_v1_kernel<<<grid_size, block_size>>>(A, B, C, M, N, K);
 }
 
@@ -178,9 +180,9 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
   const int tid = threadIdx.x;
   const int block_id = blockIdx.x;
 
-  const int grid_width = cdiv(N, BLOCK_N);
-  const int block_id_m = block_id / grid_width;
-  const int block_id_n = block_id % grid_width;
+  const int block_grid_width = cdiv(N, BLOCK_N);
+  const int block_id_m = block_id / block_grid_width;
+  const int block_id_n = block_id % block_grid_width;
 
   const int offset_m = block_id_m * BLOCK_M;
   const int offset_n = block_id_n * BLOCK_N;
@@ -192,8 +194,8 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
   __shared__ float B_shmem[BLOCK_K][BLOCK_N];
 
   // each thread will calculate (THREAD_M, THREAD_N) thread-tile of output (BLOCK_M, BLOCK_N) block-tile
-  constexpr int num_thread_tiles = BLOCK_M * BLOCK_N / BLOCK_SIZE;
-  constexpr int THREAD_M = num_thread_tiles / THREAD_N;
+  constexpr int thread_tile_size = BLOCK_M * BLOCK_N / BLOCK_SIZE;
+  constexpr int THREAD_M = thread_tile_size / THREAD_N;
   float acc[THREAD_M][THREAD_N] = {0.0f};
 
   const int thread_tile_grid_width = BLOCK_N / THREAD_N;
@@ -275,4 +277,125 @@ void matmul_v4_2(const float *A, const float *B, float *C, int M, int N, int K) 
   const int BLOCK_SIZE = 256;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
   matmul_v4_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, THREAD_N, true><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+}
+
+// warp tiling
+// we don't actually use MMA instruction here. but to follow the terminologies used by cutlass
+// https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md
+// we name the variables as MMA_M and MMA_N, which is tiling of a warp within a warp tile.
+template <int BLOCK_SIZE, int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_N, int MMA_M, int MMA_N, int THREAD_N>
+__global__ void matmul_v5_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
+  const int tid = threadIdx.x;
+  const int block_id = blockIdx.x;
+
+  const int block_grid_width = cdiv(N, BLOCK_N);
+  const int block_id_m = block_id / block_grid_width;
+  const int block_id_n = block_id % block_grid_width;
+
+  const int offset_m = block_id_m * BLOCK_M;
+  const int offset_n = block_id_n * BLOCK_N;
+
+  A += offset_m * K;
+  B += offset_n;
+
+  __shared__ float A_shmem[BLOCK_M][BLOCK_K];
+  __shared__ float B_shmem[BLOCK_K][BLOCK_N];
+
+  // each warp will calculate (WARP_M, WARP_N) tile of output (BLOCK_M, BLOCK_N) tile
+  constexpr int num_warps = BLOCK_SIZE / WARP_SIZE;
+  constexpr int warp_tile_size = BLOCK_M * BLOCK_N / num_warps;
+  constexpr int WARP_M = warp_tile_size / WARP_N;
+
+  constexpr int warp_grid_width = BLOCK_N / WARP_N;
+  const int warp_id = tid / WARP_SIZE;
+  const int warp_id_m = warp_id / warp_grid_width;
+  const int warp_id_n = warp_id % warp_grid_width;
+
+  // each warp will iterate over (WARP_ITER_M, WARP_ITER_N) of (MMA_M, MMA_N) tiles
+  static_assert(WARP_M % MMA_M == 0);
+  static_assert(WARP_N % MMA_N == 0);
+  constexpr int WARP_ITER_M = WARP_M / MMA_M;
+  constexpr int WARP_ITER_N = WARP_N / MMA_N;
+
+  // each thread will calculate (THREAD_M, THREAD_N) tile of (MMA_M, MMA_N) tile
+  static_assert(MMA_M * MMA_N % WARP_SIZE == 0);
+  static_assert((MMA_M * MMA_N / WARP_SIZE) % THREAD_N == 0);
+  constexpr int thread_tile_size = MMA_M * MMA_N / WARP_SIZE;
+  constexpr int THREAD_M = thread_tile_size / THREAD_N;
+
+  static_assert(MMA_N % THREAD_N == 0);
+  constexpr int thread_tile_grid_width = MMA_N / THREAD_N;
+  const int lane_id = tid % WARP_SIZE;
+  const int lane_id_m = lane_id / thread_tile_grid_width;
+  const int lane_id_n = lane_id % thread_tile_grid_width;
+
+  // each thread will calculate (THREAD_M, THREAD_N) tile of (MMA_M, MMA_N) tile
+  // there are (WARP_ITER_M, WARP_ITER_N) of (MMA_M, MMA_N) tiles in each warp tile
+  float acc[WARP_ITER_M][WARP_ITER_N][THREAD_M][THREAD_N] = {0.0f};
+
+  for (int offset_k = 0; offset_k < K; offset_k += BLOCK_K) {
+    load_shmem<BLOCK_SIZE, BLOCK_M, BLOCK_K>(A, K, M - offset_m, K - offset_k, A_shmem, tid);
+    load_shmem<BLOCK_SIZE, BLOCK_K, BLOCK_N>(B, N, K - offset_k, N - offset_n, B_shmem, tid);
+    __syncthreads();
+
+    for (int k = 0; k < BLOCK_K; k++) {
+      float A_reg[WARP_ITER_M][THREAD_M];
+      float B_reg[WARP_ITER_N][THREAD_N];
+
+      for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++)
+        for (int m = 0; m < THREAD_M; m++) {
+          const int row = warp_id_m * WARP_M + warp_iter_m * MMA_M + lane_id_m * THREAD_M + m;
+          A_reg[warp_iter_m][m] = A_shmem[row][k];
+        }
+
+      for (int warp_iter_n = 0; warp_iter_n < WARP_ITER_N; warp_iter_n++)
+        for (int n = 0; n < THREAD_N; n++) {
+          const int col = warp_id_n * WARP_N + warp_iter_n * MMA_N + lane_id_n * THREAD_N + n;
+          B_reg[warp_iter_n][n] = B_shmem[k][col];
+        }
+
+      for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++)
+        for (int warp_iter_n = 0; warp_iter_n < WARP_ITER_N; warp_iter_n++)
+          for (int m = 0; m < THREAD_M; m++)
+            for (int n = 0; n < THREAD_N; n++)
+              acc[warp_iter_m][warp_iter_n][m][n] += A_reg[warp_iter_m][m] * B_reg[warp_iter_n][n];
+    }
+    __syncthreads();
+
+    A += BLOCK_K;
+    B += BLOCK_K * N;
+  }
+
+  C += offset_m * N + offset_n;
+  constexpr int increment = THREAD_N >= 4 ? 4 : THREAD_N;
+
+  for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++)
+    for (int warp_iter_n = 0; warp_iter_n < WARP_ITER_N; warp_iter_n++)
+      for (int m = 0; m < THREAD_M; m++)
+        for (int n = 0; n < THREAD_N; n += increment) {
+          float *tmp_addr = &acc[warp_iter_m][warp_iter_n][m][n];
+
+          // TODO: handle n % 4 != 0
+          const int row = warp_id_m * WARP_M + warp_iter_m * MMA_M + lane_id_m * THREAD_M + m;
+          const int col = warp_id_n * WARP_N + warp_iter_n * MMA_N + lane_id_n * THREAD_N + n;
+
+          if (row < (M - offset_m) && col < (N - offset_n)) {
+            if constexpr (increment == 4)
+              reinterpret_cast<float4 *>(&C[row * N + col])[0] = reinterpret_cast<float4 *>(tmp_addr)[0];
+            if constexpr (increment == 2)
+              reinterpret_cast<float2 *>(&C[row * N + col])[0] = reinterpret_cast<float2 *>(tmp_addr)[0];
+            if constexpr (increment == 1)
+              C[row * N + col] = tmp_addr[0];
+          }
+        }
+}
+
+void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K) {
+  const int BLOCK_SIZE = 256;
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
+  const int WARP_N = 64;  // WARP_M = 32
+  const int MMA_M = 16, MMA_N = 8;
+  const int THREAD_N = 2;  // THREAD_M = MMA_M * MMA_N / 32 / THREAD_N = 2
+  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  matmul_v5_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }

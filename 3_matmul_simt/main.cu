@@ -6,6 +6,7 @@ void matmul_v2(const float *A, const float *B, float *C, int M, int N, int K);
 void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K);
 void matmul_v4_1(const float *A, const float *B, float *C, int M, int N, int K);
 void matmul_v4_2(const float *A, const float *B, float *C, int M, int N, int K);
+void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K);
 
 int main() {
   // Size of the input data
@@ -36,14 +37,14 @@ int main() {
   cudaMemcpy(d_B, B, N * N * sizeof(float), cudaMemcpyHostToDevice);
 
   // Launch the kernel
-  matmul_v4_1(d_A, d_B, d_C, N, N, N);
+  matmul_v5(d_A, d_B, d_C, N, N, N);
 
   // Copy result back to host
   cudaMemcpy(C, d_C, N * N * sizeof(float), cudaMemcpyDeviceToHost);
 
   // Check results
-  for (int col = 0; col < N; col++)
-    for (int row = 0; row < N; row++) {
+  for (int row = 0; row < N; row++)
+    for (int col = 0; col < N; col++) {
       float val = C[row * N + col];
       if (val != N)
         std::cout << "Wrong result " << val << " at (" << row << ", " << col << ")" << std::endl;
