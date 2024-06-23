@@ -522,12 +522,10 @@ void matmul_v6a(const float *A, const float *B, float *C, int M, int N, int K) {
   const int WARP_N = 32;  // WARP_M = BLOCK_M * BLOCK_N / (BLOCK_SIZE / WARP_SIZE) / WARP_N = 32
   const int MMA_M = 16, MMA_N = 32;
   const int THREAD_N = 4;  // THREAD_M = MMA_M * MMA_N / 32 / THREAD_N = 4
-  const bool TRANSPOSE_A_shmem = false;
 
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  matmul_v6_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N, TRANSPOSE_A_shmem><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+  matmul_v6_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N, false><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }
-
 
 void matmul_v6b(const float *A, const float *B, float *C, int M, int N, int K) {
   assert(is_power_of_two(M) && "M must be a power of 2");
@@ -540,8 +538,7 @@ void matmul_v6b(const float *A, const float *B, float *C, int M, int N, int K) {
   const int WARP_N = 64;  // WARP_M = BLOCK_M * BLOCK_N / (BLOCK_SIZE / WARP_SIZE) / WARP_N = 32
   const int MMA_M = 16, MMA_N = 32;
   const int THREAD_N = 4;  // THREAD_M = MMA_M * MMA_N / 32 / THREAD_N = 4
-  const bool TRANSPOSE_A_shmem = true;
 
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  matmul_v6_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N, TRANSPOSE_A_shmem><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+  matmul_v6_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N, true><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }
