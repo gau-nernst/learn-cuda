@@ -6,17 +6,17 @@
   CHECK_CUDA(x);                                                                                                       \
   CHECK_CONTIGUOUS(x)
 
-void softmax_v1_launch(const float *input, float *output, int m, int n, int block_size);
+void mini_softmax(const float *input, float *output, int M, int N, int BLOCK_SIZE);
 
-torch::Tensor softmax_v1(torch::Tensor input) {
+torch::Tensor mini_softmax_pt(torch::Tensor input) {
   CHECK_INPUT(input);
-  int m = input.size(0);
-  int n = input.size(1);
+  int M = input.size(0);
+  int N = input.size(1);
   torch::Tensor output = torch::empty_like(input);
 
-  int block_size = 1024;
-  softmax_v1_launch(input.data_ptr<float>(), output.data_ptr<float>(), m, n, block_size);
+  int BLOCK_SIZE = 1024;
+  mini_softmax(input.data_ptr<float>(), output.data_ptr<float>(), M, N, BLOCK_SIZE);
   return output;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("softmax_v1", &softmax_v1, "Softmax v1"); }
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("mini_softmax", &mini_softmax_pt, "Mini softmax"); }

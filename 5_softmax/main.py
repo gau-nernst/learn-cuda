@@ -12,12 +12,12 @@ module = torch.utils.cpp_extension.load(
 )
 
 # for large n, there will be a larger deviation, since sum of many small elements are not accurate
-input = torch.randn(10, 10_000, device="cuda")
+input = torch.randn(10, 10_000).cuda()
 
-output_v1 = module.softmax_v1(input)
+output_mini = module.mini_softmax(input)
 
 output_ref = torch.softmax(input, 1)
-torch.testing.assert_close(output_v1, output_ref)
+torch.testing.assert_close(output_mini, output_ref)
 
 
 def benchmark(fn, *args):
@@ -33,4 +33,4 @@ def benchmark(fn, *args):
 
 
 benchmark(torch.softmax, input, 1)
-benchmark(module.softmax_v1, input)
+benchmark(module.mini_softmax, input)
