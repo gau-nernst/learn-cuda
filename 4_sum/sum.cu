@@ -3,20 +3,20 @@
 
 namespace cg = cooperative_groups;
 
-#define cdiv(a, b) ((a) + (b)-1) / (b)
+__host__ __device__ int cdiv(int a, int b) { return (a + b - 1) / b; }
 
 // Kahan sum to reduce errors
 // 1 thread is responsible for 1 row.
-__global__ void sum_v1_kernel(const float *input, float *output, int m, int n) {
+__global__ void sum_v1_kernel(const float *input, float *output, int M, int N) {
   const int row = blockIdx.x * blockDim.x + threadIdx.x;
-  if (row >= m)
+  if (row >= M)
     return;
 
-  input += row * n;
+  input += row * N;
   float sum = 0.0f;
   float error = 0.0f;
 
-  for (int col = 0; col < n; col++) {
+  for (int col = 0; col < N; col++) {
     float item = input[col] - error;
     float new_sum = sum + item;
     error = new_sum - sum - item;
@@ -26,20 +26,22 @@ __global__ void sum_v1_kernel(const float *input, float *output, int m, int n) {
   output[row] = sum;
 }
 
-void sum_v1(const float *input, float *output, int m, int n, int block_size) {
-  int n_blocks = cdiv(m, block_size);
-  sum_v1_kernel<<<n_blocks, block_size>>>(input, output, m, n);
+void sum_v1(const float *input, float *output, int M, int N, int BLOCK_SIZE) {
+  sum_v1_kernel<<<cdiv(M, BLOCK_SIZE), BLOCK_SIZE>>>(input, output, M, N);
 }
 
 // parallel sum with shared memory
-__global__ void sum_v2_kernel(const float *input, float *output, int m, int n) {
+__global__ void sum_v2_kernel(const float *input, float *output, int M, int N) {
   const int tid = threadIdx.x;
   const int col = blockIdx.x * blockDim.x + threadIdx.x;
   const int row = blockIdx.y;
+
   extern __shared__ float shmem[];
 
+  input += row * N;
+
   // load data to shared memory
-  shmem[tid] = col < n ? input[row * n + col] : 0.0f;
+  shmem[tid] = col < N ? input[col] : 0.0f;
   __syncthreads();
 
   // parallel sum
@@ -53,26 +55,28 @@ __global__ void sum_v2_kernel(const float *input, float *output, int m, int n) {
     atomicAdd(output + row, shmem[0]);
 }
 
-void sum_v2(const float *input, float *output, int m, int n, int block_size) {
-  dim3 n_blocks(cdiv(n, block_size), m);
-  int shmem_size = sizeof(float) * block_size;
-  sum_v2_kernel<<<n_blocks, block_size, shmem_size>>>(input, output, m, n);
+void sum_v2(const float *input, float *output, int M, int N, int BLOCK_SIZE) {
+  dim3 grid_size(cdiv(N, BLOCK_SIZE), M);
+  int shmem_size = sizeof(float) * BLOCK_SIZE;
+  sum_v2_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
 }
 
 // thread coarsening and warp-level reduction
 // NOTE: block_size must be >= 64 for this kernel
-__global__ void sum_v3_kernel(const float *input, float *output, int m, int n, int coarse_factor) {
+__global__ void sum_v3_kernel(const float *input, float *output, int M, int N, int coarse_factor) {
   const int tid = threadIdx.x;
   const int row = blockIdx.y;
+
   extern __shared__ float shmem[];
-  input += row * n;
+
+  input += row * N;
 
   // reduction within a thread
   // store results to shared memory
   float sum = 0.0f;
   for (int tile = 0; tile < coarse_factor; tile++) {
     int input_col = (blockIdx.x * coarse_factor + tile) * blockDim.x + threadIdx.x;
-    if (input_col < n)
+    if (input_col < N)
       sum += input[input_col];
   }
   shmem[tid] = sum;

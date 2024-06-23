@@ -9,34 +9,34 @@ void sum_v5(const float *input, float *output, int m, int n, int block_size, int
 
 int main() {
   // Size of the input data
-  const int size = 100000;
-  const int bytes = size * sizeof(float);
+  const int M = 64, N = 32000;
 
   // Allocate memory for input and output on host
-  float *h_input = new float[size];
-  float *h_output = new float;
+  float *h_input = new float[M * N];
+  float *h_output = new float[M];
 
   // Initialize input data on host
-  for (int i = 0; i < size; i++) {
+  for (int i = 0; i < M * N; i++)
     h_input[i] = 1.0f; // Example: Initialize all elements to 1
-  }
+
+  for (int i = 0; i < M; i++)
+    h_output[0] = 0.0f;
 
   // Allocate memory for input and output on device
   float *d_input;
   float *d_output;
 
-  cudaMalloc(&d_input, bytes);
-  cudaMalloc(&d_output, sizeof(float));
+  cudaMalloc(&d_input, sizeof(float) * M * N);
+  cudaMalloc(&d_output, sizeof(float) * M);
 
   // Copy data from host to device
-  float zero = 0.0f;
-  cudaMemcpy(d_output, &zero, sizeof(float), cudaMemcpyHostToDevice);
-  cudaMemcpy(d_input, h_input, bytes, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_output, h_output, sizeof(float) * M, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_input, h_input, sizeof(float) * M * N, cudaMemcpyHostToDevice);
 
   // Launch the kernel
   int block_size = 256;
   int coarse_factor = 4;
-  sum_v4(d_input, d_output, 1, size, block_size, coarse_factor);
+  sum_v4(d_input, d_output, M, N, block_size, coarse_factor);
 
   // Copy result back to host
   cudaMemcpy(h_output, d_output, sizeof(float), cudaMemcpyDeviceToHost);
