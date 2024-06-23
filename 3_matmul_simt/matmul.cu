@@ -404,7 +404,7 @@ __device__ void load_shmem_vectorized(const float *in, int in_row_stride, float 
   }
 }
 
-template <int BLOCK_SIZE, int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_N, int MMA_M, int MMA_N, int THREAD_N>
+template <int BLOCK_SIZE, int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_N, int MMA_M, int MMA_N, int THREAD_N, bool TRANSPOSE_A_shmem>
 __global__ void matmul_v6_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
   const int tid = threadIdx.x;
   const int block_id = blockIdx.x;
@@ -455,7 +455,7 @@ __global__ void matmul_v6_kernel(const float *A, const float *B, float *C, int M
   float acc[WARP_ITER_M][WARP_ITER_N][THREAD_M][THREAD_N] = {0.0f};
 
   for (int offset_k = 0; offset_k < K; offset_k += BLOCK_K) {
-    load_shmem_vectorized<BLOCK_SIZE, BLOCK_M, BLOCK_K, false>(A, K, A_shmem, tid);
+    load_shmem_vectorized<BLOCK_SIZE, BLOCK_M, BLOCK_K, TRANSPOSE_A_shmem>(A, K, A_shmem, tid);
     load_shmem_vectorized<BLOCK_SIZE, BLOCK_K, BLOCK_N, false>(B, N, B_shmem, tid);
     __syncthreads();
 
@@ -463,13 +463,20 @@ __global__ void matmul_v6_kernel(const float *A, const float *B, float *C, int M
       float A_reg[WARP_ITER_M][THREAD_M];
       float B_reg[WARP_ITER_N][THREAD_N];
 
-      for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++)
-        for (int m = 0; m < THREAD_M; m++) {
-          const int row = warp_id_m * WARP_M + warp_iter_m * MMA_M + lane_id_m * THREAD_M + m;
-          A_reg[warp_iter_m][m] = A_shmem[row * BLOCK_K + k];
-          // A_reg[warp_iter_m][m] = A_shmem[k * BLOCK_M + row];
-          // reinterpret_cast<float4 *>(&A_reg[warp_iter_m][m])[0] = reinterpret_cast<float4 *>(&A_shmem[k * BLOCK_M + row])[0];
+      for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++) {
+        if (TRANSPOSE_A_shmem) {
+          static_assert(THREAD_M >= 4);
+          for (int m = 0; m < THREAD_M; m+=4) {
+            const int row = warp_id_m * WARP_M + warp_iter_m * MMA_M + lane_id_m * THREAD_M + m;
+            reinterpret_cast<float4 *>(&A_reg[warp_iter_m][m])[0] = reinterpret_cast<float4 *>(&A_shmem[k * BLOCK_M + row])[0];
+          }
+        } else {
+          for (int m = 0; m < THREAD_M; m++) {
+            const int row = warp_id_m * WARP_M + warp_iter_m * MMA_M + lane_id_m * THREAD_M + m;
+            A_reg[warp_iter_m][m] = A_shmem[row * BLOCK_K + k];
+          }
         }
+      }
 
       for (int warp_iter_n = 0; warp_iter_n < WARP_ITER_N; warp_iter_n++)
         for (int n = 0; n < THREAD_N; n+=4) {
@@ -505,7 +512,7 @@ __global__ void matmul_v6_kernel(const float *A, const float *B, float *C, int M
         }
 }
 
-void matmul_v6(const float *A, const float *B, float *C, int M, int N, int K) {
+void matmul_v6a(const float *A, const float *B, float *C, int M, int N, int K) {
   assert(is_power_of_two(M) && "M must be a power of 2");
   assert(is_power_of_two(N) && "N must be a power of 2");
   assert(is_power_of_two(K) && "K must be a power of 2");
@@ -515,7 +522,26 @@ void matmul_v6(const float *A, const float *B, float *C, int M, int N, int K) {
   const int WARP_N = 32;  // WARP_M = BLOCK_M * BLOCK_N / (BLOCK_SIZE / WARP_SIZE) / WARP_N = 32
   const int MMA_M = 16, MMA_N = 32;
   const int THREAD_N = 4;  // THREAD_M = MMA_M * MMA_N / 32 / THREAD_N = 4
+  const bool TRANSPOSE_A_shmem = false;
 
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  matmul_v6_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+  matmul_v6_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N, TRANSPOSE_A_shmem><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+}
+
+
+void matmul_v6b(const float *A, const float *B, float *C, int M, int N, int K) {
+  assert(is_power_of_two(M) && "M must be a power of 2");
+  assert(is_power_of_two(N) && "N must be a power of 2");
+  assert(is_power_of_two(K) && "K must be a power of 2");
+
+  // when A_shmem is transposed, smaller BLOCK_K reduces bank conflict when loading A from global to shared
+  const int BLOCK_SIZE = 256;
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 16;
+  const int WARP_N = 64;  // WARP_M = BLOCK_M * BLOCK_N / (BLOCK_SIZE / WARP_SIZE) / WARP_N = 32
+  const int MMA_M = 16, MMA_N = 32;
+  const int THREAD_N = 4;  // THREAD_M = MMA_M * MMA_N / 32 / THREAD_N = 4
+  const bool TRANSPOSE_A_shmem = true;
+
+  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  matmul_v6_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N, TRANSPOSE_A_shmem><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }

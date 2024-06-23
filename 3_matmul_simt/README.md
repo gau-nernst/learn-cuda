@@ -17,7 +17,8 @@ v2 (shared memory cache with 2D block tiling)                      |        48.1
 v3 (thread coarsening)                                             |        39.03 |      12.22% |            38.49
 v4 (register cache with 2D thread tiling)                          |         8.92 |      53.48% |            76.43
 v5 (warp tiling)                                                   |         8.83 |      54.02% |           140.26
-v6 (remove bounds check. vectorized global memory access)          |         6.60 |      72.27% |           320.89
+v6a (remove bounds check. vectorized global memory access)         |         6.60 |      72.27% |           320.89
+v6b (transpose A in shared memory)                                 |         5.66 |      84.28% |           202.24
 
 ## CuBLAS `cutlass_80_simt_sgemm_256x128_8x4_nn_align1`
 

@@ -8,7 +8,8 @@ MatmulFn matmul_v2;
 MatmulFn matmul_v3;
 MatmulFn matmul_v4;
 MatmulFn matmul_v5;
-MatmulFn matmul_v6;
+MatmulFn matmul_v6a;
+MatmulFn matmul_v6b;
 
 MatmulFn *matmul_table[] = {
   0,
@@ -17,7 +18,8 @@ MatmulFn *matmul_table[] = {
   matmul_v3,
   matmul_v4,
   matmul_v5,
-  matmul_v6,
+  matmul_v6a,
+  matmul_v6b,
 };
 
 int main(int argc, char *argv[]) {
