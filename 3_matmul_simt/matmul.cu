@@ -383,9 +383,12 @@ void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K) {
 }
 
 // no bounds check
+// NOTE: loop can be unrolled now since everything is known at compile time
+// this gives a small boost. for load_shmem() (non-vectorized), this is actually slower.
 template <int BLOCK_SIZE, int HEIGHT, int WIDTH, bool TRANSPOSED>
-__device__ void load_shmem_vectorized(const float *in, int in_row_stride, float out[HEIGHT * WIDTH], int tid) {
-  for (int idx = tid * 4; idx < HEIGHT * WIDTH; idx += BLOCK_SIZE * 4) {
+__device__ void load_shmem_vectorized(const float *in, int in_row_stride, float *out, int tid) {
+  for (int offset = 0; offset < HEIGHT * WIDTH; offset += BLOCK_SIZE * 4) {
+    const int idx = offset + tid * 4;
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
 
@@ -396,9 +399,8 @@ __device__ void load_shmem_vectorized(const float *in, int in_row_stride, float 
       out[(col + 1) * HEIGHT + row] = tmp.y;
       out[(col + 2) * HEIGHT + row] = tmp.z;
       out[(col + 3) * HEIGHT + row] = tmp.w;
-    } else {
+    } else
       reinterpret_cast<float4 *>(&out[row * WIDTH + col])[0] = tmp;
-    }
   }
 }
 
@@ -488,16 +490,18 @@ __global__ void matmul_v6_kernel(const float *A, const float *B, float *C, int M
   }
 
   C += offset_m * N + offset_n;
+  static_assert(THREAD_N >= 4);
 
   // vectorized write is slower
   for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++)
     for (int warp_iter_n = 0; warp_iter_n < WARP_ITER_N; warp_iter_n++)
       for (int m = 0; m < THREAD_M; m++)
-        for (int n = 0; n < THREAD_N; n++) {
+        for (int n = 0; n < THREAD_N; n+=4) {
           const int row = warp_id_m * WARP_M + warp_iter_m * MMA_M + lane_id_m * THREAD_M + m;
           const int col = warp_id_n * WARP_N + warp_iter_n * MMA_N + lane_id_n * THREAD_N + n;
 
-          C[row * N + col] = acc[warp_iter_m][warp_iter_n][m][n];
+          float4 tmp = reinterpret_cast<float4 *>(&acc[warp_iter_m][warp_iter_n][m][n])[0];
+          reinterpret_cast<float4 *>(&C[row * N + col])[0] = tmp;
         }
 }
 
