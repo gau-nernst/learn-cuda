@@ -126,6 +126,7 @@ __global__ void matmul_v3_kernel(const float *A, const float *B, float *C, int M
   __shared__ float B_shmem[BLOCK_K][BLOCK_N];
 
   // each thread is responsible for (BLOCK_M * BLOCK_N / BLOCK_SIZE) output elements
+  static_assert((BLOCK_M * BLOCK_N) % BLOCK_SIZE == 0);
   float acc[BLOCK_M * BLOCK_N / BLOCK_SIZE] = {0.0f};
 
   // we move block by block along K dim
@@ -139,6 +140,7 @@ __global__ void matmul_v3_kernel(const float *A, const float *B, float *C, int M
 
     // do a mini matmul of (BLOCK_M, BLOCK_K) x (BLOCK_K, BLOCK_N) = (BLOCK_M, BLOCK_N)
     // simply assign a BLOCK_SIZE of threads to a BLOCK_SIZE of elements in output tile
+    // there is shared memory bank conflict
     for (int idx = tid; idx < BLOCK_M * BLOCK_N; idx += BLOCK_SIZE) {
       const int local_idx = idx / BLOCK_SIZE;
       const int col = idx % BLOCK_N;
@@ -175,7 +177,7 @@ void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K) {
 
 // register cache with 2D thread tiling
 // only mini matmul is different from v3
-template <int BLOCK_SIZE, int BLOCK_M, int BLOCK_N, int BLOCK_K, int THREAD_N, bool VECTORIZED_WRITE>
+template <int BLOCK_SIZE, int BLOCK_M, int BLOCK_N, int BLOCK_K, int THREAD_N>
 __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
   const int tid = threadIdx.x;
   const int block_id = blockIdx.x;
@@ -194,6 +196,9 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
   __shared__ float B_shmem[BLOCK_K][BLOCK_N];
 
   // each thread will calculate (THREAD_M, THREAD_N) thread-tile of output (BLOCK_M, BLOCK_N) block-tile
+  static_assert((BLOCK_M * BLOCK_N) % BLOCK_SIZE == 0);
+  static_assert((BLOCK_M * BLOCK_N / BLOCK_SIZE) % THREAD_N == 0);
+
   constexpr int thread_tile_size = BLOCK_M * BLOCK_N / BLOCK_SIZE;
   constexpr int THREAD_M = thread_tile_size / THREAD_N;
   float acc[THREAD_M][THREAD_N] = {0.0f};
@@ -229,7 +234,7 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
 
       for (int m = 0; m < THREAD_M; m++)
         for (int n = 0; n < THREAD_N; n++)
-          acc[m][n] += A_reg[m] * B[n];
+          acc[m][n] += A_reg[m] * B_reg[n];
     }
     __syncthreads();
 
@@ -241,42 +246,18 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
 
   // uncoalesced memory write
   // fixing it doesn't seem to make the kernel faster.
-  if (!VECTORIZED_WRITE) {
-    for (int m = 0; m < THREAD_M; m++)
-      for (int n = 0; n < THREAD_N; n++)
-        if (m < (M - (offset_m + thread_tile_offset_m)) && n < (N - (offset_n + thread_tile_offset_n)))
-          C[m * N + n] = acc[m][n];
-
-  } else {
-    // using vectorized write will help with uncoalesced memory write (issue fewer txn).
-    float4 *C_float4 = reinterpret_cast<float4 *>(C);
-
-    for (int m = 0; m < THREAD_M; m++) {
-      for (int n = 0; n < THREAD_N; n += 4) {
-        float4 tmp = {acc[m][n], acc[m][n+1], acc[m][n+2], acc[m][n+3]};
-
-        // TODO: handle n % 4 != 0
-        if (m < (M - (offset_m + thread_tile_offset_m)) && n < (N - (offset_n + thread_tile_offset_n)))
-          C_float4[(m * N + n) / 4] = tmp;
-      }
-    }
-  }
+  for (int m = 0; m < THREAD_M; m++)
+    for (int n = 0; n < THREAD_N; n++)
+      if (m < (M - (offset_m + thread_tile_offset_m)) && n < (N - (offset_n + thread_tile_offset_n)))
+        C[m * N + n] = acc[m][n];
 }
 
-void matmul_v4_1(const float *A, const float *B, float *C, int M, int N, int K) {
+void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K) {
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
-  const int THREAD_N = 32;  // THREAD_M will be 2
+  const int THREAD_N = 8;  // THREAD_M will be 8
   const int BLOCK_SIZE = 256;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  matmul_v4_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, THREAD_N, false><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
-}
-
-void matmul_v4_2(const float *A, const float *B, float *C, int M, int N, int K) {
-  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
-  const int THREAD_N = 32;  // THREAD_M will be 2
-  const int BLOCK_SIZE = 256;
-  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  matmul_v4_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, THREAD_N, true><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+  matmul_v4_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, THREAD_N><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }
 
 // warp tiling
@@ -381,9 +362,9 @@ __global__ void matmul_v5_kernel(const float *A, const float *B, float *C, int M
 
           if (row < (M - offset_m) && col < (N - offset_n)) {
             if constexpr (increment == 4)
-              reinterpret_cast<float4 *>(&C[row * N + col])[0] = reinterpret_cast<float4 *>(tmp_addr)[0];
+              reinterpret_cast<float4 *>(C)[(row * N + col) / 4] = reinterpret_cast<float4 *>(tmp_addr)[0];
             if constexpr (increment == 2)
-              reinterpret_cast<float2 *>(&C[row * N + col])[0] = reinterpret_cast<float2 *>(tmp_addr)[0];
+              reinterpret_cast<float2 *>(C)[(row * N + col) / 2] = reinterpret_cast<float2 *>(tmp_addr)[0];
             if constexpr (increment == 1)
               C[row * N + col] = tmp_addr[0];
           }
@@ -393,9 +374,16 @@ __global__ void matmul_v5_kernel(const float *A, const float *B, float *C, int M
 void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K) {
   const int BLOCK_SIZE = 256;
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
-  const int WARP_N = 64;  // WARP_M = 32
+
+  // this config will result in identical kernel as v4.2
+  // const int WARP_N = BLOCK_N;
+  // const int MMA_M = 16, MMA_N = BLOCK_N;
+  // const int THREAD_N = 8;
+
+  const int WARP_N = 32;  // WARP_M = 64
   const int MMA_M = 16, MMA_N = 8;
   const int THREAD_N = 2;  // THREAD_M = MMA_M * MMA_N / 32 / THREAD_N = 2
+
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
   matmul_v5_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }

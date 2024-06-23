@@ -14,8 +14,7 @@ CuBLAS (via PyTorch) `cutlass_80_simt_sgemm_256x128_8x4_nn_align1` |         4.7
 v1 (naive 1 row dot 1 column)                                      |        56.21 |       8.49% |           195.98
 v2 (shared memory cache with 2D block tiling)                      |        48.14 |       9.91% |           179.61
 v3 (thread coarsening)                                             |        39.03 |      12.22% |            38.49
-v4.1 (register cache with 2D thread tiling)                        |         5.78 |      82.53% |            23.11
-v4.2 (vectorized global memory write)                              |         5.32 |      89.66% |            21.52
+v4 (register cache with 2D thread tiling)                          |         8.92 |      53.48% |            76.43
 v5 (warp tiling)
 
 ## CuBLAS `cutlass_80_simt_sgemm_256x128_8x4_nn_align1`

@@ -4,8 +4,7 @@
 void matmul_v1(const float *A, const float *B, float *C, int M, int N, int K);
 void matmul_v2(const float *A, const float *B, float *C, int M, int N, int K);
 void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K);
-void matmul_v4_1(const float *A, const float *B, float *C, int M, int N, int K);
-void matmul_v4_2(const float *A, const float *B, float *C, int M, int N, int K);
+void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K);
 void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K);
 
 int main() {
@@ -19,8 +18,8 @@ int main() {
 
   // Initialize input data on host
   for (int i = 0; i < N * N; i++) {
-    A[i] = 1.0f; // Example: Initialize all elements to 1
-    B[i] = 1.0f; // Example: Initialize all elements to 1
+    A[i] = 1.0f;
+    B[i] = 2.0f;
   }
 
   // Allocate memory for input and output on device
@@ -46,7 +45,7 @@ int main() {
   for (int row = 0; row < N; row++)
     for (int col = 0; col < N; col++) {
       float val = C[row * N + col];
-      if (val != N)
+      if (val != N * 2)
         std::cout << "Wrong result " << val << " at (" << row << ", " << col << ")" << std::endl;
   }
 
