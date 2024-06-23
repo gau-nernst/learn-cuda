@@ -1,18 +1,32 @@
 #include <cuda.h>
 #include <iostream>
 
-void matmul_v1(const float *A, const float *B, float *C, int M, int N, int K);
-void matmul_v2(const float *A, const float *B, float *C, int M, int N, int K);
-void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K);
-void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K);
-void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K);
+typedef void MatmulFn(const float *A, const float *B, float *C, int M, int N, int K);
+
+MatmulFn matmul_v1;
+MatmulFn matmul_v2;
+MatmulFn matmul_v3;
+MatmulFn matmul_v4;
+MatmulFn matmul_v5;
+MatmulFn matmul_v6;
+
+MatmulFn *matmul_table[] = {
+  0,
+  matmul_v1,
+  matmul_v2,
+  matmul_v3,
+  matmul_v4,
+  matmul_v5,
+  matmul_v6,
+};
 
 int main(int argc, char *argv[]) {
-  int choice = 5;
+  const int N_MATMUL = sizeof(matmul_table) / sizeof(matmul_table[0]) - 1;
+  int choice = N_MATMUL;
   if (argc >= 2) {
     choice = argv[1][0] - '0';
-    if (choice > 5)
-      choice = 5;
+    if (choice > N_MATMUL)
+      choice = N_MATMUL;
   }
 
   // Size of the input data
@@ -43,13 +57,7 @@ int main(int argc, char *argv[]) {
   cudaMemcpy(d_B, B, N * N * sizeof(float), cudaMemcpyHostToDevice);
 
   // Launch the kernel
-  switch (choice) {
-    case 1: matmul_v1(d_A, d_B, d_C, N, N, N); break;
-    case 2: matmul_v2(d_A, d_B, d_C, N, N, N); break;
-    case 3: matmul_v3(d_A, d_B, d_C, N, N, N); break;
-    case 4: matmul_v4(d_A, d_B, d_C, N, N, N); break;
-    case 5: matmul_v5(d_A, d_B, d_C, N, N, N); break;
-  }
+  matmul_table[choice](d_A, d_B, d_C, N, N, N);
 
   // Copy result back to host
   cudaMemcpy(C, d_C, N * N * sizeof(float), cudaMemcpyDeviceToHost);

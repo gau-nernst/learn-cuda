@@ -3,7 +3,7 @@
 Resources:
 - https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#shared-memory
 - https://siboehm.com/articles/22/CUDA-MMM
-- https://leimao.github.io/article/CUDA-Matrix-Multiplication-Optimization/
+- https://leimao.github.io/article/CUDA-Matrix-Multiplication-Optimization/ and https://github.com/leimao/CUDA-GEMM-Optimization/
 - https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md
 
 For M = N = K = 4096, 4070Ti SUPER, compile with `-O3 --use_fast_math`
@@ -16,6 +16,7 @@ v2 (shared memory cache with 2D block tiling)                      |        48.1
 v3 (thread coarsening)                                             |        39.03 |      12.22% |            38.49
 v4 (register cache with 2D thread tiling)                          |         8.92 |      53.48% |            76.43
 v5 (warp tiling)                                                   |         8.83 |      54.02% |           140.26
+v6 (remove bounds check. vectorized global memory access)          |         7.06 |      67.56% |           175.40
 
 ## CuBLAS `cutlass_80_simt_sgemm_256x128_8x4_nn_align1`
 

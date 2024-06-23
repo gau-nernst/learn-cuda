@@ -1,10 +1,11 @@
 #include <cmath>
 #include <stdio.h>
+#include <assert.h>
 
 #define PRINT_IF(cond, ...) if (cond) printf(__VA_ARGS__);
 
 __host__ __device__ constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
-
+constexpr bool is_power_of_two(int x) { return x > 0 && (x & (x - 1)) == 0; }  // https://stackoverflow.com/a/1804686
 constexpr int WARP_SIZE = 32;
 
 // naive kernel. 1 row dot 1 column
@@ -246,7 +247,7 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
 
   // uncoalesced memory write
   // fixing it doesn't seem to make the kernel faster.
-  // vectorized write makes it slower.
+  // vectorized write is slower.
   for (int m = 0; m < THREAD_M; m++)
     for (int n = 0; n < THREAD_N; n++)
       if (m < (M - (offset_m + thread_tile_offset_m)) && n < (N - (offset_n + thread_tile_offset_n)))
@@ -350,7 +351,7 @@ __global__ void matmul_v5_kernel(const float *A, const float *B, float *C, int M
 
   C += offset_m * N + offset_n;
 
-  // vectorized write makes it slower.
+  // vectorized write is slower.
   for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++)
     for (int warp_iter_n = 0; warp_iter_n < WARP_ITER_N; warp_iter_n++)
       for (int m = 0; m < THREAD_M; m++)
@@ -366,7 +367,7 @@ __global__ void matmul_v5_kernel(const float *A, const float *B, float *C, int M
 void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K) {
   const int BLOCK_SIZE = 256;
 
-  // this config will result in identical kernel as v4
+  // this config will result in identical kernel as v4, but slightly slower
   // const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
   // const int WARP_N = BLOCK_N;
   // const int MMA_M = BLOCK_M * WARP_SIZE / BLOCK_SIZE, MMA_N = BLOCK_N;
@@ -379,4 +380,138 @@ void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K) {
 
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
   matmul_v5_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+}
+
+// no bounds check
+template <int BLOCK_SIZE, int HEIGHT, int WIDTH, bool TRANSPOSED>
+__device__ void load_shmem_vectorized(const float *in, int in_row_stride, float out[HEIGHT * WIDTH], int tid) {
+  for (int idx = tid * 4; idx < HEIGHT * WIDTH; idx += BLOCK_SIZE * 4) {
+    const int row = idx / WIDTH;
+    const int col = idx % WIDTH;
+
+    float4 tmp = reinterpret_cast<const float4 *>(&in[row * in_row_stride + col])[0];
+
+    if (TRANSPOSED) {
+      out[(col + 0) * HEIGHT + row] = tmp.x;
+      out[(col + 1) * HEIGHT + row] = tmp.y;
+      out[(col + 2) * HEIGHT + row] = tmp.z;
+      out[(col + 3) * HEIGHT + row] = tmp.w;
+    } else {
+      reinterpret_cast<float4 *>(&out[row * WIDTH + col])[0] = tmp;
+    }
+  }
+}
+
+template <int BLOCK_SIZE, int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_N, int MMA_M, int MMA_N, int THREAD_N>
+__global__ void matmul_v6_kernel(const float *A, const float *B, float *C, int M, int N, int K) {
+  const int tid = threadIdx.x;
+  const int block_id = blockIdx.x;
+
+  const int block_grid_width = cdiv(N, BLOCK_N);
+  const int block_id_m = block_id / block_grid_width;
+  const int block_id_n = block_id % block_grid_width;
+
+  const int offset_m = block_id_m * BLOCK_M;
+  const int offset_n = block_id_n * BLOCK_N;
+
+  A += offset_m * K;
+  B += offset_n;
+
+  __shared__ float A_shmem[BLOCK_M * BLOCK_K];
+  __shared__ float B_shmem[BLOCK_K * BLOCK_N];
+
+  // each warp will calculate (WARP_M, WARP_N) tile of output (BLOCK_M, BLOCK_N) tile
+  constexpr int num_warps = BLOCK_SIZE / WARP_SIZE;
+  constexpr int warp_tile_size = BLOCK_M * BLOCK_N / num_warps;
+  constexpr int WARP_M = warp_tile_size / WARP_N;
+
+  constexpr int warp_grid_width = BLOCK_N / WARP_N;
+  const int warp_id = tid / WARP_SIZE;
+  const int warp_id_m = warp_id / warp_grid_width;
+  const int warp_id_n = warp_id % warp_grid_width;
+
+  // each warp will iterate over (WARP_ITER_M, WARP_ITER_N) of (MMA_M, MMA_N) tiles
+  static_assert(WARP_M % MMA_M == 0);
+  static_assert(WARP_N % MMA_N == 0);
+  constexpr int WARP_ITER_M = WARP_M / MMA_M;
+  constexpr int WARP_ITER_N = WARP_N / MMA_N;
+
+  // each thread will calculate (THREAD_M, THREAD_N) tile of (MMA_M, MMA_N) tile
+  static_assert(MMA_M * MMA_N % WARP_SIZE == 0);
+  static_assert((MMA_M * MMA_N / WARP_SIZE) % THREAD_N == 0);
+  constexpr int thread_tile_size = MMA_M * MMA_N / WARP_SIZE;
+  constexpr int THREAD_M = thread_tile_size / THREAD_N;
+
+  static_assert(MMA_N % THREAD_N == 0);
+  constexpr int thread_tile_grid_width = MMA_N / THREAD_N;
+  const int lane_id = tid % WARP_SIZE;
+  const int lane_id_m = lane_id / thread_tile_grid_width;
+  const int lane_id_n = lane_id % thread_tile_grid_width;
+
+  // each thread will calculate (THREAD_M, THREAD_N) tile of (MMA_M, MMA_N) tile
+  // there are (WARP_ITER_M, WARP_ITER_N) of (MMA_M, MMA_N) tiles in each warp tile
+  float acc[WARP_ITER_M][WARP_ITER_N][THREAD_M][THREAD_N] = {0.0f};
+
+  for (int offset_k = 0; offset_k < K; offset_k += BLOCK_K) {
+    load_shmem_vectorized<BLOCK_SIZE, BLOCK_M, BLOCK_K, false>(A, K, A_shmem, tid);
+    load_shmem_vectorized<BLOCK_SIZE, BLOCK_K, BLOCK_N, false>(B, N, B_shmem, tid);
+    __syncthreads();
+
+    for (int k = 0; k < BLOCK_K; k++) {
+      float A_reg[WARP_ITER_M][THREAD_M];
+      float B_reg[WARP_ITER_N][THREAD_N];
+
+      for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++)
+        for (int m = 0; m < THREAD_M; m++) {
+          const int row = warp_id_m * WARP_M + warp_iter_m * MMA_M + lane_id_m * THREAD_M + m;
+          A_reg[warp_iter_m][m] = A_shmem[row * BLOCK_K + k];
+          // A_reg[warp_iter_m][m] = A_shmem[k * BLOCK_M + row];
+          // reinterpret_cast<float4 *>(&A_reg[warp_iter_m][m])[0] = reinterpret_cast<float4 *>(&A_shmem[k * BLOCK_M + row])[0];
+        }
+
+      for (int warp_iter_n = 0; warp_iter_n < WARP_ITER_N; warp_iter_n++)
+        for (int n = 0; n < THREAD_N; n+=4) {
+          const int col = warp_id_n * WARP_N + warp_iter_n * MMA_N + lane_id_n * THREAD_N + n;
+          reinterpret_cast<float4 *>(&B_reg[warp_iter_n][n])[0] = reinterpret_cast<float4 *>(&B_shmem[k * BLOCK_N + col])[0];
+        }
+
+      for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++)
+        for (int warp_iter_n = 0; warp_iter_n < WARP_ITER_N; warp_iter_n++)
+          for (int m = 0; m < THREAD_M; m++)
+            for (int n = 0; n < THREAD_N; n++)
+              acc[warp_iter_m][warp_iter_n][m][n] += A_reg[warp_iter_m][m] * B_reg[warp_iter_n][n];
+    }
+    __syncthreads();
+
+    A += BLOCK_K;
+    B += BLOCK_K * N;
+  }
+
+  C += offset_m * N + offset_n;
+
+  // vectorized write is slower
+  for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++)
+    for (int warp_iter_n = 0; warp_iter_n < WARP_ITER_N; warp_iter_n++)
+      for (int m = 0; m < THREAD_M; m++)
+        for (int n = 0; n < THREAD_N; n++) {
+          const int row = warp_id_m * WARP_M + warp_iter_m * MMA_M + lane_id_m * THREAD_M + m;
+          const int col = warp_id_n * WARP_N + warp_iter_n * MMA_N + lane_id_n * THREAD_N + n;
+
+          C[row * N + col] = acc[warp_iter_m][warp_iter_n][m][n];
+        }
+}
+
+void matmul_v6(const float *A, const float *B, float *C, int M, int N, int K) {
+  assert(is_power_of_two(M) && "M must be a power of 2");
+  assert(is_power_of_two(N) && "N must be a power of 2");
+  assert(is_power_of_two(K) && "K must be a power of 2");
+
+  const int BLOCK_SIZE = 256;
+  const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
+  const int WARP_N = 32;  // WARP_M = BLOCK_M * BLOCK_N / (BLOCK_SIZE / WARP_SIZE) / WARP_N = 32
+  const int MMA_M = 16, MMA_N = 32;
+  const int THREAD_N = 4;  // THREAD_M = MMA_M * MMA_N / 32 / THREAD_N = 4
+
+  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  matmul_v6_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }
