@@ -246,6 +246,7 @@ __global__ void matmul_v4_kernel(const float *A, const float *B, float *C, int M
 
   // uncoalesced memory write
   // fixing it doesn't seem to make the kernel faster.
+  // vectorized write makes it slower.
   for (int m = 0; m < THREAD_M; m++)
     for (int n = 0; n < THREAD_N; n++)
       if (m < (M - (offset_m + thread_tile_offset_m)) && n < (N - (offset_n + thread_tile_offset_n)))
@@ -348,41 +349,33 @@ __global__ void matmul_v5_kernel(const float *A, const float *B, float *C, int M
   }
 
   C += offset_m * N + offset_n;
-  constexpr int increment = THREAD_N >= 4 ? 4 : THREAD_N;
 
+  // vectorized write makes it slower.
   for (int warp_iter_m = 0; warp_iter_m < WARP_ITER_M; warp_iter_m++)
     for (int warp_iter_n = 0; warp_iter_n < WARP_ITER_N; warp_iter_n++)
       for (int m = 0; m < THREAD_M; m++)
-        for (int n = 0; n < THREAD_N; n += increment) {
-          float *tmp_addr = &acc[warp_iter_m][warp_iter_n][m][n];
-
-          // TODO: handle n % 4 != 0
+        for (int n = 0; n < THREAD_N; n++) {
           const int row = warp_id_m * WARP_M + warp_iter_m * MMA_M + lane_id_m * THREAD_M + m;
           const int col = warp_id_n * WARP_N + warp_iter_n * MMA_N + lane_id_n * THREAD_N + n;
 
-          if (row < (M - offset_m) && col < (N - offset_n)) {
-            if constexpr (increment == 4)
-              reinterpret_cast<float4 *>(C)[(row * N + col) / 4] = reinterpret_cast<float4 *>(tmp_addr)[0];
-            if constexpr (increment == 2)
-              reinterpret_cast<float2 *>(C)[(row * N + col) / 2] = reinterpret_cast<float2 *>(tmp_addr)[0];
-            if constexpr (increment == 1)
-              C[row * N + col] = tmp_addr[0];
-          }
+          if (row < (M - offset_m) && col < (N - offset_n))
+            C[row * N + col] = acc[warp_iter_m][warp_iter_n][m][n];
         }
 }
 
 void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K) {
   const int BLOCK_SIZE = 256;
-  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
 
-  // this config will result in identical kernel as v4.2
+  // this config will result in identical kernel as v4
+  // const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
   // const int WARP_N = BLOCK_N;
-  // const int MMA_M = 16, MMA_N = BLOCK_N;
+  // const int MMA_M = BLOCK_M * WARP_SIZE / BLOCK_SIZE, MMA_N = BLOCK_N;
   // const int THREAD_N = 8;
 
-  const int WARP_N = 32;  // WARP_M = 64
-  const int MMA_M = 16, MMA_N = 8;
-  const int THREAD_N = 2;  // THREAD_M = MMA_M * MMA_N / 32 / THREAD_N = 2
+  const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
+  const int WARP_N = 32;  // WARP_M = BLOCK_M * BLOCK_N / (BLOCK_SIZE / WARP_SIZE) / WARP_N = 32
+  const int MMA_M = 16, MMA_N = 32;
+  const int THREAD_N = 4;  // THREAD_M = MMA_M * MMA_N / 32 / THREAD_N = 4
 
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
   matmul_v5_kernel<BLOCK_SIZE, BLOCK_M, BLOCK_N, BLOCK_K, WARP_N, MMA_M, MMA_N, THREAD_N><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);

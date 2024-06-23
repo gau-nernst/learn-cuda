@@ -7,7 +7,14 @@ void matmul_v3(const float *A, const float *B, float *C, int M, int N, int K);
 void matmul_v4(const float *A, const float *B, float *C, int M, int N, int K);
 void matmul_v5(const float *A, const float *B, float *C, int M, int N, int K);
 
-int main() {
+int main(int argc, char *argv[]) {
+  int choice = 5;
+  if (argc >= 2) {
+    choice = argv[1][0] - '0';
+    if (choice > 5)
+      choice = 5;
+  }
+
   // Size of the input data
   const int N = 4096;
 
@@ -36,7 +43,13 @@ int main() {
   cudaMemcpy(d_B, B, N * N * sizeof(float), cudaMemcpyHostToDevice);
 
   // Launch the kernel
-  matmul_v5(d_A, d_B, d_C, N, N, N);
+  switch (choice) {
+    case 1: matmul_v1(d_A, d_B, d_C, N, N, N); break;
+    case 2: matmul_v2(d_A, d_B, d_C, N, N, N); break;
+    case 3: matmul_v3(d_A, d_B, d_C, N, N, N); break;
+    case 4: matmul_v4(d_A, d_B, d_C, N, N, N); break;
+    case 5: matmul_v5(d_A, d_B, d_C, N, N, N); break;
+  }
 
   // Copy result back to host
   cudaMemcpy(C, d_C, N * N * sizeof(float), cudaMemcpyDeviceToHost);
