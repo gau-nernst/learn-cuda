@@ -59,6 +59,7 @@ __global__ void sum_v2_kernel(const float *input, float *output, int M, int N) {
   }
 
   // global synchronization
+  // alternative: write to global memory scratch space, and call 1 more reduction kernel
   if (tid == 0)
     atomicAdd(output + row, shmem[0]);
 }
@@ -90,11 +91,11 @@ __global__ void sum_v3_kernel(const float *input, float *output, int M, int N, i
     if (col < N - tile_id * TILE_SIZE)
       sum += input[col];
 
+  // store per-thread result in shared memory
   shmem[tid] = sum;
   __syncthreads();
 
   // block-level reduction
-  // same as above
   for (int stride = BLOCK_SIZE / 2; stride > 0; stride /= 2) {
     if (tid < stride)
       shmem[tid] += shmem[tid + stride];
@@ -115,71 +116,93 @@ void sum_v3(const float *input, float *output, int M, int N, int BLOCK_SIZE, int
 
 // warp-level reduction
 // NOTE: block_size must be >= 64 for this kernel
-__global__ void sum_v4_kernel(const float *input, float *output, int M, int N, int coarse_factor) {
+template <int WARP_REDUCTION_IMPL>
+__global__ void sum_v4_kernel(const float *input, float *output, int M, int N, int TILE_SIZE) {
   const int tid = threadIdx.x;
+  const int BLOCK_SIZE = blockDim.x;
   const int row = blockIdx.y;
+  const int tile_id = blockIdx.x;
 
+  // should have size = BLOCK_SIZE
   extern __shared__ float shmem[];
 
-  input += row * N;
+  input += row * N + tile_id * TILE_SIZE;
 
-  // reduction within a thread
-  // store results to shared memory
+  // thread-level reduction
   float sum = 0.0f;
-  for (int tile = 0; tile < coarse_factor; tile++) {
-    int input_col = (blockIdx.x * coarse_factor + tile) * blockDim.x + threadIdx.x;
-    if (input_col < N)
-      sum += input[input_col];
+  for (int col = tid; col < TILE_SIZE; col += BLOCK_SIZE) {
+    if (col < N - tile_id * TILE_SIZE)
+      sum += input[col];
   }
   shmem[tid] = sum;
   __syncthreads();
 
-  // reduction within a block
+  // block-level reduction
   // no warp divergence since all threads in a 32-thread warp will either do the addition or not.
-  for (int stride = blockDim.x / 2; stride >= 32; stride /= 2) {
+  for (int stride = BLOCK_SIZE / 2; stride >= WARP_SIZE; stride /= 2) {
     if (tid < stride)
       shmem[tid] += shmem[tid + stride];
     __syncthreads();
   }
   sum = shmem[tid];
 
-  // reduction within a warp
-  if (tid < 32) {
+  // warp-level reduction
+  // no synchronization
+  if (tid < WARP_SIZE) {
     // approach 0: this won't work, even though all reads and writes are done at the same time (no race condition).
     // this is because the compiler will optimize memory read of shmem[tid + stride] -> cache the data instead of
     // reading the updated shared memory.
-    // for (int stride = 16; stride > 0; stride /= 2)
+    // for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2)
     //   shmem[tid] += shmem[tid + stride];
 
     // approach 1: cast shared memory as volatile -> compiler will issue a true memory read
-    // volatile float *_shmem = shmem;
-    // for (int stride = 16; stride > 0; stride /= 2)
-    //   _shmem[tid] += _shmem[tid + stride];
+    if (WARP_REDUCTION_IMPL == 1) {
+      volatile float *_shmem = shmem;
+      for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2)
+        _shmem[tid] += _shmem[tid + stride];
+      sum = _shmem[tid];
+    }
 
     // approach 2: use __syncwarp() -> wait for shared memory update, and issue a true memory read
-    // for (int stride = 16; stride > 0; stride /= 2) {
-    //   shmem[tid] += shmem[tid + stride];
-    //   __syncwarp();
-    // }
+    if (WARP_REDUCTION_IMPL == 2) {
+      for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2) {
+        shmem[tid] += shmem[tid + stride];
+        __syncwarp();
+      }
+      sum = shmem[tid];
+    }
 
     // approach 3: use warp-level primitives -> register-to-register communication
-    for (int offset = 16; offset > 0; offset /= 2)
-      sum += __shfl_down_sync(0xffffffff, sum, offset);
+    if (WARP_REDUCTION_IMPL == 3) {
+      for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2)
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
   }
 
-  // reduction across blocks
-  // alternatives:
-  // - write to global memory, and call 1 more reduction kernel
-  // - thread fence reduction
-  // - cooperative groups
+  // grid-level reduction
   if (tid == 0)
     atomicAdd(output + row, sum);
 }
 
-void sum_v4(const float *input, float *output, int m, int n, int block_size, int coarse_factor) {
-  dim3 grid_size(cdiv(n, block_size * coarse_factor), m);
-  int shmem_size = sizeof(float) * block_size;
-  sum_v4_kernel<<<grid_size, block_size, shmem_size>>>(input, output, m, n, coarse_factor);
+void sum_v4a(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
+  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+  dim3 grid_size(cdiv(N, TILE_SIZE), M);
+  const int shmem_size = sizeof(float) * BLOCK_SIZE;
+  sum_v4_kernel<1><<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
+}
+
+void sum_v4b(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
+  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+  dim3 grid_size(cdiv(N, TILE_SIZE), M);
+  const int shmem_size = sizeof(float) * BLOCK_SIZE;
+  sum_v4_kernel<2><<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
+}
+
+void sum_v4c(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
+  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+  dim3 grid_size(cdiv(N, TILE_SIZE), M);
+  const int shmem_size = sizeof(float) * BLOCK_SIZE;
+  sum_v4_kernel<3><<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
 }
 
 // cooperative group

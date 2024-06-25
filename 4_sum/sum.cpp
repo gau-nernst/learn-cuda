@@ -1,79 +1,76 @@
 #include <torch/extension.h>
 
+using namespace pybind11::literals;
+
 #define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
 #define CHECK_INPUT(x)                                                                                                 \
   CHECK_CUDA(x);                                                                                                       \
   CHECK_CONTIGUOUS(x)
 
-void sum_v1(const float *input, float *output, int m, int n, int block_size);
-void sum_v2(const float *input, float *output, int m, int n, int block_size);
-void sum_v3(const float *input, float *output, int m, int n, int block_size, int coarse_factor);
-void sum_v4(const float *input, float *output, int m, int n, int block_size, int coarse_factor);
-void sum_v5(const float *input, float *output, int m, int n, int block_size, int coarse_factor);
+void sum_v1(const float *input, float *output, int M, int N, int BLOCK_SIZE);
+void sum_v2(const float *input, float *output, int M, int N, int BLOCK_SIZE);
+void sum_v3(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
+void sum_v4a(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
+void sum_v4b(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
+void sum_v4c(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
+void sum_v5(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
 
-torch::Tensor sum_v1_pt(torch::Tensor input) {
+std::tuple<torch::Tensor, int, int> _setup(torch::Tensor input) {
   CHECK_INPUT(input);
-  int m = input.size(0);
-  int n = input.size(1);
-  torch::Tensor output = torch::empty({m}, input.options());
+  int M = input.size(0);
+  int N = input.size(1);
+  return std::tuple(torch::empty({M}, input.options()), M, N);
+}
 
-  int block_size = 4;
-  sum_v1(input.data_ptr<float>(), output.data_ptr<float>(), m, n, block_size);
+torch::Tensor sum_v1_pt(torch::Tensor input, int BLOCK_SIZE = 1) {
+  auto [output, M, N] = _setup(input);
+  sum_v1(input.data_ptr<float>(), output.data_ptr<float>(), M, N, BLOCK_SIZE);
   return output;
 }
 
-torch::Tensor sum_v2_pt(torch::Tensor input) {
-  CHECK_INPUT(input);
-  int m = input.size(0);
-  int n = input.size(1);
-  torch::Tensor output = torch::zeros({m}, input.options());
-
-  int block_size = 512;
-  sum_v2(input.data_ptr<float>(), output.data_ptr<float>(), m, n, block_size);
+torch::Tensor sum_v2_pt(torch::Tensor input, int BLOCK_SIZE = 128) {
+  auto [output, M, N] = _setup(input);
+  sum_v2(input.data_ptr<float>(), output.data_ptr<float>(), M, N, BLOCK_SIZE);
   return output;
 }
 
-torch::Tensor sum_v3_pt(torch::Tensor input) {
-  CHECK_INPUT(input);
-  int m = input.size(0);
-  int n = input.size(1);
-  torch::Tensor output = torch::zeros({m}, input.options());
-
-  int block_size = 256;
-  int coarse_factor = 4;
-  sum_v3(input.data_ptr<float>(), output.data_ptr<float>(), m, n, block_size, coarse_factor);
+torch::Tensor sum_v3_pt(torch::Tensor input, int BLOCK_SIZE = 256, int coarse_factor = 8) {
+  auto [output, M, N] = _setup(input);
+  sum_v3(input.data_ptr<float>(), output.data_ptr<float>(), M, N, BLOCK_SIZE, coarse_factor);
   return output;
 }
 
-torch::Tensor sum_v4_pt(torch::Tensor input) {
-  CHECK_INPUT(input);
-  int m = input.size(0);
-  int n = input.size(1);
-  torch::Tensor output = torch::zeros({m}, input.options());
-
-  int block_size = 256;
-  int coarse_factor = 4;
-  sum_v4(input.data_ptr<float>(), output.data_ptr<float>(), m, n, block_size, coarse_factor);
+torch::Tensor sum_v4a_pt(torch::Tensor input, int BLOCK_SIZE = 128, int coarse_factor = 32) {
+  auto [output, M, N] = _setup(input);
+  sum_v4a(input.data_ptr<float>(), output.data_ptr<float>(), M, N, BLOCK_SIZE, coarse_factor);
   return output;
 }
 
-torch::Tensor sum_v5_pt(torch::Tensor input) {
-  CHECK_INPUT(input);
-  int m = input.size(0);
-  int n = input.size(1);
-  torch::Tensor output = torch::zeros({m}, input.options());
+torch::Tensor sum_v4b_pt(torch::Tensor input, int BLOCK_SIZE = 128, int coarse_factor = 32) {
+  auto [output, M, N] = _setup(input);
+  sum_v4b(input.data_ptr<float>(), output.data_ptr<float>(), M, N, BLOCK_SIZE, coarse_factor);
+  return output;
+}
 
-  int block_size = 256;
-  int coarse_factor = 4;
-  sum_v5(input.data_ptr<float>(), output.data_ptr<float>(), m, n, block_size, coarse_factor);
+torch::Tensor sum_v4c_pt(torch::Tensor input, int BLOCK_SIZE = 128, int coarse_factor = 32) {
+  auto [output, M, N] = _setup(input);
+  sum_v4c(input.data_ptr<float>(), output.data_ptr<float>(), M, N, BLOCK_SIZE, coarse_factor);
+  return output;
+}
+
+torch::Tensor sum_v5_pt(torch::Tensor input, int BLOCK_SIZE = 256, int coarse_factor = 4) {
+  auto [output, M, N] = _setup(input);
+  sum_v5(input.data_ptr<float>(), output.data_ptr<float>(), M, N, BLOCK_SIZE, coarse_factor);
   return output;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("sum_v1", &sum_v1_pt, "Sum v1");
-  m.def("sum_v2", &sum_v2_pt, "Sum v2");
-  m.def("sum_v3", &sum_v3_pt, "Sum v3");
-  m.def("sum_v4", &sum_v4_pt, "Sum v4");
-  m.def("sum_v5", &sum_v5_pt, "Sum v5");
+  m.def("sum_v1", &sum_v1_pt, "Sum v1", "input"_a, "BLOCK_SIZE"_a=1);
+  m.def("sum_v2", &sum_v2_pt, "Sum v2", "input"_a, "BLOCK_SIZE"_a=128);
+  m.def("sum_v3", &sum_v3_pt, "Sum v3", "input"_a, "BLOCK_SIZE"_a=256, "coarse_factor"_a=8);
+  m.def("sum_v4a", &sum_v4a_pt, "Sum v4a", "input"_a, "BLOCK_SIZE"_a=128, "coarse_factor"_a=32);
+  m.def("sum_v4b", &sum_v4b_pt, "Sum v4b", "input"_a, "BLOCK_SIZE"_a=128, "coarse_factor"_a=32);
+  m.def("sum_v4c", &sum_v4c_pt, "Sum v4c", "input"_a, "BLOCK_SIZE"_a=128, "coarse_factor"_a=32);
+  m.def("sum_v5", &sum_v5_pt, "Sum v5", "input"_a, "BLOCK_SIZE"_a=256, "coarse_factor"_a=4);
 }
