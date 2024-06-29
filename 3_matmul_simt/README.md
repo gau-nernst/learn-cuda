@@ -20,6 +20,13 @@ v5 (warp tiling)                                                   |         8.8
 v6a (remove bounds check. vectorized global memory access)         |         6.60 |      72.27% |           320.89
 v6b (transpose A in shared memory)                                 |         5.66 |      84.28% |           202.24
 
+Lessons learned:
+
+- Tiling: block-level (shared memory cache), warp-level, and thread-level (register cache) (though I don't see much benefits for warp tiling)
+- Vectorized memory access: not sure why it helps as we already use 128-byte memory transaction. Perhaps it reduces number of instructions and thus better pipelining?
+- Avoid bank conflicts by padding shared memory (not used in table above as gain is not significant). There are more sophisticated shared memory layouts that I have yet to understand.
+- Double buffering: use double amount of shared memory, but don't need to `__syncthreads()` after computation code -> better data loading and computation interleaving. Not used in table above as gain is not significant.
+
 ## CuBLAS `cutlass_80_simt_sgemm_256x128_8x4_nn_align1`
 
 ncu output of an ideal kernel
