@@ -4,6 +4,7 @@ Resources:
 - https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf
 - https://github.com/NVIDIA/cuda-samples/tree/master/Samples/2_Concepts_and_Techniques/reduction
 - https://github.com/cuda-mode/lectures/tree/main/lecture9
+- https://developer.nvidia.com/blog/cooperative-groups/
 
 For M = 64, N = 32000, 4070Ti SUPER, compile with `-O3 --use_fast_math`
 
@@ -17,3 +18,5 @@ v3 (thread coarsening)                              |        15.46 |      105.17
 v4a (warp-level reduction - use `volatile` keyword) |        15.17 |      107.19% |           540.41
 v4b (use `__syncwrap()`)                            |        15.30 |      106.26% |           535.92
 v4b (use warp shuffle intrinsic `__shfl_down_sync`) |        15.10 |      106.68% |           542.72
+v5 (cooperative groups)
+v6 (vectorized load)

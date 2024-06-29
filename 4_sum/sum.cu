@@ -41,7 +41,6 @@ __global__ void sum_v2_kernel(const float *input, float *output, int M, int N) {
 
   // should have size = BLOCK_SIZE
   extern __shared__ float shmem[];
-
   input += row * N;
 
   // load data to shared memory
@@ -70,29 +69,31 @@ void sum_v2(const float *input, float *output, int M, int N, int BLOCK_SIZE) {
   sum_v2_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
 }
 
+// thread-level reduction
+// load a tile of BLOCK_SIZE one at a time -> coalesced memory access
+__device__ float thread_sum(const float *input, int TILE_SIZE, int BLOCK_SIZE, int tid, int max_idx) {
+  float sum = 0.0f;
+  for (int idx = tid; idx < TILE_SIZE; idx += BLOCK_SIZE)
+    if (idx < max_idx)
+      sum += input[idx];
+  return sum;
+}
+
 // thread coarsening
 // each thread block calculates sum for TILE_SIZE elements of input
 // TILE_SIZE must be a multiple of BLOCK_SIZE
 __global__ void sum_v3_kernel(const float *input, float *output, int M, int N, int TILE_SIZE) {
   const int tid = threadIdx.x;
   const int BLOCK_SIZE = blockDim.x;
-  const int row = blockIdx.y;
   const int tile_id = blockIdx.x;
+  const int row = blockIdx.y;
 
   // should have size = BLOCK_SIZE
   extern __shared__ float shmem[];
-
   input += row * N + tile_id * TILE_SIZE;
 
-  // thread-level reduction
-  // load a tile of BLOCK_SIZE one at a time -> coalesced memory access
-  float sum = 0.0f;
-  for (int col = tid; col < TILE_SIZE; col += BLOCK_SIZE)
-    if (col < N - tile_id * TILE_SIZE)
-      sum += input[col];
-
   // store per-thread result in shared memory
-  shmem[tid] = sum;
+  shmem[tid] = thread_sum(input, TILE_SIZE, BLOCK_SIZE, tid, N - tile_id * TILE_SIZE);
   __syncthreads();
 
   // block-level reduction
@@ -120,21 +121,14 @@ template <int WARP_REDUCTION_IMPL>
 __global__ void sum_v4_kernel(const float *input, float *output, int M, int N, int TILE_SIZE) {
   const int tid = threadIdx.x;
   const int BLOCK_SIZE = blockDim.x;
-  const int row = blockIdx.y;
   const int tile_id = blockIdx.x;
+  const int row = blockIdx.y;
 
   // should have size = BLOCK_SIZE
   extern __shared__ float shmem[];
-
   input += row * N + tile_id * TILE_SIZE;
 
-  // thread-level reduction
-  float sum = 0.0f;
-  for (int col = tid; col < TILE_SIZE; col += BLOCK_SIZE) {
-    if (col < N - tile_id * TILE_SIZE)
-      sum += input[col];
-  }
-  shmem[tid] = sum;
+  shmem[tid] = thread_sum(input, TILE_SIZE, BLOCK_SIZE, tid, N - tile_id * TILE_SIZE);
   __syncthreads();
 
   // block-level reduction
@@ -144,10 +138,9 @@ __global__ void sum_v4_kernel(const float *input, float *output, int M, int N, i
       shmem[tid] += shmem[tid + stride];
     __syncthreads();
   }
-  sum = shmem[tid];
 
   // warp-level reduction
-  // no synchronization
+  float sum;
   if (tid < WARP_SIZE) {
     // approach 0: this won't work, even though all reads and writes are done at the same time (no race condition).
     // this is because the compiler will optimize memory read of shmem[tid + stride] -> cache the data instead of
@@ -174,8 +167,9 @@ __global__ void sum_v4_kernel(const float *input, float *output, int M, int N, i
 
     // approach 3: use warp-level primitives -> register-to-register communication
     if (WARP_REDUCTION_IMPL == 3) {
-      for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2)
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
+      sum = shmem[tid];
+      for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2)
+        sum += __shfl_down_sync(0xffffffff, sum, stride);
     }
   }
 
@@ -206,42 +200,45 @@ void sum_v4c(const float *input, float *output, int M, int N, int BLOCK_SIZE, in
 }
 
 // cooperative group
-__global__ void sum_v5_kernel(const float *input, float *output, int m, int n, int coarse_factor) {
+__global__ void sum_v5_kernel(const float *input, float *output, int M, int N, int TILE_SIZE) {
   cg::thread_block block = cg::this_thread_block();
 
-  const int row = blockIdx.y;
-  const int tid = threadIdx.x;
+  const int tid = block.thread_index().x;
+  const int BLOCK_SIZE = block.size();
+  const int tile_id = block.group_index().x;
+  const int row = block.group_index().y;
+
+  // should have size = BLOCK_SIZE
   extern __shared__ float shmem[];
-  input += row * n;
+  input += row * N + tile_id * TILE_SIZE;
 
-  // thread-level reduction
-  float sum = 0.0f;
-  for (int tile = 0; tile < coarse_factor; tile++) {
-    int input_col = (blockIdx.x * coarse_factor + tile) * blockDim.x + tid;
-    if (input_col < n)
-      sum += input[input_col];
-  }
+  shmem[tid] = thread_sum(input, TILE_SIZE, BLOCK_SIZE, tid, N - tile_id * TILE_SIZE);
+  block.sync();
 
-  for (int stride = block.size() / 2; stride >= 32; stride /= 2) {
-    shmem[tid] = sum;
-    block.sync();
+  // block-level reduction
+  for (int stride = BLOCK_SIZE / 2; stride >= WARP_SIZE; stride /= 2) {
     if (tid < stride)
-      sum += shmem[tid + stride];
+      shmem[tid] += shmem[tid + stride];
     block.sync();
   }
 
-  cg::thread_block_tile warp = cg::tiled_partition<32>(block);
-  sum = cg::reduce(warp, sum, cg::plus<float>());
+  // warp-level reduction
+  float sum;
+  if (tid < WARP_SIZE) {
+    sum = shmem[tid];
+    sum = cg::reduce(cg::tiled_partition<WARP_SIZE>(block), sum, cg::plus<float>());
+  }
 
   // grid-level reduction
   if (block.thread_rank() == 0)
     atomicAdd(output + row, sum);
 }
 
-void sum_v5(const float *input, float *output, int m, int n, int block_size, int coarse_factor) {
-  dim3 grid_size(cdiv(n, block_size * coarse_factor), m);
-  int shmem_size = sizeof(float) * block_size;
-  sum_v5_kernel<<<grid_size, block_size, shmem_size>>>(input, output, m, n, coarse_factor);
+void sum_v5(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
+  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+  dim3 grid_size(cdiv(N, TILE_SIZE), M);
+  const int shmem_size = sizeof(float) * BLOCK_SIZE;
+  sum_v5_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
 }
 
 // vectorized load. n must be divisible by 4
@@ -271,7 +268,7 @@ __global__ void sum_v6_kernel(const float *input, float *output, int m, int n, i
     block.sync();
   }
 
-  cg::thread_block_tile warp = cg::tiled_partition<32>(block);
+  cg::thread_block_tile<WARP_SIZE> warp = cg::tiled_partition<WARP_SIZE>(block);
   sum = cg::reduce(warp, sum, cg::plus<float>());
 
   // grid-level reduction
