@@ -10,11 +10,11 @@ Resources:
 Name | Description
 -----|-------------
 1\. [Vector addition](1_vector_addition/) | Simple example to get everything working.
-2\. [Box blur](2_box_blur/) | 2D CUDA blocks/threads. TODO: optimize with separable filters, moving average.
-3\. [Matrix multiplication SIMT](3_matmul_simt/) | Block tiling, thread tiling, warp tiling.
-4\. [Sum](4_sum/) | Reduction in general.  Prepare for softmax (max and sum).
-5\. [Softmax](5_softmax) | TODO
-6\. [FP6](6_fp6) | FP6 primitives (FP32/FP16/BF16<->FP6).
+2\. [Matrix multiplication SIMT](2_matmul_simt/) | Block tiling, thread tiling, warp tiling.
+3\. [Sum](3_sum/) | Reduction in general.  Prepare for softmax (max and sum).
+4\. [Softmax](4_softmax) | TODO
+5\. [FP6](5_fp6) | FP6 primitives (FP32/FP16/BF16<->FP6).
+6\. [Box blur](6_box_blur/) | 2D CUDA blocks/threads. TODO: optimize with separable filters, moving average.
 7\. Matrix multiplication Tensor Cores | Tensor cores
 ... optimizers, quantization, flash attention, gemv (split-K, stream-K) | TODO
 
