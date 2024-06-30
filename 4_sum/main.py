@@ -21,6 +21,7 @@ output_v4a = module.sum_v4a(input)
 output_v4b = module.sum_v4b(input)
 output_v4c = module.sum_v4c(input)
 output_v5 = module.sum_v5(input)
+output_v6 = module.sum_v6(input)
 
 torch.testing.assert_close(output_v1, output_ref, atol=1e-5, rtol=1e-5)
 torch.testing.assert_close(output_v2, output_ref, atol=1e-4, rtol=1e-4)
@@ -29,6 +30,7 @@ torch.testing.assert_close(output_v4a, output_ref, atol=1e-4, rtol=1e-4)
 torch.testing.assert_close(output_v4b, output_ref, atol=1e-4, rtol=1e-4)
 torch.testing.assert_close(output_v4c, output_ref, atol=1e-4, rtol=1e-4)
 torch.testing.assert_close(output_v5, output_ref, atol=1e-4, rtol=1e-4)
+torch.testing.assert_close(output_v6, output_ref, atol=1e-4, rtol=1e-4)
 
 
 def benchmark(fn, *args):
@@ -51,3 +53,4 @@ benchmark(module.sum_v4a, input)
 benchmark(module.sum_v4b, input)
 benchmark(module.sum_v4c, input)
 benchmark(module.sum_v5, input)
+benchmark(module.sum_v6, input)

@@ -14,9 +14,14 @@ Max theoretical bandwidth                           |           -- |           -
 PyTorch                                             |        16.26 |      100.00% |           507.03
 v1 (1 thread per row)                               |       799.49 |        2.03% |            10.25
 v2 (parallel reduction tree)                        |        26.05 |       64.42% |           314.63
-v3 (thread coarsening)                              |        15.46 |      105.17% |           530.33
-v4a (warp-level reduction - use `volatile` keyword) |        15.17 |      107.19% |           540.41
-v4b (use `__syncwrap()`)                            |        15.30 |      106.26% |           535.92
-v4b (use warp shuffle intrinsic `__shfl_down_sync`) |        15.10 |      106.68% |           542.72
-v5 (cooperative groups)
-v6 (vectorized load)
+v3 (thread coarsening)                              |        15.36 |      105.86% |           533.64
+v4a (warp-level reduction - use `volatile` keyword) |        15.07 |      107.90% |           543.86
+v4b (use `__syncwrap()`)                            |        15.14 |      107.40% |           541.59
+v4c (use warp shuffle intrinsic `__shfl_down_sync`) |        15.07 |      107.90% |           543.88
+v5 (cooperative groups)                             |        15.14 |      107.40% |           541.59
+v6 (vectorized load)                                |        15.01 |      108.33% |           546.14
+
+Lessons learned:
+- Parallel reduction tree. Avoid bank conflicts by adding a tile of data to a tile of data (sequential addressing).
+- Warp intrinsics for warp-to-warp communication (avoid round trip to shared memory).
+- Cooperative groups: seem like they are meant to manage sub-warp computations better. For reduction use case, it is not faster.

@@ -241,43 +241,49 @@ void sum_v5(const float *input, float *output, int M, int N, int BLOCK_SIZE, int
   sum_v5_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
 }
 
-// vectorized load. n must be divisible by 4
-__global__ void sum_v6_kernel(const float *input, float *output, int m, int n, int coarse_factor) {
-  cg::thread_block block = cg::this_thread_block();
-
-  const int row = blockIdx.y;
+// vectorized load. N must be divisible by 4
+// TILE_SIZE must be at least 4x larger than BLOCK_SIZE
+__global__ void sum_v6_kernel(const float *input, float *output, int M, int N, int TILE_SIZE) {
   const int tid = threadIdx.x;
+  const int BLOCK_SIZE = blockDim.x;
+  const int tile_id = blockIdx.x;
+  const int row = blockIdx.y;
+
   extern __shared__ float shmem[];
-  input += row * n;
+  input += row * N + tile_id * TILE_SIZE;
 
   // thread-level reduction w/ vectorized load
   float sum = 0.0f;
-  for (int tile = 0; tile < coarse_factor; tile++) {
-    int input_col = (blockIdx.x * coarse_factor + tile) * blockDim.x + tid;
-    if (input_col < n / 4) {
-      float4 in = reinterpret_cast<const float4 *>(input)[input_col];
-      sum += in.x + in.y + in.z + in.w;
+  for (int idx = tid * 4; idx < TILE_SIZE; idx += BLOCK_SIZE * 4)
+    if (idx < N - tile_id * TILE_SIZE) {
+      float4 tmp = reinterpret_cast<const float4 *>(&input[idx])[0];
+      sum += tmp.x + tmp.y + tmp.z + tmp.w;
     }
-  }
+  shmem[tid] = sum;
+  __syncthreads();
 
-  for (int stride = block.size() / 2; stride >= 32; stride /= 2) {
-    shmem[tid] = sum;
-    block.sync();
+  // block-level reduction
+  for (int stride = BLOCK_SIZE / 2; stride >= WARP_SIZE; stride /= 2) {
     if (tid < stride)
-      sum += shmem[tid + stride];
-    block.sync();
+      shmem[tid] += shmem[tid + stride];
+    __syncthreads();
   }
 
-  cg::thread_block_tile<WARP_SIZE> warp = cg::tiled_partition<WARP_SIZE>(block);
-  sum = cg::reduce(warp, sum, cg::plus<float>());
+  // warp-level reduction
+  if (tid < WARP_SIZE) {
+    sum = shmem[tid];
+    for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2)
+      sum += __shfl_down_sync(0xffffffff, sum, stride);
+  }
 
   // grid-level reduction
-  if (block.thread_rank() == 0)
+  if (tid == 0)
     atomicAdd(output + row, sum);
 }
 
-void sum_v6(const float *input, float *output, int m, int n, int block_size, int coarse_factor) {
-  dim3 grid_size(cdiv(n, block_size * coarse_factor * 4), m);
-  int shmem_size = sizeof(float) * block_size;
-  sum_v6_kernel<<<grid_size, block_size, shmem_size>>>(input, output, m, n, coarse_factor);
+void sum_v6(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
+  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+  dim3 grid_size(cdiv(N, TILE_SIZE), M);
+  const int shmem_size = sizeof(float) * BLOCK_SIZE;
+  sum_v6_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
 }
