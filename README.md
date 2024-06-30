@@ -16,7 +16,7 @@ Name | Description
 5\. [FP6](5_fp6) | FP6 primitives (FP32/FP16/BF16<->FP6).
 6\. [Box blur](6_box_blur/) | 2D CUDA blocks/threads. TODO: optimize with separable filters, moving average.
 7\. Matrix multiplication Tensor Cores | Tensor cores
-... optimizers, quantization, flash attention, gemv (split-K, stream-K) | TODO
+... optimizers, quantization, flash attention, gemv (split-K, stream-K), scan | TODO
 
 To profile a CUDA kernel, run
 
