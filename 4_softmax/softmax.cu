@@ -1,80 +1,162 @@
 __host__ __device__ int cdiv(int a, int b) { return (a + b - 1) / b; }
 __device__ float add(float a, float b) { return a + b; }
 
+constexpr int WARP_SIZE = 32;
+
 template <float f(float, float)>
-__device__ void block_reduce(int BLOCK_SIZE, int tid, float *shmem) {
-  for (int stride = BLOCK_SIZE / 2; stride > 32; stride /= 2) {
-    if (tid < stride)
-      shmem[tid] = f(shmem[tid], shmem[tid + stride]);
+__device__ float thread_reduce(float val, const float *input, int TILE_SIZE, int BLOCK_SIZE, int tid, int max_idx) {
+  for (int idx = tid; idx < TILE_SIZE; idx += BLOCK_SIZE)
+    if (idx < max_idx)
+      val = f(val, input[idx]);
+  return val;
+}
+
+template <float f(float, float)>
+__device__ float block_reduce(float val, int BLOCK_SIZE, int tid, float *reduce_space) {
+  reduce_space[tid] = val;
+  for (int stride = BLOCK_SIZE / 2; stride >= WARP_SIZE; stride /= 2) {
     __syncthreads();
+    if (tid < stride) {
+      val = f(val, reduce_space[tid + stride]);
+      reduce_space[tid] = val;
+    }
   }
+  return val;
 }
 
 template <float f(float, float)>
-__device__ void warp_reduce(int tid, float *shmem) {
-  float val = f(shmem[tid], shmem[tid + 32]);
-  for (int offset = 16; offset > 0; offset /= 2)
-    val = f(val, __shfl_down_sync(0xffffffff, val, offset));
-  shmem[tid] = val;
+__device__ float warp_reduce(float val, int tid) {
+  if (tid < WARP_SIZE)
+    for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2)
+      val = f(val, __shfl_down_sync(0xffffffff, val, stride));
+  return val;
 }
 
-// 1. find max
-// 2. subtract max and take exponential
-// 3. find sum
-// 4. divide by sum
-// assume we can fit 1 row (n elements) in shared memory (48kb -> 12k floats)
+__device__ float block_broadcast(float val, int tid, float *shmem) {
+  if (tid == 0)
+    shmem[0] = val;
+  __syncthreads();
+  return shmem[0];
+}
+
+__global__ void softmax_v1_kernel_pass1(const float *input, float *max_space, int M, int N, int TILE_SIZE) {
+  const int tid = threadIdx.x;
+  const int BLOCK_SIZE = blockDim.x;
+  const int tile_id = blockIdx.x;
+  const int row = blockIdx.y;
+
+  input += row * N + tile_id * TILE_SIZE;
+  max_space += row;
+
+  extern __shared__ float reduce_space[];
+
+  float max_val = -INFINITY;
+  max_val = thread_reduce<max>(max_val, input, TILE_SIZE, BLOCK_SIZE, tid, N);
+  max_val = block_reduce<max>(max_val, BLOCK_SIZE, tid, reduce_space);
+  max_val = warp_reduce<max>(max_val, tid);
+
+  // TODO: atomicMax is not implemented for float
+  if (tid == 0)
+    atomicMax(max_space, max_val);
+}
+
+__global__ void softmax_v1_kernel_pass2(const float *input, float *output, float *max_space, float *normalizer_space, int M, int N, int TILE_SIZE) {
+  const int tid = threadIdx.x;
+  const int BLOCK_SIZE = blockDim.x;
+  const int tile_id = blockIdx.x;
+  const int row = blockIdx.y;
+
+  input += row * N + tile_id * TILE_SIZE;
+  output += row * N + tile_id * TILE_SIZE;
+  max_space += row;
+  normalizer_space += row;
+
+  extern __shared__ float reduce_space[];
+
+  float sum = 0.0f;
+  float subtract = max_space[0];
+  for (int idx = tid; idx < TILE_SIZE; idx += BLOCK_SIZE)
+    if (idx < N) {
+      float val = exp(input[idx] - subtract);
+      output[idx] = val;
+      sum += val;
+    }
+  sum = block_reduce<add>(sum, BLOCK_SIZE, tid, reduce_space);
+  sum = warp_reduce<add>(sum, tid);
+  if (tid == 0)
+    atomicAdd(normalizer_space, sum);
+}
+
+__global__ void softmax_v1_kernel_pass3(float *output, float *normalizer_space, int M, int N, int TILE_SIZE) {
+  const int tid = threadIdx.x;
+  const int BLOCK_SIZE = blockDim.x;
+  const int tile_id = blockIdx.x;
+  const int row = blockIdx.y;
+
+  output += row * N + tile_id * TILE_SIZE;
+  normalizer_space += row;
+
+  float scale = 1.0f / normalizer_space[0];
+  for (int idx = tid; idx < TILE_SIZE; idx += BLOCK_SIZE)
+    if (idx < N)
+      output[idx] *= scale;
+}
+
+void softmax_v1(const float *input, float *output, float *workspace, int M, int N) {
+  // need extra 2M space to store max per row and sum per row
+  const int BLOCK_SIZE = 256;
+  const int TILE_SIZE = BLOCK_SIZE * 4;
+  const dim3 grid_size(cdiv(N, TILE_SIZE), M);
+  const int reduce_space_size = sizeof(float) * BLOCK_SIZE;
+
+  float *max_space = workspace;
+  float *normalizer_space = workspace + M;
+
+  // pass 1: max per row
+  softmax_v1_kernel_pass1<<<grid_size, BLOCK_SIZE, reduce_space_size>>>(input, max_space, M, N, TILE_SIZE);
+
+  // pass 2: exp(x - max) and sum
+  softmax_v1_kernel_pass2<<<grid_size, BLOCK_SIZE, reduce_space_size>>>(input, output, max_space, normalizer_space, M, N, TILE_SIZE);
+
+  // pass 3: normalize
+  softmax_v1_kernel_pass3<<<grid_size, BLOCK_SIZE>>>(output, normalizer_space, M, N, TILE_SIZE);
+}
+
 __global__ void mini_softmax_kernel(const float *input, float *output, int M, int N) {
   const int tid = threadIdx.x;
-  const int row = blockIdx.y;
   const int BLOCK_SIZE = blockDim.x;
+  const int row = blockIdx.y;
 
-  extern __shared__ float shmem_reduce[];          // size block_size
-  float *shmem_elems = shmem_reduce + BLOCK_SIZE;  // size n
+  input += row * N;
+  output += row * N;
 
-  // load data to shared memory and perform thread-level max
-  // each thread will load tid, tid + block_size, ... to ensure coalesce memory access
+  extern __shared__ float shmem_reduce[];
+
+  // pass 1: find max
   float max_val = -INFINITY;
-  for (int col = tid; col < N; col += BLOCK_SIZE) {
-    float val = input[row * N + col];
-    max_val = max(max_val, val);
-    shmem_elems[col] = val;
-  }
+  max_val = thread_reduce<max>(max_val, input, N, BLOCK_SIZE, tid, N);
+  max_val = block_reduce<max>(max_val, BLOCK_SIZE, tid, shmem_reduce);
+  max_val = warp_reduce<max>(max_val, tid);
+  max_val = block_broadcast(max_val, tid, shmem_reduce);
 
-  shmem_reduce[tid] = max_val;
-  __syncthreads();
-
-  block_reduce<max>(BLOCK_SIZE, tid, shmem_reduce);
-
-  if (tid < 32)
-    warp_reduce<max>(tid, shmem_reduce);
-  __syncthreads();
-
-  // subtract max and apply exponential. also perform thread-level sum
-  max_val = shmem_reduce[0];
+  // pass 2: subtract max and apply exponential + find sum
   float sum = 0.0f;
   for (int col = tid; col < N; col += BLOCK_SIZE) {
-    float val = expf(shmem_elems[col] - max_val);
-    sum += val;
-    shmem_elems[col] = val;
+    sum += exp(input[col] - max_val);
   }
+  sum = block_reduce<add>(sum, BLOCK_SIZE, tid, shmem_reduce);
+  sum = warp_reduce<add>(sum, tid);
+  sum = block_broadcast(sum, tid, shmem_reduce);
 
-  shmem_reduce[tid] = sum;
-  __syncthreads();
-
-  block_reduce<add>(BLOCK_SIZE, tid, shmem_reduce);
-
-  if (tid < 32)
-    warp_reduce<add>(tid, shmem_reduce);
-  __syncthreads();
-
-  float normalizer = 1.0f / shmem_reduce[0];
-  for (int col = 0; col < N; col += BLOCK_SIZE) {
-    output[row * N + col] = shmem_elems[col] * normalizer;
-  }
+  // pass 3: normalize
+  // NOTE: if N is small, we can cache exp(input[col] - max_val) in shared memory
+  float normalizer = 1.0f / sum;
+  for (int col = tid; col < N; col += BLOCK_SIZE)
+    output[col] = exp(input[col] - max_val) * normalizer;
 }
 
 void mini_softmax(const float *input, float *output, int M, int N, int BLOCK_SIZE) {
   dim3 grid_size(1, M);
-  int shmem_size = sizeof(float) * (BLOCK_SIZE + N);
+  int shmem_size = sizeof(float) * BLOCK_SIZE;
   mini_softmax_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
 }
