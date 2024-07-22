@@ -136,8 +136,8 @@ void softmax_v1(const float *input, float *output, float *workspace, int M, int 
   softmax_v1_kernel_pass3<<<grid_size, BLOCK_SIZE>>>(output, normalizer_space, M, N, TILE_SIZE);
 }
 
-template <int V2>
-__global__ void mini_softmax_kernel(const float *input, float *output, int M, int N) {
+template <bool STORE_INTERMEDIATE>
+__global__ void softmax_v2_kernel(const float *input, float *output, int M, int N) {
   const int tid = threadIdx.x;
   const int BLOCK_SIZE = blockDim.x;
   const int row = blockIdx.y;
@@ -159,7 +159,7 @@ __global__ void mini_softmax_kernel(const float *input, float *output, int M, in
   for (int col = tid; col < N; col += BLOCK_SIZE) {
     float val = exp(input[col] - max_val);
     sum += val;
-    if (V2)
+    if (STORE_INTERMEDIATE)
       output[col] = val;
   }
   sum = block_reduce<add>(sum, BLOCK_SIZE, tid, shmem_reduce);
@@ -170,12 +170,90 @@ __global__ void mini_softmax_kernel(const float *input, float *output, int M, in
   // NOTE: if N is small, we can cache exp(input[col] - max_val) in shared memory
   float normalizer = 1.0f / sum;
   for (int col = tid; col < N; col += BLOCK_SIZE)
-    output[col] = (V2 ? output[col] : exp(input[col] - max_val)) * normalizer;
+    output[col] = (STORE_INTERMEDIATE ? output[col] : exp(input[col] - max_val)) * normalizer;
 }
 
-void mini_softmax(const float *input, float *output, int M, int N) {
+void softmax_v2a(const float *input, float *output, int M, int N) {
   const int BLOCK_SIZE = 1024;
   const dim3 grid_size(1, M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE;
-  mini_softmax_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
+  softmax_v2_kernel<false><<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
+}
+
+void softmax_v2b(const float *input, float *output, int M, int N) {
+  const int BLOCK_SIZE = 1024;
+  const dim3 grid_size(1, M);
+  const int shmem_size = sizeof(float) * BLOCK_SIZE;
+  softmax_v2_kernel<true><<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
+}
+
+__global__ void softmax_v3_kernel_pass1(const float *input, float *workspace, int M, int N, int TILE_SIZE) {
+  const int tid = threadIdx.x;
+  const int BLOCK_SIZE = blockDim.x;
+  const int tile_id = blockIdx.x;
+  const int row = blockIdx.y;
+
+  input += row * N + tile_id * TILE_SIZE;
+  max_space = workspace + row;
+  normalizer_space = workspace + M + row;
+
+  extern __shared__ float max_shared[];
+  float *normalizer_shared = max_shared + BLOCK_SIZE;
+
+  // algorithm 3 in https://arxiv.org/pdf/1805.02867
+  float max_val = -INFINITY;
+  float normalizer = 0.0f;
+  for (int idx = tid; idx < TILE_SIZE; idx += BLOCK_SIZE) {
+    float val = input[idx];
+    float old_max_val = max_val;
+    max_val = max(max_val, val);
+    normalizer = normalizer * exp(old_max_val - max_val) + exp(val - max_val);
+  }
+
+  // equation 4, section 3.1 in https://arxiv.org/pdf/1805.02867
+  max_shared[tid] = max_val;
+  normalizer_shared[tid] = normalizer;
+  for (int stride = BLOCK_SIZE / 2; stride < WARP_SIZE; stride /= 2) {
+    __syncthreads();
+    if (tid < stride) {
+      float other_max = max_shared[tid + stride];
+      float other_normalizer = normalizer_shared[tid + stride];
+
+      float new_max = max(max_val, other_max);
+      normalizer = normalizer * exp(max_val - new_max) + other_normalizer * exp(other_max - new_max);
+      max_val = new_max;
+      max_shared[tid] = new_max;
+      normalizer_shared[tid] = normalizer;
+    }
+  }
+
+  if (tid < WARP_SIZE)
+    for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2) {
+      float other_max = __shfl_down_sync(0xffffffff, max_val, stride);
+      float other_normalizer = __shfl_down_sync(0xffffffff, normalizer, stride);
+
+      float new_max = max(max_val, other_max);
+      normalizer = normalizer * exp(max_val - new_max) + other_normalizer * exp(other_max - new_max);
+      max_val = new_max;
+    }
+
+  // TODO: normalizer will be wrong. either use atomicCAS or call another kernel.
+  if (tid == 0) {
+    atomicMax(max_space, max_val);
+    atomicAdd(normalizer_space, normalizer);
+  }
+}
+
+// online softmax
+void softmax_v3(const float *input, float *output, float *workspace, int M, int N) {
+  const int BLOCK_SIZE = 256;
+  const int TILE_SIZE = BLOCK_SIZE * 4;
+  const dim3 grid_size(cdiv(N, BLOCK_SIZE), M);
+  const int shmem_size = sizeof(float) * BLOCK_SIZE * 2;
+
+  // pass 1: find max and normalizer at the same time
+  softmax_v3_kernel_pass1<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, workspace, M, N, TILE_SIZE);
+
+  // pass 2: calculate output
+  softmax_v3_kernel_pass2<<<grid_size, BLOCK_SIZE>>>(input, output, workspace, M, N, TILE_SIZE);
 }
