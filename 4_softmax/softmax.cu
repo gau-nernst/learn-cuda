@@ -39,6 +39,20 @@ __device__ float block_broadcast(float val, int tid, float *shmem) {
   return shmem[0];
 }
 
+// https://stackoverflow.com/a/72461459
+// when val > 0, use atomicMax signed int. in sint representation:
+//   - -ve float < +ve float.
+//   - less +ve float < more +ve float.
+// when val < 0, use atomicMin unsigned int. in uint representation:
+//   - +ve float < -ve float.
+//   - less -ve float < more -ve float.
+// we use !signbit(value) instead of (value > 0) because there is -0 in float.
+__device__ float atomicMax(float *address, float val) {
+  return !signbit(value) ? 
+    __int_as_float(atomicMax(reinterpret_cast<int *>(address), __float_as_int(value))) :
+    __uint_as_float(atomicMin(reinterpret_cast<unsigned int*>(address), __float_as_uint(value)));
+}
+
 __global__ void softmax_v1_kernel_pass1(const float *input, float *max_space, int M, int N, int TILE_SIZE) {
   const int tid = threadIdx.x;
   const int BLOCK_SIZE = blockDim.x;
@@ -122,6 +136,7 @@ void softmax_v1(const float *input, float *output, float *workspace, int M, int 
   softmax_v1_kernel_pass3<<<grid_size, BLOCK_SIZE>>>(output, normalizer_space, M, N, TILE_SIZE);
 }
 
+template <int V2>
 __global__ void mini_softmax_kernel(const float *input, float *output, int M, int N) {
   const int tid = threadIdx.x;
   const int BLOCK_SIZE = blockDim.x;
@@ -142,7 +157,10 @@ __global__ void mini_softmax_kernel(const float *input, float *output, int M, in
   // pass 2: subtract max and apply exponential + find sum
   float sum = 0.0f;
   for (int col = tid; col < N; col += BLOCK_SIZE) {
-    sum += exp(input[col] - max_val);
+    float val = exp(input[col] - max_val);
+    sum += val;
+    if (V2)
+      output[col] = val;
   }
   sum = block_reduce<add>(sum, BLOCK_SIZE, tid, shmem_reduce);
   sum = warp_reduce<add>(sum, tid);
@@ -152,11 +170,12 @@ __global__ void mini_softmax_kernel(const float *input, float *output, int M, in
   // NOTE: if N is small, we can cache exp(input[col] - max_val) in shared memory
   float normalizer = 1.0f / sum;
   for (int col = tid; col < N; col += BLOCK_SIZE)
-    output[col] = exp(input[col] - max_val) * normalizer;
+    output[col] = (V2 ? output[col] : exp(input[col] - max_val)) * normalizer;
 }
 
-void mini_softmax(const float *input, float *output, int M, int N, int BLOCK_SIZE) {
-  dim3 grid_size(1, M);
-  int shmem_size = sizeof(float) * BLOCK_SIZE;
+void mini_softmax(const float *input, float *output, int M, int N) {
+  const int BLOCK_SIZE = 1024;
+  const dim3 grid_size(1, M);
+  const int shmem_size = sizeof(float) * BLOCK_SIZE;
   mini_softmax_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
 }
