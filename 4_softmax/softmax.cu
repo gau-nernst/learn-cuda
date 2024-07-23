@@ -48,9 +48,9 @@ __device__ float block_broadcast(float val, int tid, float *shmem) {
 //   - less -ve float < more -ve float.
 // we use !signbit(value) instead of (value > 0) because there is -0 in float.
 __device__ float atomicMax(float *address, float val) {
-  return !signbit(value) ? 
-    __int_as_float(atomicMax(reinterpret_cast<int *>(address), __float_as_int(value))) :
-    __uint_as_float(atomicMin(reinterpret_cast<unsigned int*>(address), __float_as_uint(value)));
+  return !signbit(val) ? 
+    __int_as_float(atomicMax(reinterpret_cast<int *>(address), __float_as_int(val))) :
+    __uint_as_float(atomicMin(reinterpret_cast<unsigned int*>(address), __float_as_uint(val)));
 }
 
 __global__ void softmax_v1_kernel_pass1(const float *input, float *max_space, int M, int N, int TILE_SIZE) {
@@ -194,8 +194,8 @@ __global__ void softmax_v3_kernel_pass1(const float *input, float *workspace, in
   const int row = blockIdx.y;
 
   input += row * N + tile_id * TILE_SIZE;
-  max_space = workspace + row;
-  normalizer_space = workspace + M + row;
+  float *max_space = workspace + row;
+  float *normalizer_space = workspace + M + row;
 
   extern __shared__ float max_shared[];
   float *normalizer_shared = max_shared + BLOCK_SIZE;
@@ -237,11 +237,36 @@ __global__ void softmax_v3_kernel_pass1(const float *input, float *workspace, in
       max_val = new_max;
     }
 
-  // TODO: normalizer will be wrong. either use atomicCAS or call another kernel.
   if (tid == 0) {
-    atomicMax(max_space, max_val);
-    atomicAdd(normalizer_space, normalizer);
+    float other_max = atomicMax(max_space, max_val);
+    float new_max = max(max_val, other_max);
+
+    // using atomicCAS is slow
+    // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#atomic-functions
+    float other_normalizer = normalizer_space[0];
+    float assumed;
+    do {
+      assumed = other_normalizer;
+      float new_normalizer = normalizer * exp(max_val - new_max) + other_normalizer * exp(other_max - new_max);
+      other_normalizer = atomicCAS(reinterpret_cast<int *>(normalizer_space), __float_as_int(other_normalizer), __float_as_int(new_normalizer));
+    } while (assumed != other_normalizer);
   }
+}
+
+__global__ void softmax_v3_kernel_pass2(const float *input, float *output, const float *workspace, int M, int N, int TILE_SIZE) {
+  const int tid = threadIdx.x;
+  const int BLOCK_SIZE = blockDim.x;
+  const int tile_id = blockIdx.x;
+  const int row = blockIdx.y;
+
+  input += row * N + tile_id * TILE_SIZE;
+  output += row * N + tile_id * TILE_SIZE;
+  float row_max  = workspace[row];
+  float scale = 1.0f / workspace[M + row];
+
+  for (int idx = tid; idx < TILE_SIZE; idx += BLOCK_SIZE)
+    if (idx < N)
+      output[idx] = exp(input[idx] - row_max) * scale;
 }
 
 // online softmax
