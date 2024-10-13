@@ -4,28 +4,32 @@ Resources:
 - https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#shared-memory
 - https://siboehm.com/articles/22/CUDA-MMM
 - https://leimao.github.io/article/CUDA-Matrix-Multiplication-Optimization/ and https://github.com/leimao/CUDA-GEMM-Optimization/
+- https://alexarmbr.github.io/2024/08/10/How-To-Write-A-Fast-Matrix-Multiplication-From-Scratch-With-Tensor-Cores.html
 - https://github.com/NVIDIA/cutlass/blob/main/media/docs/efficient_gemm.md
 - https://developer.nvidia.com/blog/cutlass-linear-algebra-cuda/
 
 For M = N = K = 4096, 4070Ti SUPER, compile with `-O3 --use_fast_math`
 
-Kernel name                                                        | Latency (ms) | % of CuBLAS | Bandwidth (GB/s)
--------------------------------------------------------------------|--------------|-------------|------------------
-CuBLAS (via PyTorch) `cutlass_80_simt_sgemm_256x128_8x4_nn_align1` |         4.77 |     100.00% |           104.25
-v1 (naive 1 row dot 1 column)                                      |        56.21 |       8.49% |           195.98
-v2 (shared memory cache with 2D block tiling)                      |        48.14 |       9.91% |           179.61
-v3 (thread coarsening)                                             |        39.03 |      12.22% |            38.49
-v4 (register cache with 2D thread tiling)                          |         8.92 |      53.48% |            76.43
-v5 (warp tiling)                                                   |         8.83 |      54.02% |           140.26
-v6a (remove bounds check. vectorized global memory access)         |         6.60 |      72.27% |           320.89
-v6b (transpose A in shared memory)                                 |         5.66 |      84.28% |           202.24
+Kernel name                                                        | Duration (ms) | % of CuBLAS | Bandwidth (GB/s)
+-------------------------------------------------------------------|---------------|-------------|------------------
+CuBLAS (via PyTorch) `cutlass_80_simt_sgemm_256x128_8x4_nn_align1` |          4.77 |     100.00% |           104.25
+v1 (naive 1 row dot 1 column)                                      |         56.21 |       8.49% |           195.98
+v2 (2D block-tiling with shared memory cache)                      |         48.14 |       9.91% |           179.61
+v3 (thread coarsening)                                             |         39.03 |      12.22% |            38.49
+v4 (2D thread-tiling with register cache)                          |          8.92 |      53.48% |            76.43
+v5 (2D warp-tiling with register cache)                            |          8.75 |      54.51% |           141.89
+v6a (remove bounds check. vectorized global memory access)         |          5.72 |      83.39% |           195.41
+v6b (transpose A in shared memory)                                 |          5.16 |      92.44% |           130.28
 
 Lessons learned:
 
-- Tiling: block-level (shared memory cache), warp-level, and thread-level (register cache) (though I don't see much benefits for warp tiling)
+- Hierarchical tiling: block-level (shared memory cache), warp-level, and thread-level (register cache).
 - Vectorized memory access: not sure why it helps as we already use 128-byte memory transaction. Perhaps it reduces number of instructions and thus better pipelining?
-- Avoid bank conflicts by padding shared memory (not used in table above as gain is not significant). There are more sophisticated shared memory layouts that I have yet to understand.
-- Double buffering: use double amount of shared memory, but don't need to `__syncthreads()` after computation code -> better data loading and computation interleaving. Not used in table above as gain is not significant.
+- Reduce memory address computations: increment memory address after each iteration instead of calculating from the base address every time.
+- Avoid bank conflicts:
+  - Padding shared memory (TODO).
+  - Swizzled layout (TODO).
+- Double buffering: use double amount of shared memory, but don't need to `__syncthreads()` after computation code -> better data loading and computation interleaving (TODO).
 
 ## CuBLAS `cutlass_80_simt_sgemm_256x128_8x4_nn_align1`
 
