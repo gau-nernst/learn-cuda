@@ -68,7 +68,7 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
   __shared__ T A_shared[BLOCK_M * BLOCK_K];
   __shared__ T B_shared[BLOCK_N * BLOCK_K];
 
-  uint32_t acc[NUM_MMA_M][NUM_MMA_N][4] = {0};
+  float acc[NUM_MMA_M][NUM_MMA_N][4] = {0};
   uint32_t A_reg[NUM_MMA_M][NUM_MMA_K][2];      // 2x (8,8) matrix
   uint32_t B_reg[NUM_MMA_N][NUM_MMA_K];         // 1x (8,8) matrix
 
@@ -82,23 +82,26 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
     __syncthreads();
 
     for (int warp_k = 0; warp_k < BLOCK_K; warp_k += WARP_K) {
-      // convert generic address to .shared state space address expected by inline PTX
+      // load data from shared memory to registers using ldmatrix
+      // https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-ldmatrix
+
+      // 1. convert generic address to .shared state space address expected by inline PTX
       uint32_t A_tile_addr = cvta_shared(A_warp_tile);
       uint32_t B_tile_addr = cvta_shared(B_warp_tile);
 
-      // TODO: figure out what is this
-      A_tile_addr += (lane_id % MMA_M) * BLOCK_K * sizeof(T);
-      B_tile_addr += (lane_id % MMA_N) * BLOCK_K * sizeof(T);
+      // 2. thread 0 holds address of row 0
+      // thread 1 holds address of row 1, and so on
+      A_tile_addr += lane_id * BLOCK_K * sizeof(T);
+      B_tile_addr += lane_id * BLOCK_K * sizeof(T);
 
       // load A to registers
-      // https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-ldmatrix
       // ldmatrix can only load 8x8 matrix. for 16x8 tile, we need to use x2
       for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++) {
         for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++) {
+          uint32_t *A_reg_frag = A_reg[mma_tile_id_m][mma_tile_id_k];
           asm volatile (
             "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
-            : "=r"(A_reg[mma_tile_id_m][mma_tile_id_k][0]), // output
-              "=r"(A_reg[mma_tile_id_m][mma_tile_id_k][1])
+            : "=r"(A_reg_frag[0]), "=r"(A_reg_frag[1])  // output
             : "r"(A_tile_addr)  // input
           );
           A_tile_addr += MMA_K * sizeof(T);
@@ -124,16 +127,18 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
       for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++)
         for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++)
           for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++) {
+            float *acc_frag = acc[mma_tile_id_m][mma_tile_id_n];
+            uint32_t *A_reg_frag = A_reg[mma_tile_id_m][mma_tile_id_k];
             asm volatile (
               "mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 "
               "{%0, %1, %2, %3}, "  // D
               "{%4, %5}, "          // A
               "{%6}, "              // B
               "{%7, %8, %9, %10};"  // C
-              : "=r"(acc[mma_tile_id_m][mma_tile_id_n][0]), "=r"(acc[mma_tile_id_m][mma_tile_id_n][1]), "=r"(acc[mma_tile_id_m][mma_tile_id_n][2]), "=r"(acc[mma_tile_id_m][mma_tile_id_n][3])
-              : "r"(A_reg[mma_tile_id_m][mma_tile_id_k][0]), "r"(A_reg[mma_tile_id_m][mma_tile_id_k][1]),
+              : "=f"(acc_frag[0]), "=f"(acc_frag[1]), "=f"(acc_frag[2]), "=f"(acc_frag[3])
+              : "r"(A_reg_frag[0]), "r"(A_reg_frag[1]),
                 "r"(B_reg[mma_tile_id_n][mma_tile_id_k]),
-                "r"(acc[mma_tile_id_m][mma_tile_id_n][0]), "r"(acc[mma_tile_id_m][mma_tile_id_n][1]), "r"(acc[mma_tile_id_m][mma_tile_id_n][2]), "r"(acc[mma_tile_id_m][mma_tile_id_n][3])
+                "f"(acc_frag[0]), "f"(acc_frag[1]), "f"(acc_frag[2]), "f"(acc_frag[3])
             );
           }
 
@@ -146,6 +151,52 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
 
     A += BLOCK_K;
     B += BLOCK_K;
+  }
+
+  const int C_offset_m = offset_m + warp_tile_offset_m;
+  const int C_offset_n = offset_n + warp_tile_offset_n;
+  C += C_offset_m * N + C_offset_n;
+
+  // check output layout here
+  // https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-1688
+  const int a0_row = lane_id >> 2; 
+  const int a0_col = (lane_id % 4) * 2;
+  C += a0_row * N + a0_col;
+
+  for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++) {
+    for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++) {
+      if constexpr (std::is_same<T, __half>::value) {
+        __half2 tmp;
+        float *acc_frag = acc[mma_tile_id_m][mma_tile_id_n];
+
+        // write a0 and a1
+        tmp.x = __float2half(acc_frag[0]);
+        tmp.y = __float2half(acc_frag[1]);
+        reinterpret_cast<__half2 *>(C)[0] = tmp;
+
+        // write a2 and a3
+        tmp.x = __float2half(acc_frag[2]);
+        tmp.y = __float2half(acc_frag[3]);
+        reinterpret_cast<__half2 *>(C + 8 * N)[0] = tmp;
+      }
+      else if constexpr (std::is_same<T, nv_bfloat16>::value) {
+        nv_bfloat162 tmp;
+        float *acc_frag = acc[mma_tile_id_m][mma_tile_id_n];
+
+        // write a0 and a1
+        tmp.x = __float2bfloat16(acc_frag[0]);
+        tmp.y = __float2bfloat16(acc_frag[1]);
+        reinterpret_cast<nv_bfloat162 *>(C)[0] = tmp;
+
+        // write a2 and a3
+        tmp.x = __float2bfloat16(acc_frag[2]);
+        tmp.y = __float2bfloat16(acc_frag[3]);
+        reinterpret_cast<nv_bfloat162 *>(C + 8 * N)[0] = tmp;
+      }
+
+      C += MMA_N;
+    }
+    C += MMA_M * N;
   }
 }
 
