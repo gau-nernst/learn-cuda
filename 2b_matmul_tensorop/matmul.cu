@@ -28,6 +28,34 @@ __device__ void load_shared_b128(const T *in, int in_row_stride, T *out, int tid
 
 __device__ uint32_t cvta_shared(void const *ptr) { return static_cast<uint32_t>(__cvta_generic_to_shared(ptr)); }
 
+template <typename T> __device__ void mma_m16n8k8(uint32_t A[2], uint32_t B, float acc[4]);
+template <> __device__ void mma_m16n8k8<half>(uint32_t A[2], uint32_t B, float acc[4]) {
+  asm volatile (
+    "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
+    "{%0, %1, %2, %3}, "  // D
+    "{%4, %5}, "          // A
+    "{%6}, "              // B
+    "{%7, %8, %9, %10};"  // C
+    : "=f"(acc[0]), "=f"(acc[1]), "=f"(acc[2]), "=f"(acc[3])
+    : "r"(A[0]), "r"(A[1]),
+      "r"(B),
+      "f"(acc[0]), "f"(acc[1]), "f"(acc[2]), "f"(acc[3])
+  );
+}
+template <> __device__ void mma_m16n8k8<nv_bfloat16>(uint32_t A[2], uint32_t B, float acc[4]) {
+  asm volatile (
+    "mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 "
+    "{%0, %1, %2, %3}, "  // D
+    "{%4, %5}, "          // A
+    "{%6}, "              // B
+    "{%7, %8, %9, %10};"  // C
+    : "=f"(acc[0]), "=f"(acc[1]), "=f"(acc[2]), "=f"(acc[3])
+    : "r"(A[0]), "r"(A[1]),
+      "r"(B),
+      "f"(acc[0]), "f"(acc[1]), "f"(acc[2]), "f"(acc[3])
+  );
+}
+
 template <typename T> __device__ ushort f32_to_b16(float x);
 template <> __device__ ushort f32_to_b16<half>(float x) { return __half_as_ushort(__float2half(x)); }
 template <> __device__ ushort f32_to_b16<nv_bfloat16>(float x) { return __bfloat16_as_ushort(__float2bfloat16(x)); }
@@ -73,11 +101,11 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
   __shared__ T A_shared[BLOCK_M * BLOCK_K];
   __shared__ T B_shared[BLOCK_N * BLOCK_K];
 
-  float acc[NUM_MMA_M][NUM_MMA_N][4] = {0.0f};
-  uint32_t A_reg[NUM_MMA_M][NUM_MMA_K][2];      // 2x (8,8) matrix
-  uint32_t B_reg[NUM_MMA_N][NUM_MMA_K];         // 1x (8,8) matrix
+  float acc[NUM_MMA_M][NUM_MMA_N][4] = {0.0f};  // each thread holds 4 output float
+  uint32_t A_reg[NUM_MMA_M][NUM_MMA_K][2];      // each thread holds 2 input f16x2
+  uint32_t B_reg[NUM_MMA_N][NUM_MMA_K];         // each thread holds 1 input f16x1
 
-  // first A and B warp-tile along the BLOCK_K (we will iterate along BLOCK_K with step_size=WARP_K)
+  // first A and B warp-tile along BLOCK_K dim (we will iterate along BLOCK_K with step_size=WARP_K)
   const T *A_warp_tile = reinterpret_cast<const T *>(A_shared) + warp_tile_offset_m * BLOCK_K;
   const T *B_warp_tile = reinterpret_cast<const T *>(B_shared) + warp_tile_offset_n * BLOCK_K;
 
@@ -93,8 +121,8 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
       // convert generic address to .shared state space address expected by inline PTX
       // thread 0 holds address of row 0
       // thread 1 holds address of row 1, and so on
-      uint32_t A_tile_addr = cvta_shared(A_warp_tile + lane_id * BLOCK_K);
-      uint32_t B_tile_addr = cvta_shared(B_warp_tile + lane_id * BLOCK_K);
+      uint32_t A_tile_addr = cvta_shared(A_warp_tile + lane_id * BLOCK_K + warp_k);
+      uint32_t B_tile_addr = cvta_shared(B_warp_tile + lane_id * BLOCK_K + warp_k);
 
       // load A to registers
       // ldmatrix can only load 8x8 matrix. for 16x8 tile, we need to use x2
@@ -127,27 +155,11 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
       for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++)
         for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++)
           for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++)
-          {
-            float *acc_frag = acc[mma_tile_id_m][mma_tile_id_n];
-            uint32_t *A_reg_frag = A_reg[mma_tile_id_m][mma_tile_id_k];
-            asm volatile (
-              "mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 "
-              "{%0, %1, %2, %3}, "  // D
-              "{%4, %5}, "          // A
-              "{%6}, "              // B
-              "{%7, %8, %9, %10};"  // C
-              : "=f"(acc_frag[0]), "=f"(acc_frag[1]), "=f"(acc_frag[2]), "=f"(acc_frag[3])
-              : "r"(A_reg_frag[0]), "r"(A_reg_frag[1]),
-                "r"(B_reg[mma_tile_id_n][mma_tile_id_k]),
-                "f"(acc_frag[0]), "f"(acc_frag[1]), "f"(acc_frag[2]), "f"(acc_frag[3])
-            );
-          }
-
-      A_warp_tile += WARP_K;
-      B_warp_tile += WARP_K;
+            mma_m16n8k8<T>(
+              A_reg[mma_tile_id_m][mma_tile_id_k],
+              B_reg[mma_tile_id_n][mma_tile_id_k],
+              acc[mma_tile_id_m][mma_tile_id_n]);
     }
-    A_warp_tile -= BLOCK_K;  // reset
-    B_warp_tile -= BLOCK_K;
     __syncthreads();
 
     A += BLOCK_K;
@@ -164,26 +176,22 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
   const int a0_col = (lane_id % 4) * 2;
   C += a0_row * N + a0_col;
 
-  for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++) {
+  for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++)
     for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++) {
+      T *C_local = C + mma_tile_id_m * MMA_M * N + mma_tile_id_n * MMA_N;
       float *acc_frag = acc[mma_tile_id_m][mma_tile_id_n];
       ushort2 tmp;
 
       // write a0 and a1
       tmp.x = f32_to_b16<T>(acc_frag[0]);
       tmp.y = f32_to_b16<T>(acc_frag[1]);
-      reinterpret_cast<ushort2 *>(C)[0] = tmp;
+      reinterpret_cast<ushort2 *>(C_local)[0] = tmp;
 
       // write a2 and a3
       tmp.x = f32_to_b16<T>(acc_frag[2]);
       tmp.y = f32_to_b16<T>(acc_frag[3]);
-      reinterpret_cast<ushort2 *>(C + 8 * N)[0] = tmp;
-
-      C += MMA_N;
+      reinterpret_cast<ushort2 *>(C_local + 8 * N)[0] = tmp;
     }
-    C -= WARP_N;
-    C += MMA_M * N;
-  }
 }
 
 void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
