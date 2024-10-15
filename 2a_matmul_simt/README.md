@@ -1,4 +1,4 @@
-# Matrix Multiplication
+# Matrix Multiplication - CUDA Cores
 
 Resources:
 - https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#shared-memory

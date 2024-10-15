@@ -10,7 +10,8 @@ Resources:
 Name | Description
 -----|-------------
 1\. [Vector addition](1_vector_addition/) | Simple example to get everything working.
-2\. [Matrix multiplication SIMT](2_matmul_simt/) | Block tiling, thread tiling, warp tiling.
+2\. [Matrix multiplication SIMT](2a_matmul_simt/) | Block tiling, thread tiling, warp tiling.
+2\. [Matrix multiplication TensorOp](2b_matmul_tensorop/) | Inline PTX, `cvta`, `ldmatrix`, `mma`.
 3\. [Sum](3_sum/) | Reduction in general.  Prepare for softmax (max and sum).
 4\. [Softmax](4_softmax) | TODO
 5\. [FP6](5_fp6) | FP6 primitives (FP32/FP16/BF16<->FP6).

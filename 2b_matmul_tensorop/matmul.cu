@@ -28,6 +28,10 @@ __device__ void load_shared_b128(const T *in, int in_row_stride, T *out, int tid
 
 __device__ uint32_t cvta_shared(void const *ptr) { return static_cast<uint32_t>(__cvta_generic_to_shared(ptr)); }
 
+template <typename T> __device__ ushort f32_to_b16(float x);
+template <> __device__ ushort f32_to_b16<half>(float x) { return __half_as_ushort(__float2half(x)); }
+template <> __device__ ushort f32_to_b16<nv_bfloat16>(float x) { return __bfloat16_as_ushort(__float2bfloat16(x)); }
+
 template <
   int BLOCK_M, int BLOCK_N, int BLOCK_K,
   int WARP_M, int WARP_N, int WARP_K,
@@ -162,37 +166,22 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
 
   for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++) {
     for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++) {
-      if constexpr (std::is_same<T, __half>::value) {
-        __half2 tmp;
-        float *acc_frag = acc[mma_tile_id_m][mma_tile_id_n];
+      float *acc_frag = acc[mma_tile_id_m][mma_tile_id_n];
+      ushort2 tmp;
 
-        // write a0 and a1
-        tmp.x = __float2half(acc_frag[0]);
-        tmp.y = __float2half(acc_frag[1]);
-        reinterpret_cast<__half2 *>(C)[0] = tmp;
+      // write a0 and a1
+      tmp.x = f32_to_b16<T>(acc_frag[0]);
+      tmp.y = f32_to_b16<T>(acc_frag[1]);
+      reinterpret_cast<ushort2 *>(C)[0] = tmp;
 
-        // write a2 and a3
-        tmp.x = __float2half(acc_frag[2]);
-        tmp.y = __float2half(acc_frag[3]);
-        reinterpret_cast<__half2 *>(C + 8 * N)[0] = tmp;
-      }
-      else if constexpr (std::is_same<T, nv_bfloat16>::value) {
-        nv_bfloat162 tmp;
-        float *acc_frag = acc[mma_tile_id_m][mma_tile_id_n];
-
-        // write a0 and a1
-        tmp.x = __float2bfloat16(acc_frag[0]);
-        tmp.y = __float2bfloat16(acc_frag[1]);
-        reinterpret_cast<nv_bfloat162 *>(C)[0] = tmp;
-
-        // write a2 and a3
-        tmp.x = __float2bfloat16(acc_frag[2]);
-        tmp.y = __float2bfloat16(acc_frag[3]);
-        reinterpret_cast<nv_bfloat162 *>(C + 8 * N)[0] = tmp;
-      }
+      // write a2 and a3
+      tmp.x = f32_to_b16<T>(acc_frag[2]);
+      tmp.y = f32_to_b16<T>(acc_frag[3]);
+      reinterpret_cast<ushort2 *>(C + 8 * N)[0] = tmp;
 
       C += MMA_N;
     }
+    C -= WARP_N;
     C += MMA_M * N;
   }
 }
@@ -203,7 +192,7 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   assert(is_power_of_two(K) && "K must be a power of 2");
 
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
-  const int WARP_M = 64, WARP_N = 32, WARP_K = 32;
+  const int WARP_M = 64, WARP_N = 32, WARP_K = 16;
 
   const int BLOCK_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
