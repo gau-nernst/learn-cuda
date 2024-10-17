@@ -200,7 +200,7 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   assert(is_power_of_two(K) && "K must be a power of 2");
 
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
-  const int WARP_M = 64, WARP_N = 32, WARP_K = 16;
+  const int WARP_M = 64, WARP_N = 64, WARP_K = 16;
 
   const int BLOCK_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
@@ -368,7 +368,7 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   assert(is_power_of_two(K) && "K must be a power of 2");
 
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
-  const int WARP_M = 64, WARP_N = 32, WARP_K = 16;
+  const int WARP_M = 64, WARP_N = 64, WARP_K = 16;
 
   const int BLOCK_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
