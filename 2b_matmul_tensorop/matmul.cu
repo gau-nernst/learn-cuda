@@ -12,7 +12,7 @@ constexpr int WARP_SIZE = 32;
 
 
 template <int BLOCK_SIZE, int HEIGHT, int WIDTH, typename T>
-__device__ void load_shared_b128(const T *in, int in_row_stride, T *out, int tid) {
+__device__ void load_shared_b128(const T *in, int in_row_stride, T *out, int out_row_stride, int tid) {
   // number of elements to do 128-bit load
   // e.g. FP32 -> 4 elements, BF16 -> 8 elements.
   using load_type = uint4;
@@ -22,7 +22,7 @@ __device__ void load_shared_b128(const T *in, int in_row_stride, T *out, int tid
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
     load_type tmp = reinterpret_cast<const load_type *>(&in[row * in_row_stride + col])[0];
-    reinterpret_cast<load_type *>(&out[row * WIDTH + col])[0] = tmp;
+    reinterpret_cast<load_type *>(&out[row * out_row_stride + col])[0] = tmp;
   }
 }
 
@@ -63,6 +63,7 @@ template <> __device__ ushort f32_to_b16<nv_bfloat16>(float x) { return __bfloat
 template <
   int BLOCK_M, int BLOCK_N, int BLOCK_K,
   int WARP_M, int WARP_N, int WARP_K,
+  bool PAD_SHMEM_A, bool PAD_SHMEM_B,
   typename T>
 __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int MMA_M = 16, MMA_N = 8, MMA_K = 8;
@@ -98,20 +99,23 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
   A += offset_m * K;
   B += offset_n * K;
 
-  __shared__ T A_shared[BLOCK_M * BLOCK_K];
-  __shared__ T B_shared[BLOCK_N * BLOCK_K];
+  // we can only pad 8 elements = 16 bytes to ensure 16-byte alignment requirement for 128-bit write
+  constexpr int A_shared_width = BLOCK_K + (PAD_SHMEM_A ? 8 : 0);
+  constexpr int B_shared_width = BLOCK_K + (PAD_SHMEM_B ? 8 : 0);
+  __shared__ T A_shared[BLOCK_M * A_shared_width];
+  __shared__ T B_shared[BLOCK_N * B_shared_width];
 
   float acc[NUM_MMA_M][NUM_MMA_N][4] = {0.0f};  // each thread holds 4 output float
   uint32_t A_reg[NUM_MMA_M][NUM_MMA_K][2];      // each thread holds 2 input f16x2
   uint32_t B_reg[NUM_MMA_N][NUM_MMA_K][1];      // each thread holds 1 input f16x1
 
   // first A and B warp-tile along BLOCK_K dim (we will iterate along BLOCK_K with step_size=WARP_K)
-  const T *A_warp_tile = reinterpret_cast<const T *>(A_shared) + warp_tile_offset_m * BLOCK_K;
-  const T *B_warp_tile = reinterpret_cast<const T *>(B_shared) + warp_tile_offset_n * BLOCK_K;
+  const T *A_warp_tile = reinterpret_cast<const T *>(A_shared) + warp_tile_offset_m * A_shared_width;
+  const T *B_warp_tile = reinterpret_cast<const T *>(B_shared) + warp_tile_offset_n * B_shared_width;
 
   for (int block_k = 0; block_k < K; block_k += BLOCK_K) {
-    load_shared_b128<BLOCK_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, tid);
-    load_shared_b128<BLOCK_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, tid);
+    load_shared_b128<BLOCK_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, A_shared_width, tid);
+    load_shared_b128<BLOCK_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, B_shared_width, tid);
     __syncthreads();
 
     for (int warp_k = 0; warp_k < BLOCK_K; warp_k += WARP_K) {
@@ -121,15 +125,15 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
       // convert generic address to .shared state space address expected by inline PTX
       // thread 0 holds address of row 0
       // thread 1 holds address of row 1, and so on
-      uint32_t A_tile_addr = cvta_shared(A_warp_tile + lane_id * BLOCK_K + warp_k);
-      uint32_t B_tile_addr = cvta_shared(B_warp_tile + lane_id * BLOCK_K + warp_k);
+      uint32_t A_tile_addr = cvta_shared(A_warp_tile + lane_id * A_shared_width + warp_k);
+      uint32_t B_tile_addr = cvta_shared(B_warp_tile + lane_id * B_shared_width + warp_k);
 
       // load A to registers
       // ldmatrix can only load 8x8 matrix. for 16x8 tile, we need to use x2
       for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++) {
         for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++) {
           uint32_t *A_reg_frag = A_reg[mma_tile_id_m][mma_tile_id_k];
-          uint32_t A_local = A_tile_addr + (mma_tile_id_m * MMA_M * BLOCK_K + mma_tile_id_k * MMA_K) * sizeof(T);
+          uint32_t A_local = A_tile_addr + (mma_tile_id_m * MMA_M * A_shared_width + mma_tile_id_k * MMA_K) * sizeof(T);
           asm volatile (
             "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
             : "=r"(A_reg_frag[0]), "=r"(A_reg_frag[1])  // output
@@ -142,7 +146,7 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
       for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++) {
         for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++) {
           uint32_t *B_reg_frag = B_reg[mma_tile_id_n][mma_tile_id_k];
-          uint32_t B_local = B_tile_addr + (mma_tile_id_n * MMA_N * BLOCK_K + mma_tile_id_k * MMA_K) * sizeof(T);
+          uint32_t B_local = B_tile_addr + (mma_tile_id_n * MMA_N * B_shared_width + mma_tile_id_k * MMA_K) * sizeof(T);
           asm volatile (
             "ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];"
             : "=r"(B_reg_frag[0]) // output
@@ -207,7 +211,8 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
   matmul_v1_kernel<
     BLOCK_M, BLOCK_N, BLOCK_K,
-    WARP_M, WARP_N, WARP_K><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+    WARP_M, WARP_N, WARP_K,
+    false, false><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }
 
 template <typename T> __device__ void mma_m16n8k16(uint32_t A[4], uint32_t B[2], float acc[4]);
@@ -287,8 +292,8 @@ __global__ void matmul_v2_kernel(const T *A, const T *B, T *C, int M, int N, int
   const T *B_warp_tile = reinterpret_cast<const T *>(B_shared) + warp_tile_offset_n * BLOCK_K;
 
   for (int block_k = 0; block_k < K; block_k += BLOCK_K) {
-    load_shared_b128<BLOCK_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, tid);
-    load_shared_b128<BLOCK_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, tid);
+    load_shared_b128<BLOCK_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, BLOCK_K, tid);
+    load_shared_b128<BLOCK_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, BLOCK_K, tid);
     __syncthreads();
 
     for (int warp_k = 0; warp_k < BLOCK_K; warp_k += WARP_K) {
@@ -376,4 +381,20 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   matmul_v2_kernel<
     BLOCK_M, BLOCK_N, BLOCK_K,
     WARP_M, WARP_N, WARP_K><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+}
+
+void matmul_v3(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+  assert(is_power_of_two(M) && "M must be a power of 2");
+  assert(is_power_of_two(N) && "N must be a power of 2");
+  assert(is_power_of_two(K) && "K must be a power of 2");
+
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
+  const int WARP_M = 64, WARP_N = 64, WARP_K = 16;
+
+  const int BLOCK_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  matmul_v1_kernel<
+    BLOCK_M, BLOCK_N, BLOCK_K,
+    WARP_M, WARP_N, WARP_K,
+    true, false><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }

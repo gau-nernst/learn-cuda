@@ -23,10 +23,13 @@ input2 = torch.randn(4096, 4096).bfloat16().cuda().T
 output_ref = torch.matmul(input1, input2)
 output_v1 = module.matmul_v1(input1, input2)
 output_v2 = module.matmul_v2(input1, input2)
+output_v3 = module.matmul_v3(input1, input2)
 
 torch.testing.assert_close(output_v1, output_ref)
 torch.testing.assert_close(output_v2, output_ref)
+torch.testing.assert_close(output_v3, output_ref)
 
 print("CuBLAS:", bench_f(torch.matmul, input1, input2))
 print("v1:", bench_f(module.matmul_v1, input1, input2))
 print("v2:", bench_f(module.matmul_v2, input1, input2))
+print("v3:", bench_f(module.matmul_v3, input1, input2))
