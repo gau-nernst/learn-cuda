@@ -28,8 +28,8 @@ __device__ void load_shared_b128(const T *in, int in_row_stride, T *out, int tid
 
 __device__ uint32_t cvta_shared(void const *ptr) { return static_cast<uint32_t>(__cvta_generic_to_shared(ptr)); }
 
-template <typename T> __device__ void mma_m16n8k8(uint32_t A[2], uint32_t B, float acc[4]);
-template <> __device__ void mma_m16n8k8<half>(uint32_t A[2], uint32_t B, float acc[4]) {
+template <typename T> __device__ void mma_m16n8k8(uint32_t A[2], uint32_t B[1], float acc[4]);
+template <> __device__ void mma_m16n8k8<half>(uint32_t A[2], uint32_t B[1], float acc[4]) {
   asm volatile (
     "mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 "
     "{%0, %1, %2, %3}, "  // D
@@ -38,11 +38,11 @@ template <> __device__ void mma_m16n8k8<half>(uint32_t A[2], uint32_t B, float a
     "{%7, %8, %9, %10};"  // C
     : "=f"(acc[0]), "=f"(acc[1]), "=f"(acc[2]), "=f"(acc[3])
     : "r"(A[0]), "r"(A[1]),
-      "r"(B),
+      "r"(B[0]),
       "f"(acc[0]), "f"(acc[1]), "f"(acc[2]), "f"(acc[3])
   );
 }
-template <> __device__ void mma_m16n8k8<nv_bfloat16>(uint32_t A[2], uint32_t B, float acc[4]) {
+template <> __device__ void mma_m16n8k8<nv_bfloat16>(uint32_t A[2], uint32_t B[1], float acc[4]) {
   asm volatile (
     "mma.sync.aligned.m16n8k8.row.col.f32.bf16.bf16.f32 "
     "{%0, %1, %2, %3}, "  // D
@@ -51,7 +51,7 @@ template <> __device__ void mma_m16n8k8<nv_bfloat16>(uint32_t A[2], uint32_t B, 
     "{%7, %8, %9, %10};"  // C
     : "=f"(acc[0]), "=f"(acc[1]), "=f"(acc[2]), "=f"(acc[3])
     : "r"(A[0]), "r"(A[1]),
-      "r"(B),
+      "r"(B[0]),
       "f"(acc[0]), "f"(acc[1]), "f"(acc[2]), "f"(acc[3])
   );
 }
@@ -103,7 +103,7 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
 
   float acc[NUM_MMA_M][NUM_MMA_N][4] = {0.0f};  // each thread holds 4 output float
   uint32_t A_reg[NUM_MMA_M][NUM_MMA_K][2];      // each thread holds 2 input f16x2
-  uint32_t B_reg[NUM_MMA_N][NUM_MMA_K];         // each thread holds 1 input f16x1
+  uint32_t B_reg[NUM_MMA_N][NUM_MMA_K][1];      // each thread holds 1 input f16x1
 
   // first A and B warp-tile along BLOCK_K dim (we will iterate along BLOCK_K with step_size=WARP_K)
   const T *A_warp_tile = reinterpret_cast<const T *>(A_shared) + warp_tile_offset_m * BLOCK_K;
@@ -141,10 +141,11 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
       // load B to registers
       for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++) {
         for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++) {
+          uint32_t *B_reg_frag = B_reg[mma_tile_id_n][mma_tile_id_k];
           uint32_t B_local = B_tile_addr + (mma_tile_id_n * MMA_N * BLOCK_K + mma_tile_id_k * MMA_K) * sizeof(T);
           asm volatile (
             "ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];"
-            : "=r"(B_reg[mma_tile_id_n][mma_tile_id_k]) // output
+            : "=r"(B_reg_frag[0]) // output
             : "r"(B_local)  // input
           );
         }
@@ -172,7 +173,7 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
 
   // check output layout here
   // https://docs.nvidia.com/cuda/parallel-thread-execution/#mma-1688-c-f16-f32
-  const int a0_row = lane_id >> 2; 
+  const int a0_row = lane_id >> 2;
   const int a0_col = (lane_id % 4) * 2;
   C += a0_row * N + a0_col;
 
@@ -340,7 +341,7 @@ __global__ void matmul_v2_kernel(const T *A, const T *B, T *C, int M, int N, int
 
   // same as m16n8k8
   // https://docs.nvidia.com/cuda/parallel-thread-execution/#mma-16816-c
-  const int a0_row = lane_id >> 2; 
+  const int a0_row = lane_id >> 2;
   const int a0_col = (lane_id % 4) * 2;
   C += a0_row * N + a0_col;
 
