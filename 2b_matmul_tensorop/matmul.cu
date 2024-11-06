@@ -13,7 +13,7 @@ constexpr int WARP_SIZE = 32;
 
 template <int BLOCK_SIZE, int HEIGHT, int WIDTH, typename T>
 __device__ void load_shared_b128(const T *in, int in_row_stride, T *out, int out_row_stride, int tid) {
-  // number of elements to do 128-bit load
+  // number of elements to do 128-bit/16-byte load
   // e.g. FP32 -> 4 elements, BF16 -> 8 elements.
   using load_type = uint4;
   constexpr int num_elems = sizeof(load_type) / sizeof(T);
@@ -27,6 +27,28 @@ __device__ void load_shared_b128(const T *in, int in_row_stride, T *out, int out
 }
 
 __device__ uint32_t cvta_shared(void const *ptr) { return static_cast<uint32_t>(__cvta_generic_to_shared(ptr)); }
+
+template <int num> __device__ void ldmatrix(uint32_t reg[num], uint32_t addr);
+template <> __device__ void ldmatrix<1>(uint32_t reg[1], uint32_t addr) {
+  asm volatile (
+    "ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];"
+    : "=r"(reg[0])  // output
+    : "r"(addr)     // input
+  );
+}
+template <> __device__ void ldmatrix<2>(uint32_t reg[2], uint32_t addr) {
+  asm volatile ("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
+    : "=r"(reg[0]), "=r"(reg[1])
+    : "r"(addr)
+  );
+}
+template <> __device__ void ldmatrix<4>(uint32_t reg[4], uint32_t addr) {
+  asm volatile (
+    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
+    : "=r"(reg[0]), "=r"(reg[1]), "=r"(reg[2]), "=r"(reg[3])
+    : "r"(addr)
+  );
+}
 
 template <typename T> __device__ void mma_m16n8k8(uint32_t A[2], uint32_t B[1], float acc[4]);
 template <> __device__ void mma_m16n8k8<half>(uint32_t A[2], uint32_t B[1], float acc[4]) {
@@ -99,7 +121,7 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
   A += offset_m * K;
   B += offset_n * K;
 
-  // we can only pad 8 elements = 16 bytes to ensure 16-byte alignment requirement for 128-bit write
+  // we can only pad 8 elements = 16 bytes to ensure 16-byte alignment required by ldmatrix
   constexpr int A_shared_width = BLOCK_K + (PAD_SHMEM_A ? 8 : 0);
   constexpr int B_shared_width = BLOCK_K + (PAD_SHMEM_B ? 8 : 0);
   __shared__ T A_shared[BLOCK_M * A_shared_width];
@@ -132,26 +154,16 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
       // ldmatrix can only load 8x8 matrix. for 16x8 tile, we need to use x2
       for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++) {
         for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++) {
-          uint32_t *A_reg_frag = A_reg[mma_tile_id_m][mma_tile_id_k];
           uint32_t A_local = A_tile_addr + (mma_tile_id_m * MMA_M * A_shared_width + mma_tile_id_k * MMA_K) * sizeof(T);
-          asm volatile (
-            "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
-            : "=r"(A_reg_frag[0]), "=r"(A_reg_frag[1])  // output
-            : "r"(A_local)  // input
-          );
+          ldmatrix<2>(A_reg[mma_tile_id_m][mma_tile_id_k], A_local);
         }
       }
 
       // load B to registers
       for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++) {
         for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++) {
-          uint32_t *B_reg_frag = B_reg[mma_tile_id_n][mma_tile_id_k];
           uint32_t B_local = B_tile_addr + (mma_tile_id_n * MMA_N * B_shared_width + mma_tile_id_k * MMA_K) * sizeof(T);
-          asm volatile (
-            "ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];"
-            : "=r"(B_reg_frag[0]) // output
-            : "r"(B_local)  // input
-          );
+          ldmatrix<1>(B_reg[mma_tile_id_n][mma_tile_id_k], B_local);
         }
       }
 
@@ -160,10 +172,9 @@ __global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int
       for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++)
         for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++)
           for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++)
-            mma_m16n8k8<T>(
-              A_reg[mma_tile_id_m][mma_tile_id_k],
-              B_reg[mma_tile_id_n][mma_tile_id_k],
-              acc[mma_tile_id_m][mma_tile_id_n]);
+            mma_m16n8k8<T>(A_reg[mma_tile_id_m][mma_tile_id_k],
+                           B_reg[mma_tile_id_n][mma_tile_id_k],
+                           acc[mma_tile_id_m][mma_tile_id_n]);
     }
     __syncthreads();
 
@@ -302,13 +313,8 @@ __global__ void matmul_v2_kernel(const T *A, const T *B, T *C, int M, int N, int
       uint32_t A_tile_addr = cvta_shared(A_warp_tile + (lane_id % MMA_M) * BLOCK_K + warp_k + (lane_id / MMA_M) * 8);
       for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++) {
         for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++) {
-          uint32_t *A_reg_frag = A_reg[mma_tile_id_m][mma_tile_id_k];
           uint32_t A_local = A_tile_addr + (mma_tile_id_m * MMA_M * BLOCK_K + mma_tile_id_k * MMA_K) * sizeof(T);
-          asm volatile (
-            "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
-            : "=r"(A_reg_frag[0]), "=r"(A_reg_frag[1]), "=r"(A_reg_frag[2]), "=r"(A_reg_frag[3])
-            : "r"(A_local)
-          );
+          ldmatrix<4>(A_reg[mma_tile_id_m][mma_tile_id_k], A_local);
         }
       }
 
@@ -316,23 +322,17 @@ __global__ void matmul_v2_kernel(const T *A, const T *B, T *C, int M, int N, int
       uint32_t B_tile_addr = cvta_shared(B_warp_tile + (lane_id % MMA_N) * BLOCK_K + warp_k + (lane_id / MMA_N) * 8);
       for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++) {
         for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++) {
-          uint32_t *B_reg_frag = B_reg[mma_tile_id_n][mma_tile_id_k];
           uint32_t B_local = B_tile_addr + (mma_tile_id_n * MMA_N * BLOCK_K + mma_tile_id_k * MMA_K) * sizeof(T);
-          asm volatile (
-            "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
-            : "=r"(B_reg_frag[0]), "=r"(B_reg_frag[1])
-            : "r"(B_local)
-          );
+          ldmatrix<2>(B_reg[mma_tile_id_n][mma_tile_id_k], B_local);
         }
       }
 
       for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++)
         for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++)
           for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++)
-            mma_m16n8k16<T>(
-              A_reg[mma_tile_id_m][mma_tile_id_k],
-              B_reg[mma_tile_id_n][mma_tile_id_k],
-              acc[mma_tile_id_m][mma_tile_id_n]);
+            mma_m16n8k16<T>(A_reg[mma_tile_id_m][mma_tile_id_k],
+                            B_reg[mma_tile_id_n][mma_tile_id_k],
+                            acc[mma_tile_id_m][mma_tile_id_n]);
     }
     __syncthreads();
 
@@ -397,4 +397,164 @@ void matmul_v3(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
     BLOCK_M, BLOCK_N, BLOCK_K,
     WARP_M, WARP_N, WARP_K,
     true, false><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
+}
+
+constexpr __device__ int log2_int(int x) { return x == 1 ? 0 : 1 + log2_int(x >> 1); }
+
+// https://github.com/NVIDIA/cutlass/blob/main/include/cute/swizzle.hpp
+template <int WIDTH, typename T>
+__device__ int swizzle(int x) {
+  constexpr int num_elems = 16 / sizeof(T);
+  constexpr int stride = WIDTH / num_elems;             // stride for 16-byte word.
+  constexpr int MBase = log2_int(num_elems);            // we don't touch the first MBase bits because they belong to the same 16-byte row (8x 16-bit).
+  // TODO: seems like we have to add 1 to BBits? bug in logic?
+  constexpr int BBits = std::min(log2_int(stride), 3);  // we permute BBits, which is the no. of non-overlapping bits between row index and 4-bank-group index.
+  constexpr int SShift = log2_int(stride);              // relative difference from 4-bank-group index to row index.
+
+  constexpr int mask = ((1 << BBits) - 1) << MBase;     // BBits 1s and MBase 0sa
+  if constexpr (BBits == 0) return x;
+  else return x ^ ((x >> SShift) & mask);
+}
+
+template <int BLOCK_SIZE, int HEIGHT, int WIDTH, typename T>
+__device__ void load_shared_swizzle(const T *in, int in_row_stride, T *out, int tid) {
+  constexpr int num_elems = 16 / sizeof(T);
+
+  for (int idx = tid * num_elems; idx < HEIGHT * WIDTH; idx += BLOCK_SIZE * num_elems) {
+    const int row = idx / WIDTH;
+    const int col = idx % WIDTH;
+    uint4 tmp = reinterpret_cast<const uint4 *>(&in[row * in_row_stride + col])[0];
+
+    int swizzled_idx = swizzle<WIDTH, T>(row * WIDTH + col);
+    reinterpret_cast<uint4 *>(&out[swizzled_idx])[0] = tmp;
+  }
+}
+
+template <
+  int BLOCK_M, int BLOCK_N, int BLOCK_K,
+  int WARP_M, int WARP_N, int WARP_K,
+  typename T>
+__global__ void matmul_v4_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
+  constexpr int MMA_M = 16, MMA_N = 8, MMA_K = 8;
+  static_assert(BLOCK_M % WARP_M == 0);
+  static_assert(BLOCK_N % WARP_N == 0);
+  static_assert(BLOCK_K % WARP_K == 0);
+  static_assert(WARP_M % MMA_M == 0);
+  static_assert(WARP_N % MMA_N == 0);
+  static_assert(WARP_K % MMA_K == 0);
+  constexpr int BLOCK_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  constexpr int NUM_MMA_M = WARP_M / MMA_M;
+  constexpr int NUM_MMA_N = WARP_N / MMA_N;
+  constexpr int NUM_MMA_K = WARP_K / MMA_K;
+
+  const int tid = threadIdx.x;
+  const int block_id = blockIdx.x;
+  const int warp_id = tid / WARP_SIZE;
+  const int lane_id = tid % WARP_SIZE;
+
+  const int num_blocks_per_row = cdiv(N, BLOCK_N);
+  const int block_id_m = block_id / num_blocks_per_row;
+  const int block_id_n = block_id % num_blocks_per_row;
+  const int offset_m = block_id_m * BLOCK_M;
+  const int offset_n = block_id_n * BLOCK_N;
+
+  constexpr int num_warps_per_row = BLOCK_N / WARP_N;
+  const int warp_id_m = warp_id / num_warps_per_row;
+  const int warp_id_n = warp_id % num_warps_per_row;
+  const int warp_tile_offset_m = warp_id_m * WARP_M;
+  const int warp_tile_offset_n = warp_id_n * WARP_N;
+
+  // A is row-major, B is column-major
+  A += offset_m * K;
+  B += offset_n * K;
+
+  __shared__ T A_shared[BLOCK_M * BLOCK_K];
+  __shared__ T B_shared[BLOCK_N * BLOCK_K];
+
+  float acc[NUM_MMA_M][NUM_MMA_N][4] = {0.0f};  // each thread holds 4 output float
+  uint32_t A_reg[NUM_MMA_M][NUM_MMA_K][2];      // each thread holds 2 input f16x2
+  uint32_t B_reg[NUM_MMA_N][NUM_MMA_K][1];      // each thread holds 1 input f16x1
+
+  for (int block_k = 0; block_k < K; block_k += BLOCK_K)
+  {
+    load_shared_swizzle<BLOCK_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, tid);
+    load_shared_swizzle<BLOCK_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, tid);
+    __syncthreads();
+
+    for (int warp_k = 0; warp_k < BLOCK_K; warp_k += WARP_K)
+    {
+      // load A to registers
+      for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++)
+        for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++)
+        {
+          const int A_offset = (warp_tile_offset_m + lane_id + mma_tile_id_m * MMA_M) * BLOCK_K + (warp_k + mma_tile_id_k * MMA_K);
+          const T *A_local = reinterpret_cast<const T *>(A_shared) + swizzle<BLOCK_K, T>(A_offset);
+          ldmatrix<2>(A_reg[mma_tile_id_m][mma_tile_id_k], cvta_shared(A_local));
+        }
+
+      // load B to registers
+      for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++)
+        for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++)
+        {
+          const int B_offset = (warp_tile_offset_n + lane_id + mma_tile_id_n * MMA_N) * BLOCK_K + (warp_k + mma_tile_id_k * MMA_K);
+          const T *B_local = reinterpret_cast<const T *>(B_shared) + swizzle<BLOCK_K, T>(B_offset);
+          ldmatrix<1>(B_reg[mma_tile_id_n][mma_tile_id_k], cvta_shared(B_local));
+        }
+
+      // call mma
+      for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++)
+        for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++)
+          for (int mma_tile_id_k = 0; mma_tile_id_k < NUM_MMA_K; mma_tile_id_k++)
+            mma_m16n8k8<T>(A_reg[mma_tile_id_m][mma_tile_id_k],
+                           B_reg[mma_tile_id_n][mma_tile_id_k],
+                           acc[mma_tile_id_m][mma_tile_id_n]);
+    }
+    __syncthreads();
+
+    A += BLOCK_K;
+    B += BLOCK_K;
+  }
+
+  const int C_offset_m = offset_m + warp_tile_offset_m;
+  const int C_offset_n = offset_n + warp_tile_offset_n;
+  C += C_offset_m * N + C_offset_n;
+
+  // check output layout here
+  // https://docs.nvidia.com/cuda/parallel-thread-execution/#mma-1688-c-f16-f32
+  const int a0_row = lane_id >> 2;
+  const int a0_col = (lane_id % 4) * 2;
+  C += a0_row * N + a0_col;
+
+  for (int mma_tile_id_m = 0; mma_tile_id_m < NUM_MMA_M; mma_tile_id_m++)
+    for (int mma_tile_id_n = 0; mma_tile_id_n < NUM_MMA_N; mma_tile_id_n++)
+    {
+      T *C_local = C + mma_tile_id_m * MMA_M * N + mma_tile_id_n * MMA_N;
+      float *acc_frag = acc[mma_tile_id_m][mma_tile_id_n];
+      ushort2 tmp;
+
+      // write a0 and a1
+      tmp.x = f32_to_b16<T>(acc_frag[0]);
+      tmp.y = f32_to_b16<T>(acc_frag[1]);
+      reinterpret_cast<ushort2 *>(C_local)[0] = tmp;
+
+      // write a2 and a3
+      tmp.x = f32_to_b16<T>(acc_frag[2]);
+      tmp.y = f32_to_b16<T>(acc_frag[3]);
+      reinterpret_cast<ushort2 *>(C_local + 8 * N)[0] = tmp;
+    }
+}
+
+void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+  assert(is_power_of_two(M) && "M must be a power of 2");
+  assert(is_power_of_two(N) && "N must be a power of 2");
+  assert(is_power_of_two(K) && "K must be a power of 2");
+
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
+  const int WARP_M = 64, WARP_N = 64, WARP_K = 32;
+
+  const int BLOCK_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  matmul_v4_kernel<
+    BLOCK_M, BLOCK_N, BLOCK_K,
+    WARP_M, WARP_N, WARP_K><<<grid_size, BLOCK_SIZE>>>(A, B, C, M, N, K);
 }
