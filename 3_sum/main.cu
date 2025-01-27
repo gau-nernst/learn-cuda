@@ -3,12 +3,12 @@
 
 void sum_v1(const float *input, float *output, int M, int N, int BLOCK_SIZE);
 void sum_v2(const float *input, float *output, int M, int N, int BLOCK_SIZE);
-void sum_v3(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
-void sum_v4a(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
-void sum_v4b(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
-void sum_v4c(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
-void sum_v5(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
-void sum_v6(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor);
+void sum_v3(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE);
+void sum_v4a(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE);
+void sum_v4b(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE);
+void sum_v4c(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE);
+void sum_v5(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE);
+void sum_v6(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE);
 
 int main() {
   // Size of the input data
@@ -37,9 +37,9 @@ int main() {
   cudaMemcpy(d_input, h_input, sizeof(float) * M * N, cudaMemcpyHostToDevice);
 
   // Launch the kernel
+  const int TILE_SIZE = 8192;
   const int BLOCK_SIZE = 128;
-  const int coarse_factor = 64;
-  sum_v6(d_input, d_output, M, N, BLOCK_SIZE, coarse_factor);
+  sum_v6(d_input, d_output, M, N, TILE_SIZE, BLOCK_SIZE);
 
   // Copy result back to host
   cudaMemcpy(h_output, d_output, sizeof(float), cudaMemcpyDeviceToHost);

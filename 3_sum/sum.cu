@@ -108,8 +108,7 @@ __global__ void sum_v3_kernel(const float *input, float *output, int M, int N, i
     atomicAdd(output + row, shmem[0]);
 }
 
-void sum_v3(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
-  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+void sum_v3(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE) {
   dim3 grid_size(cdiv(N, TILE_SIZE), M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE;
   sum_v3_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
@@ -178,22 +177,19 @@ __global__ void sum_v4_kernel(const float *input, float *output, int M, int N, i
     atomicAdd(output + row, sum);
 }
 
-void sum_v4a(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
-  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+void sum_v4a(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE) {
   dim3 grid_size(cdiv(N, TILE_SIZE), M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE;
   sum_v4_kernel<1><<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
 }
 
-void sum_v4b(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
-  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+void sum_v4b(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE) {
   dim3 grid_size(cdiv(N, TILE_SIZE), M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE;
   sum_v4_kernel<2><<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
 }
 
-void sum_v4c(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
-  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+void sum_v4c(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE) {
   dim3 grid_size(cdiv(N, TILE_SIZE), M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE;
   sum_v4_kernel<3><<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
@@ -234,8 +230,7 @@ __global__ void sum_v5_kernel(const float *input, float *output, int M, int N, i
     atomicAdd(output + row, sum);
 }
 
-void sum_v5(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
-  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+void sum_v5(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE) {
   dim3 grid_size(cdiv(N, TILE_SIZE), M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE;
   sum_v5_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
@@ -281,8 +276,7 @@ __global__ void sum_v6_kernel(const float *input, float *output, int M, int N, i
     atomicAdd(output + row, sum);
 }
 
-void sum_v6(const float *input, float *output, int M, int N, int BLOCK_SIZE, int coarse_factor) {
-  const int TILE_SIZE = BLOCK_SIZE * coarse_factor;
+void sum_v6(const float *input, float *output, int M, int N, int TILE_SIZE, int BLOCK_SIZE) {
   dim3 grid_size(cdiv(N, TILE_SIZE), M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE;
   sum_v6_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, M, N, TILE_SIZE);
