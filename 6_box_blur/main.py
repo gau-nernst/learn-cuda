@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 import torch.utils.cpp_extension
 
+
 module = torch.utils.cpp_extension.load(
     "module",
     sources=["box_blur.cu"],

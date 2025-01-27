@@ -1,12 +1,10 @@
-from functools import partial
-
 import torch
 import torch.utils.cpp_extension
 from triton.testing import do_bench
 
 
-def bench_f(f, *args, **kwargs):
-    return do_bench(partial(f, *args, **kwargs), fast_flush=False, return_mode="median")
+def benchmark(f, *args, **kwargs):
+    return do_bench(lambda: f(*args, **kwargs), return_mode="median")
 
 
 module = torch.utils.cpp_extension.load(
@@ -31,8 +29,8 @@ torch.testing.assert_close(output_v2, output_ref)
 torch.testing.assert_close(output_v3, output_ref)
 torch.testing.assert_close(output_v4, output_ref)
 
-print("CuBLAS:", bench_f(torch.matmul, input1, input2))
-print("v1:", bench_f(module.matmul_v1, input1, input2))
-print("v2:", bench_f(module.matmul_v2, input1, input2))
-print("v3:", bench_f(module.matmul_v3, input1, input2))
-print("v4:", bench_f(module.matmul_v4, input1, input2))
+print("CuBLAS:", benchmark(torch.matmul, input1, input2))
+print("v1:", benchmark(module.matmul_v1, input1, input2))
+print("v2:", benchmark(module.matmul_v2, input1, input2))
+print("v3:", benchmark(module.matmul_v3, input1, input2))
+print("v4:", benchmark(module.matmul_v4, input1, input2))

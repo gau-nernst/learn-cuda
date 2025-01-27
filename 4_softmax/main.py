@@ -3,8 +3,8 @@ import torch.utils.cpp_extension
 from triton.testing import do_bench
 
 
-def benchmark(fn, *args):
-    return do_bench(lambda: fn(*args), return_mode="median") * 1e3  # return in us
+def benchmark(f, *args):
+    return do_bench(lambda: f(*args), return_mode="median") * 1e3  # return in us
 
 
 module = torch.utils.cpp_extension.load(

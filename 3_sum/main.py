@@ -1,7 +1,11 @@
-import time
-
 import torch
 import torch.utils.cpp_extension
+from triton.testing import do_bench
+
+
+def benchmark(f, *args):
+    return do_bench(lambda: f(*args), return_mode="median")
+
 
 module = torch.utils.cpp_extension.load(
     "module",
@@ -9,6 +13,7 @@ module = torch.utils.cpp_extension.load(
     extra_cuda_cflags=["-O3", "--use_fast_math", "--ptxas-options=-v"],
     verbose=True,
 )
+
 
 # for large n, there will be a larger deviation, since sum of many small elements are not accurate
 input = torch.randn(64, 32000).cuda()
@@ -31,18 +36,6 @@ torch.testing.assert_close(output_v4b, output_ref, atol=1e-4, rtol=1e-4)
 torch.testing.assert_close(output_v4c, output_ref, atol=1e-4, rtol=1e-4)
 torch.testing.assert_close(output_v5, output_ref, atol=1e-4, rtol=1e-4)
 torch.testing.assert_close(output_v6, output_ref, atol=1e-4, rtol=1e-4)
-
-
-def benchmark(fn, *args):
-    N = 100
-
-    torch.cuda.synchronize()
-    time0 = time.time()
-    for _ in range(N):
-        fn(*args)
-        torch.cuda.synchronize()
-
-    print(N / (time.time() - time0))
 
 
 benchmark(torch.sum, input, -1)
