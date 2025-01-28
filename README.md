@@ -19,10 +19,12 @@ Name | Description
 7\. Matrix multiplication Tensor Cores | Tensor cores
 ... optimizers, quantization, flash attention, gemv (split-K, stream-K), scan | TODO
 
-To profile a CUDA kernel, run
-
 ```bash
+# profile a CUDA kernel
 ncu --set full python main.py
+
+# debug illegal memory access
+compute-sanitizer python main.py
 ```
 
 and open the generated `profile.ncu-rep` file in Nsight Compute. See more here: https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html

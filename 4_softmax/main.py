@@ -15,20 +15,23 @@ module = torch.utils.cpp_extension.load(
 )
 compiled_softmax = torch.compile(torch.softmax, mode="max-autotune", dynamic=False)
 
-for M, N in [(8096, 8096), (1, 128256)]:
+for M, N in [
+    (1023, 518),
+    (8192, 8192),
+    (1, 128256),
+]:
     print(f"{M=}, {N=}")
 
     input = torch.randn(M, N).cuda()
     output_ref = torch.softmax(input, dim=1)
     output_v1 = module.softmax_v1(input)
-    output_v2 = module.softmax_v2(input)
+    output_v2, workspace = module.softmax_v2(input)
 
-    # torch.testing.assert_close(output_v1, output_ref)
-    # torch.testing.assert_close(output_v2, output_ref)
-    print(((output_v1 - output_ref).abs() / output_ref.abs()).mean())
-    print(((output_v2 - output_ref).abs() / output_ref.abs()).mean())  # pretty high. seems like sth is wrong
+    torch.testing.assert_close(output_v1, output_ref)
+    torch.testing.assert_close(output_v2, output_ref)
 
     print(f"PyTorch: {benchmark(torch.softmax, input, 1):.2f}us")
     print(f"torch.compile: {benchmark(compiled_softmax, input, 1):.2f}us")
     print(f"Softmax v1: {benchmark(module.softmax_v1, input):.2f}us")
     print(f"Softmax v2: {benchmark(module.softmax_v2, input):.2f}us")
+    print()
