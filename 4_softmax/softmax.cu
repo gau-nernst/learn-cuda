@@ -3,17 +3,25 @@
 __host__ __device__ int cdiv(int a, int b) { return (a + b - 1) / b; }
 __device__ float add(float a, float b) { return a + b; }
 
+template<typename B, typename A>
+__device__ B bitcast(A a) {
+  static_assert(sizeof(A) == sizeof(B));
+  B b;
+  memcpy(&b, &a, sizeof(A));
+  return b;
+}
+
 constexpr int WARP_SIZE = 32;
 
-template <float f(float, float)>
-__device__ float thread_reduce(float val, const float *input, int N, int BLOCK_SIZE, int tid) {
+template<typename F, typename V>
+__device__ V thread_reduce(F f, V val, const float *input, int N, int BLOCK_SIZE, int tid) {
   for (int idx = tid; idx < N; idx += BLOCK_SIZE)
     val = f(val, input[idx]);
   return val;
 }
 
-template <float f(float, float)>
-__device__ float block_reduce(float val, int BLOCK_SIZE, int tid, float *workspace) {
+template<typename F, typename V>
+__device__ V block_reduce(F f, V val, int BLOCK_SIZE, int tid, V *workspace) {
   workspace[tid] = val;
   for (int stride = BLOCK_SIZE / 2; stride >= WARP_SIZE; stride /= 2) {
     __syncthreads();
@@ -25,15 +33,26 @@ __device__ float block_reduce(float val, int BLOCK_SIZE, int tid, float *workspa
   return val;
 }
 
-template <float f(float, float)>
-__device__ float warp_reduce(float val, int tid) {
+template<typename T>
+__device__ T shfl_down_sync(unsigned int mask, T var, int srcLane) {
+  if constexpr (sizeof(T) == sizeof(int))
+    return bitcast<T>(__shfl_down_sync(mask, bitcast<int>(var), srcLane));
+  else if constexpr (sizeof(T) == sizeof(long long))
+    return bitcast<T>(__shfl_down_sync(mask, bitcast<long long>(var), srcLane));
+  else
+    static_assert(!sizeof(T));
+}
+
+template<typename F, typename V>
+__device__ V warp_reduce(F f, V val, int tid) {
   if (tid < WARP_SIZE)
     for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2)
-      val = f(val, __shfl_down_sync(0xffffffff, val, stride));
+      val = f(val, shfl_down_sync(0xffffffff, val, stride));
   return val;
 }
 
-__device__ float block_broadcast(float val, int tid, float *workspace) {
+template<typename T>
+__device__ T block_broadcast(T val, int tid, T *workspace) {
   if (tid == 0)
     workspace[0] = val;
   __syncthreads();
@@ -60,14 +79,54 @@ __device__ float4 exp(float4 a) { return {exp(a.x), exp(a.y), exp(a.z), exp(a.w)
 __device__ float max(float4 a) { return max(max(a.x, a.y), max(a.z, a.w)); }
 __device__ float sum(float4 a) { return a.x + a.y + a.z + a.w; }
 
-__global__ void fill(float *data, int N, float val) {
+__global__ void softmax_naive_kernel(const float *input, float *output, int M, int N) {
+  const int tid = threadIdx.x;
+  const int BLOCK_SIZE = blockDim.x;
+  const int row = blockIdx.x;
+
+  input += row * N;
+  output += row * N;
+  extern __shared__ float workspace[];
+
+  // 1st pass
+  float max_val = -FLT_MAX;
+  max_val = thread_reduce(fmaxf, max_val, input, N, BLOCK_SIZE, tid);
+  max_val = block_reduce(fmaxf, max_val, BLOCK_SIZE, tid, workspace);
+  max_val = warp_reduce(fmaxf, max_val, tid);
+  max_val = block_broadcast(max_val, tid, workspace);
+
+  // 2nd pass
+  float normalizer = 0.0f;
+  auto f = [max_val](float a, float b) { return a + exp(b - max_val); };
+  normalizer = thread_reduce(f, normalizer, input, N, BLOCK_SIZE, tid);
+  normalizer = block_reduce(add, normalizer, BLOCK_SIZE, tid, workspace);
+  normalizer = warp_reduce(add, normalizer, tid);
+  normalizer = block_broadcast(normalizer, tid, workspace);
+
+  // 3rd pass
+  // NOTE: we can save exp(input[idx] - max_val) to output in 2nd pass
+  // exchange 1 write for the computation
+  float scale = 1.0f / normalizer;
+  for (int idx = tid; idx < N; idx += BLOCK_SIZE)
+    output[idx] = exp(input[idx] - max_val) * scale;
+}
+
+void softmax_naive(const float *input, float *output, float *workspace, int M, int N) {
+  const int BLOCK_SIZE = 256;
+  const int shmem_size = sizeof(float) * BLOCK_SIZE;
+  softmax_naive_kernel<<<M, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
+}
+
+__global__ void softmax_naive_split_setup_kernel(float *data, int N) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < N)
-    data[idx] = val;
+  if (idx < N) {
+    data[idx] = -FLT_MAX;
+    data[N + idx] = 0.0f;
+  }
 }
 
 // calculate max per row
-__global__ void softmax_v1_kernel_pass1(const float *input, float *max_per_row, int M, int N, int TILE_SIZE) {
+__global__ void softmax_naive_split_pass1_kernel(const float *input, float *max_per_row, int M, int N, int TILE_SIZE) {
   const int tid = threadIdx.x;
   const int BLOCK_SIZE = blockDim.x;
   const int tile_id = blockIdx.x;
@@ -79,15 +138,18 @@ __global__ void softmax_v1_kernel_pass1(const float *input, float *max_per_row, 
   extern __shared__ float workspace[];
 
   float max_val = -FLT_MAX;
-  max_val = thread_reduce<max>(max_val, input, min(TILE_SIZE, N - col_offset), BLOCK_SIZE, tid);
-  max_val = block_reduce<max>(max_val, BLOCK_SIZE, tid, workspace);
-  max_val = warp_reduce<max>(max_val, tid);
+  max_val = thread_reduce(fmaxf, max_val, input, min(TILE_SIZE, N - col_offset), BLOCK_SIZE, tid);
+  max_val = block_reduce(fmaxf, max_val, BLOCK_SIZE, tid, workspace);
+  max_val = warp_reduce(fmaxf, max_val, tid);
   if (tid == 0)
-    atomicMax(max_per_row, max_val);
+    if (gridDim.x == 1)
+      max_per_row[0] = max_val;
+    else
+      atomicMax(max_per_row, max_val);
 }
 
 // calculate exp(x - max_row) and sum(exp(x - max_row)) per row
-__global__ void softmax_v1_kernel_pass2(
+__global__ void softmax_naive_split_pass2_kernel(
   const float *input, float *output, float *max_per_row, float *denom, int M, int N, int TILE_SIZE
 ) {
   const int tid = threadIdx.x;
@@ -109,14 +171,17 @@ __global__ void softmax_v1_kernel_pass2(
     output[idx] = tmp;
     total += tmp;
   }
-  total = block_reduce<add>(total, BLOCK_SIZE, tid, workspace);
-  total = warp_reduce<add>(total, tid);
+  total = block_reduce(add, total, BLOCK_SIZE, tid, workspace);
+  total = warp_reduce(add, total, tid);
   if (tid == 0)
-    atomicAdd(denom, total);
+    if (gridDim.x == 1)
+      denom[0] = total;
+    else
+      atomicAdd(denom, total);
 }
 
 // normalize output
-__global__ void softmax_v1_kernel_pass3(float *output, float *denom, int M, int N, int TILE_SIZE) {
+__global__ void softmax_naive_split_pass3_kernel(float *output, float *denom, int M, int N, int TILE_SIZE) {
   const int tid = threadIdx.x;
   const int BLOCK_SIZE = blockDim.x;
   const int tile_id = blockIdx.x;
@@ -131,9 +196,9 @@ __global__ void softmax_v1_kernel_pass3(float *output, float *denom, int M, int 
 }
 
 // naive softmax. workspace size = 2M
-void softmax_v1(const float *input, float *output, float *workspace, int M, int N) {
+void softmax_naive_split(const float *input, float *output, float *workspace, int M, int N) {
   const int BLOCK_SIZE = 256;
-  const int TILE_SIZE = BLOCK_SIZE * 2;
+  const int TILE_SIZE = BLOCK_SIZE;
   const dim3 grid_size(cdiv(N, TILE_SIZE), M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE;
 
@@ -141,18 +206,18 @@ void softmax_v1(const float *input, float *output, float *workspace, int M, int 
   float *denom = workspace + M;
 
   // setup workspace
-  fill<<<cdiv(M, BLOCK_SIZE), BLOCK_SIZE>>>(max_per_row, M, -FLT_MAX);
-  fill<<<cdiv(M, BLOCK_SIZE), BLOCK_SIZE>>>(denom, M, 0.0f);
+  if (grid_size.x > 1)
+    softmax_naive_split_setup_kernel<<<cdiv(M, BLOCK_SIZE), BLOCK_SIZE>>>(workspace, M);
 
   // pass 1: max per row
   // pass 2: exp(x - max) and sum
   // pass 3: normalize
-  softmax_v1_kernel_pass1<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, max_per_row, M, N, TILE_SIZE);
-  softmax_v1_kernel_pass2<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, max_per_row, denom, M, N, TILE_SIZE);
-  softmax_v1_kernel_pass3<<<grid_size, BLOCK_SIZE>>>(output, denom, M, N, TILE_SIZE);
+  softmax_naive_split_pass1_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, max_per_row, M, N, TILE_SIZE);
+  softmax_naive_split_pass2_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, max_per_row, denom, M, N, TILE_SIZE);
+  softmax_naive_split_pass3_kernel<<<grid_size, BLOCK_SIZE>>>(output, denom, M, N, TILE_SIZE);
 }
 
-__global__ void softmax_v2_kernel_setup(float *workspace, int M) {
+__global__ void softmax_online_split_setup_kernel(float *workspace, int M) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < M) {
     workspace[idx * 2] = -FLT_MAX;  // init for max
@@ -160,85 +225,88 @@ __global__ void softmax_v2_kernel_setup(float *workspace, int M) {
   }
 }
 
-// unsafe
-__device__ unsigned long long int float2_as_ull(float2 a) { return reinterpret_cast<unsigned long long int *>(&a)[0]; }
-__device__ float2 ull_as_float2(unsigned long long int a) { return reinterpret_cast<float2 *>(&a)[0]; }
+// equation 4, section 3.1 in https://arxiv.org/pdf/1805.02867
+__device__ float2 online_normalizer(float2 a, float2 b) {
+  float new_max = max(a.x, b.x);
+  float normalizer = a.y * exp(a.x - new_max) + b.y * exp(b.x - new_max);
+  return {new_max, normalizer};
+}
 
-__global__ void softmax_v2_kernel_pass1(const float *input, float *workspace, int M, int N, int TILE_SIZE) {
+__global__ void softmax_online_kernel(const float *input, float *output, int M, int N) {
+  const int tid = threadIdx.x;
+  const int BLOCK_SIZE = blockDim.x;
+  const int row = blockIdx.x;
+  extern __shared__ float2 shmem[];
+
+  input += row * N;
+  output += row * N;
+
+  // pass 1
+  // algorithm 3 in https://arxiv.org/pdf/1805.02867
+  // calculate max per row and normalizer (denominator) at the same time
+  float2 normalizer = {-FLT_MAX, 1.0f};
+  auto f = [](float2 a, float b) {
+    float new_max = fmaxf(a.x, b);
+    float new_normalizer = a.y * exp(a.x - new_max) + exp(b - new_max);
+    return float2{new_max, new_normalizer};
+  };
+  normalizer = thread_reduce(f, normalizer, input, N, BLOCK_SIZE, tid);
+  normalizer = block_reduce(online_normalizer, normalizer, BLOCK_SIZE, tid, shmem);
+  normalizer = warp_reduce(online_normalizer, normalizer, tid);
+  normalizer = block_broadcast(normalizer, tid, shmem);
+
+  // pass 2
+  float subtractor = normalizer.x;
+  float scale = 1.0f / normalizer.y;
+  for (int idx = tid; idx < N; idx += BLOCK_SIZE)
+    output[idx] = exp(input[idx] - subtractor) * scale;
+}
+
+void softmax_online(const float *input, float *output, float *workspace, int M, int N) {
+  const int BLOCK_SIZE = 256;
+  const int shmem_size = sizeof(float) * BLOCK_SIZE * 2;
+  softmax_naive_kernel<<<M, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
+}
+
+__global__ void softmax_online_split_pass1_kernel(const float *input, float *workspace, int M, int N, int TILE_SIZE) {
   const int tid = threadIdx.x;
   const int BLOCK_SIZE = blockDim.x;
   const int tile_id = blockIdx.x;
   const int row = blockIdx.y;
+  extern __shared__ float2 shmem[];
 
   const int col_offset = tile_id * TILE_SIZE;
   input += row * N + col_offset;
   workspace += row * 2;
 
-  extern __shared__ float shmem[];
-  float *max_shared = shmem;
-  float *normalizer_shared = shmem + BLOCK_SIZE;
-
-  // algorithm 3 in https://arxiv.org/pdf/1805.02867
-  // calculate max per row and normalizer (denominator) at the same time
-  float max_val = -FLT_MAX;
-  float normalizer = 1.0f;
-  for (int idx = tid; idx < min(TILE_SIZE, N - col_offset); idx += BLOCK_SIZE) {
-    float tmp = input[idx];
-    float old_max = max_val;
-    max_val = max(max_val, tmp);
-    normalizer = normalizer * exp(old_max - max_val) + exp(tmp - max_val);
-  }
-
-  max_shared[tid] = max_val;
-  normalizer_shared[tid] = normalizer;
-  for (int stride = BLOCK_SIZE / 2; stride >= WARP_SIZE; stride /= 2) {
-    __syncthreads();
-    if (tid < stride) {
-      float other_max = max_shared[tid + stride];
-      float other_normalizer = normalizer_shared[tid + stride];
-
-      // equation 4, section 3.1 in https://arxiv.org/pdf/1805.02867
-      float old_max = max_val;
-      max_val = max(max_val, other_max);
-      normalizer = normalizer * exp(old_max - max_val) + other_normalizer * exp(other_max - max_val);
-
-      max_shared[tid] = max_val;
-      normalizer_shared[tid] = normalizer;
-    }
-  }
-
-  if (tid < WARP_SIZE)
-    for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2) {
-      float other_max = __shfl_down_sync(0xffffffff, max_val, stride);
-      float other_normalizer = __shfl_down_sync(0xffffffff, normalizer, stride);
-
-      float old_max = max_val;
-      max_val = max(max_val, other_max);
-      normalizer = normalizer * exp(old_max - max_val) + other_normalizer * exp(other_max - max_val);
-    }
+  float2 normalizer = {-FLT_MAX, 1.0f};
+  auto f = [](float2 a, float b) {
+    float new_max = fmaxf(a.x, b);
+    float new_normalizer = a.y * exp(a.x - new_max) + exp(b - new_max);
+    return float2{new_max, new_normalizer};
+  };
+  normalizer = thread_reduce(f, normalizer, input, min(TILE_SIZE, N - col_offset), BLOCK_SIZE, tid);
+  normalizer = block_reduce(online_normalizer, normalizer, BLOCK_SIZE, tid, shmem);
+  normalizer = warp_reduce(online_normalizer, normalizer, tid);
 
   if (tid == 0)
     if (gridDim.x == 1) {
-      workspace[0] = max_val;
-      workspace[1] = normalizer;
+      reinterpret_cast<float2 *>(workspace)[0] = normalizer;
     } else {
       // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#atomic-functions
       // using atomicCAS is slow
-      float2 *addr = reinterpret_cast<float2 *>(workspace);
-      float2 old = addr[0], assumed;
+      using ull = unsigned long long;
+      ull *addr = reinterpret_cast<ull *>(workspace);
+      ull old = addr[0], assumed;
       do {
         assumed = old;
-        float2 updated_val;
-        updated_val.x = max(max_val, assumed.x);
-        updated_val.y = normalizer * exp(max_val - updated_val.x) + assumed.y * exp(assumed.x - updated_val.x);
-        old = ull_as_float2(atomicCAS(reinterpret_cast<unsigned long long int *>(workspace),
-                                      float2_as_ull(assumed),
-                                      float2_as_ull(updated_val)));
-      } while (float2_as_ull(assumed) != float2_as_ull(old));
+        float2 new_normalizer = online_normalizer(normalizer, bitcast<float2>(assumed));
+        old = atomicCAS(addr, assumed, bitcast<ull>(new_normalizer));
+      } while (assumed != old);
     }
 }
 
-__global__ void softmax_v2_kernel_pass2(const float *input, float *output, const float *workspace, int M, int N, int TILE_SIZE) {
+__global__ void softmax_online_split_pass2_kernel(const float *input, float *output, const float *workspace, int M, int N, int TILE_SIZE) {
   const int tid = threadIdx.x;
   const int BLOCK_SIZE = blockDim.x;
   const int tile_id = blockIdx.x;
@@ -256,18 +324,17 @@ __global__ void softmax_v2_kernel_pass2(const float *input, float *output, const
 }
 
 // online softmax. workspace size = 2M.
-void softmax_v2(const float *input, float *output, float *workspace, int M, int N) {
+void softmax_online_split(const float *input, float *output, float *workspace, int M, int N) {
   const int BLOCK_SIZE = 256;
   const int TILE_SIZE = BLOCK_SIZE;
-  // const int TILE_SIZE = N;
   const dim3 grid_size(cdiv(N, TILE_SIZE), M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE * 2;
 
   if (grid_size.x > 1)
-    softmax_v2_kernel_setup<<<cdiv(M, BLOCK_SIZE), BLOCK_SIZE>>>(workspace, M);
+    softmax_online_split_setup_kernel<<<cdiv(M, BLOCK_SIZE), BLOCK_SIZE>>>(workspace, M);
 
   // pass 1: find max and normalizer at the same time
   // pass 2: calculate output
-  softmax_v2_kernel_pass1<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, workspace, M, N, TILE_SIZE);
-  softmax_v2_kernel_pass2<<<grid_size, BLOCK_SIZE>>>(input, output, workspace, M, N, TILE_SIZE);
+  softmax_online_split_pass1_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, workspace, M, N, TILE_SIZE);
+  softmax_online_split_pass2_kernel<<<grid_size, BLOCK_SIZE>>>(input, output, workspace, M, N, TILE_SIZE);
 }
