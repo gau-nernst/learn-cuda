@@ -4,7 +4,7 @@ __host__ __device__ int cdiv(int a, int b) { return (a + b - 1) / b; }
 __device__ float add(float a, float b) { return a + b; }
 
 template<typename B, typename A>
-__device__ B bitcast(A a) {
+__device__ B bit_cast(A a) {
   static_assert(sizeof(A) == sizeof(B));
   B b;
   memcpy(&b, &a, sizeof(A));
@@ -47,11 +47,12 @@ __device__ V block_reduce(F f, V val, int BLOCK_SIZE, int tid, V *workspace) {
 }
 
 template<typename T>
-__device__ T shfl_down_sync(unsigned int mask, T var, int srcLane) {
+__device__ T shfl_down_sync(T var, int srcLane) {
+  const unsigned mask = 0xffffffff;
   if constexpr (sizeof(T) == sizeof(int))
-    return bitcast<T>(__shfl_down_sync(mask, bitcast<int>(var), srcLane));
+    return bit_cast<T>(__shfl_down_sync(mask, bit_cast<int>(var), srcLane));
   else if constexpr (sizeof(T) == sizeof(long long))
-    return bitcast<T>(__shfl_down_sync(mask, bitcast<long long>(var), srcLane));
+    return bit_cast<T>(__shfl_down_sync(mask, bit_cast<long long>(var), srcLane));
   else
     static_assert(!sizeof(T));
 }
@@ -60,7 +61,7 @@ template<typename F, typename V>
 __device__ V warp_reduce(F f, V val, int tid) {
   if (tid < WARP_SIZE)
     for (int stride = WARP_SIZE / 2; stride > 0; stride /= 2)
-      val = f(val, shfl_down_sync(0xffffffff, val, stride));
+      val = f(val, shfl_down_sync(val, stride));
   return val;
 }
 
@@ -93,7 +94,8 @@ __device__ float4 exp(float4 a) { return {exp(a.x), exp(a.y), exp(a.z), exp(a.w)
 __device__ void write_softmax_result(const float *input, float *output, int N, float max_val, float denom, int BLOCK_SIZE, int tid) {
   const float scale = 1.0f / denom;
 
-  if (reinterpret_cast<size_t>(input) % sizeof(float4) == 0) {
+  if ((reinterpret_cast<size_t>(input) % sizeof(float4) == 0) &&
+      (reinterpret_cast<size_t>(output) % sizeof(float4) == 0)) {
     for (int idx = tid; idx < N / 4; idx += BLOCK_SIZE) {
       float4 tmp = reinterpret_cast<const float4 *>(input)[idx];
       tmp = mul(exp(sub(tmp, max_val)), scale);
@@ -322,8 +324,8 @@ __global__ void softmax_online_split_pass1_kernel(const float *input, float *wor
       ull old = addr[0], assumed;
       do {
         assumed = old;
-        float2 new_normalizer = online_normalizer(normalizer, bitcast<float2>(assumed));
-        old = atomicCAS(addr, assumed, bitcast<ull>(new_normalizer));
+        float2 new_normalizer = online_normalizer(normalizer, bit_cast<float2>(assumed));
+        old = atomicCAS(addr, assumed, bit_cast<ull>(new_normalizer));
       } while (assumed != old);
     }
 }
