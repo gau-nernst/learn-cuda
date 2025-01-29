@@ -10,13 +10,12 @@ Resources:
 Name | Description
 -----|-------------
 1\. [Vector addition](1_vector_addition/) | Simple example to get everything working.
-2\. [Matrix multiplication SIMT](2a_matmul_simt/) | Block tiling, thread tiling, warp tiling.
-2\. [Matrix multiplication TensorOp](2b_matmul_tensorop/) | Inline PTX, `cvta`, `ldmatrix`, `mma`.
+2a\. [Matrix multiplication SIMT](2a_matmul_simt/) | Block tiling, thread tiling, warp tiling.
+2b\. [Matrix multiplication TensorOp](2b_matmul_tensorop/) | Inline PTX, `cvta`, `ldmatrix`, `mma`.
 3\. [Sum](3_sum/) | Reduction in general.  Prepare for softmax (max and sum).
-4\. [Softmax](4_softmax) | TODO
+4\. [Softmax](4_softmax) | Naive (safe) softmax, online softmax. `atomicCAS()`. Single-block and multi-block per row.
 5\. [FP6](5_fp6) | FP6 primitives (FP32/FP16/BF16<->FP6).
 6\. [Box blur](6_box_blur/) | 2D CUDA blocks/threads. TODO: optimize with separable filters, moving average.
-7\. Matrix multiplication Tensor Cores | Tensor cores
 ... optimizers, quantization, flash attention, gemv (split-K, stream-K), scan | TODO
 
 ```bash
