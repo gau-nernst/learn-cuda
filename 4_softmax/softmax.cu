@@ -15,8 +15,21 @@ constexpr int WARP_SIZE = 32;
 
 template<typename F, typename V>
 __device__ V thread_reduce(F f, V val, const float *input, int N, int BLOCK_SIZE, int tid) {
-  for (int idx = tid; idx < N; idx += BLOCK_SIZE)
-    val = f(val, input[idx]);
+  if (reinterpret_cast<size_t>(input) % sizeof(float4) == 0) {
+    for (int idx = tid; idx < N / 4; idx += BLOCK_SIZE) {
+      float4 tmp = reinterpret_cast<const float4 *>(input)[idx];
+      val = f(val, tmp.x);
+      val = f(val, tmp.y);
+      val = f(val, tmp.z);
+      val = f(val, tmp.w);
+    }
+    const int N_4 = N / 4 * 4;
+    if (tid < N - N_4)
+      val = f(val, input[N_4 + tid]);
+  } else {
+    for (int idx = tid; idx < N; idx += BLOCK_SIZE)
+      val = f(val, input[idx]);
+  }
   return val;
 }
 
@@ -76,8 +89,26 @@ __device__ float atomicMax(float *address, float val) {
 __device__ float4 sub(float4 a, float b) { return {a.x - b, a.y - b, a.z - b , a.w - b}; }
 __device__ float4 mul(float4 a, float b) { return {a.x * b, a.y * b, a.z * b , a.w * b}; }
 __device__ float4 exp(float4 a) { return {exp(a.x), exp(a.y), exp(a.z), exp(a.w)}; }
-__device__ float max(float4 a) { return max(max(a.x, a.y), max(a.z, a.w)); }
-__device__ float sum(float4 a) { return a.x + a.y + a.z + a.w; }
+
+__device__ void write_softmax_result(const float *input, float *output, int N, float max_val, float denom, int BLOCK_SIZE, int tid) {
+  const float scale = 1.0f / denom;
+
+  if (reinterpret_cast<size_t>(input) % sizeof(float4) == 0) {
+    for (int idx = tid; idx < N / 4; idx += BLOCK_SIZE) {
+      float4 tmp = reinterpret_cast<const float4 *>(input)[idx];
+      tmp = mul(exp(sub(tmp, max_val)), scale);
+      reinterpret_cast<float4 *>(output)[idx] = tmp;
+    }
+    const int N_4 = N / 4 * 4;
+    if (tid < N - N_4) {
+      const int idx = N_4 + tid;
+      output[idx] = exp(input[idx] - max_val) * scale;
+    }
+  } else {
+    for (int idx = tid; idx < N; idx += BLOCK_SIZE)
+      output[idx] = exp(input[idx] - max_val) * scale;
+  }
+}
 
 __global__ void softmax_naive_kernel(const float *input, float *output, int M, int N) {
   const int tid = threadIdx.x;
@@ -104,15 +135,11 @@ __global__ void softmax_naive_kernel(const float *input, float *output, int M, i
   normalizer = block_broadcast(normalizer, tid, workspace);
 
   // 3rd pass
-  // NOTE: we can save exp(input[idx] - max_val) to output in 2nd pass
-  // exchange 1 write for the computation
-  float scale = 1.0f / normalizer;
-  for (int idx = tid; idx < N; idx += BLOCK_SIZE)
-    output[idx] = exp(input[idx] - max_val) * scale;
+  write_softmax_result(input, output, N, max_val, normalizer, BLOCK_SIZE, tid);
 }
 
 void softmax_naive(const float *input, float *output, float *workspace, int M, int N) {
-  const int BLOCK_SIZE = 256;
+  const int BLOCK_SIZE = N <= 1024 ? 256 : 1024;
   const int shmem_size = sizeof(float) * BLOCK_SIZE;
   softmax_naive_kernel<<<M, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
 }
@@ -166,11 +193,8 @@ __global__ void softmax_naive_split_pass2_kernel(
 
   float total = 0.0f;
   float subtractor = max_per_row[0];
-  for (int idx = tid; idx < min(TILE_SIZE, N - col_offset); idx += BLOCK_SIZE) {
-    float tmp = exp(input[idx] - subtractor);
-    output[idx] = tmp;
-    total += tmp;
-  }
+  auto f = [subtractor](float a, float b) { return a + exp(b - subtractor); };
+  total = thread_reduce(f, total, input, min(TILE_SIZE, N - col_offset), BLOCK_SIZE, tid);
   total = block_reduce(add, total, BLOCK_SIZE, tid, workspace);
   total = warp_reduce(add, total, tid);
   if (tid == 0)
@@ -181,24 +205,25 @@ __global__ void softmax_naive_split_pass2_kernel(
 }
 
 // normalize output
-__global__ void softmax_naive_split_pass3_kernel(float *output, float *denom, int M, int N, int TILE_SIZE) {
+__global__ void softmax_naive_split_pass3_kernel(const float *input, float *output, float *workspace, int M, int N, int TILE_SIZE) {
   const int tid = threadIdx.x;
   const int BLOCK_SIZE = blockDim.x;
   const int tile_id = blockIdx.x;
   const int row = blockIdx.y;
 
   const int col_offset = tile_id * TILE_SIZE;
+  input += row * N + col_offset;
   output += row * N + col_offset;
 
-  float scale = 1.0f / denom[row];
-  for (int idx = tid; idx < min(TILE_SIZE, N - col_offset); idx += BLOCK_SIZE)
-    output[idx] *= scale;
+  float max_val = workspace[row];
+  float denom = workspace[M + row];
+  write_softmax_result(input, output, min(TILE_SIZE, N - col_offset), max_val, denom, BLOCK_SIZE, tid);
 }
 
 // naive softmax. workspace size = 2M
 void softmax_naive_split(const float *input, float *output, float *workspace, int M, int N) {
   const int BLOCK_SIZE = 256;
-  const int TILE_SIZE = BLOCK_SIZE;
+  const int TILE_SIZE = BLOCK_SIZE * 4;
   const dim3 grid_size(cdiv(N, TILE_SIZE), M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE;
 
@@ -214,7 +239,7 @@ void softmax_naive_split(const float *input, float *output, float *workspace, in
   // pass 3: normalize
   softmax_naive_split_pass1_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, max_per_row, M, N, TILE_SIZE);
   softmax_naive_split_pass2_kernel<<<grid_size, BLOCK_SIZE, shmem_size>>>(input, output, max_per_row, denom, M, N, TILE_SIZE);
-  softmax_naive_split_pass3_kernel<<<grid_size, BLOCK_SIZE>>>(output, denom, M, N, TILE_SIZE);
+  softmax_naive_split_pass3_kernel<<<grid_size, BLOCK_SIZE>>>(input, output, workspace, M, N, TILE_SIZE);
 }
 
 __global__ void softmax_online_split_setup_kernel(float *workspace, int M) {
@@ -256,16 +281,13 @@ __global__ void softmax_online_kernel(const float *input, float *output, int M, 
   normalizer = block_broadcast(normalizer, tid, shmem);
 
   // pass 2
-  float subtractor = normalizer.x;
-  float scale = 1.0f / normalizer.y;
-  for (int idx = tid; idx < N; idx += BLOCK_SIZE)
-    output[idx] = exp(input[idx] - subtractor) * scale;
+  write_softmax_result(input, output, N, normalizer.x, normalizer.y, BLOCK_SIZE, tid);
 }
 
 void softmax_online(const float *input, float *output, float *workspace, int M, int N) {
-  const int BLOCK_SIZE = 256;
+  const int BLOCK_SIZE = N <= 1024 ? 256 : 1024;
   const int shmem_size = sizeof(float) * BLOCK_SIZE * 2;
-  softmax_naive_kernel<<<M, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
+  softmax_online_kernel<<<M, BLOCK_SIZE, shmem_size>>>(input, output, M, N);
 }
 
 __global__ void softmax_online_split_pass1_kernel(const float *input, float *workspace, int M, int N, int TILE_SIZE) {
@@ -315,18 +337,16 @@ __global__ void softmax_online_split_pass2_kernel(const float *input, float *out
   const int col_offset = tile_id * TILE_SIZE;
   input += row * N + col_offset;
   output += row * N + col_offset;
-  float row_max = workspace[row * 2];
-  float scale = 1.0f / workspace[row * 2 + 1];
 
-  for (int idx = tid; idx < min(TILE_SIZE, N - col_offset); idx += BLOCK_SIZE) {
-    output[idx] = exp(input[idx] - row_max) * scale;  // recompute exp(x - row_max)
-  }
+  float max_val = workspace[row * 2];
+  float denom = workspace[row * 2 + 1];
+  write_softmax_result(input, output, min(TILE_SIZE, N - col_offset), max_val, denom, BLOCK_SIZE, tid);
 }
 
 // online softmax. workspace size = 2M.
 void softmax_online_split(const float *input, float *output, float *workspace, int M, int N) {
   const int BLOCK_SIZE = 256;
-  const int TILE_SIZE = BLOCK_SIZE;
+  const int TILE_SIZE = BLOCK_SIZE * 4;
   const dim3 grid_size(cdiv(N, TILE_SIZE), M);
   const int shmem_size = sizeof(float) * BLOCK_SIZE * 2;
 
