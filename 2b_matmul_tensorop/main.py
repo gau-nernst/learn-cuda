@@ -14,9 +14,10 @@ module = torch.utils.cpp_extension.load(
     verbose=True,
 )
 
-# for large n, there will be a larger deviation, since sum of many small elements are not accurate
-input1 = torch.randn(4096, 4096).bfloat16().cuda()
-input2 = torch.randn(4096, 4096).bfloat16().cuda().T
+# for large K, there will be a larger deviation, since sum of many small elements are not accurate
+M, N, K = 4096, 4096, 4096
+input1 = torch.randn(M, K).bfloat16().cuda()
+input2 = torch.randn(N, K).bfloat16().cuda().T
 
 output_ref = torch.matmul(input1, input2)
 output_v1a = module.matmul_v1a(input1, input2)
@@ -27,7 +28,14 @@ torch.testing.assert_close(output_v1a, output_ref)
 torch.testing.assert_close(output_v1b, output_ref)
 torch.testing.assert_close(output_v2, output_ref)
 
-print("CuBLAS:", benchmark(torch.matmul, input1, input2))
-print("v1a:", benchmark(module.matmul_v1a, input1, input2))
-print("v1b:", benchmark(module.matmul_v1b, input1, input2))
-print("v2:", benchmark(module.matmul_v2, input1, input2))
+
+def bench_and_print(f, name):
+    latency_ms = benchmark(f, input1, input2)
+    tflops = 2 * M * N * K / latency_ms / 1e9
+    print(f"{name}:\t{latency_ms:.4f} ms\t{tflops:.2f} TFLOPS")
+
+
+bench_and_print(torch.matmul, "CuBLAS")
+bench_and_print(module.matmul_v1a, "v1a")
+bench_and_print(module.matmul_v1b, "v1b")
+bench_and_print(module.matmul_v2, "v2")
