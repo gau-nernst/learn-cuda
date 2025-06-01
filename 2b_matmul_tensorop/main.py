@@ -20,12 +20,10 @@ input1 = torch.randn(M, K).bfloat16().cuda()
 input2 = torch.randn(N, K).bfloat16().cuda().T
 
 output_ref = torch.matmul(input1, input2)
-output_v1a = module.matmul_v1a(input1, input2)
-output_v1b = module.matmul_v1b(input1, input2)
+output_v1 = module.matmul_v1(input1, input2)
 output_v2 = module.matmul_v2(input1, input2)
 
-torch.testing.assert_close(output_v1a, output_ref)
-torch.testing.assert_close(output_v1b, output_ref)
+torch.testing.assert_close(output_v1, output_ref)
 torch.testing.assert_close(output_v2, output_ref)
 
 
@@ -36,6 +34,5 @@ def bench_and_print(f, name):
 
 
 bench_and_print(torch.matmul, "CuBLAS")
-bench_and_print(module.matmul_v1a, "v1a")
-bench_and_print(module.matmul_v1b, "v1b")
+bench_and_print(module.matmul_v1, "v1")
 bench_and_print(module.matmul_v2, "v2")
