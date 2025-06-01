@@ -6,14 +6,13 @@ Resources:
 - https://docs.nvidia.com/cuda/inline-ptx-assembly/
 - https://github.com/NVIDIA/cutlass/blob/v3.5.1/include/cute/arch (see `copy_smxx.hpp` and `mma_smxx.hpp`)
 
-For M = N = K = 4096, BF16 A row-major x B column-major, 4070Ti SUPER, compile with `-O3 --use_fast_math`
+For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 12.9, `-O3 --use_fast_math`
+- Theoretical limit: 209.5 TFLOPS
 
-Kernel name                                                                        | Duration (ms) | % of CuBLAS
------------------------------------------------------------------------------------|---------------|-------------
-CuBLAS (via PyTorch) `ampere_bf16_s16816gemm_bf16_256x128_ldg8_f2f_stages_32x3_tn` |          1.84 |     100.00%
-v1a (block+warp tiling, `mma.m16n8k8`)                                             |          1.98 |      92.93%
-v1b (`m16n8k6` with padded A shared memory)                                        |          1.92 |      95.83%
-v2 (swizzled shared memory)
+Kernel name                            |  TFLOPS | % of SOL
+---------------------------------------|---------|----------
+CuBLAS 12.8 (via PyTorch)              |  177.34 |   84.65%
+v1 (block+warp tiling, `mma.m16n8k16`) |  144.15 |   69.28%
 
 Lessons learned:
 - Inline PTX: instruction, outputs, inputs, constraints
