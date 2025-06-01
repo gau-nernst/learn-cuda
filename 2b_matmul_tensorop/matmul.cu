@@ -70,10 +70,10 @@ __device__ void global_to_shared_async(const T *in, int in_stride, T *out, int o
     const int col = idx % WIDTH;
     cp_async<cp_size>(cvta_shared(out + row * out_stride + col), in + row * in_stride + col);
   }
-  cp_async_wait_all();
 }
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_M, int WARP_N, int MMA_K, bool use_cp_async, typename T>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_M, int WARP_N, int MMA_K, int SHM_STRIDE, bool use_cp_async,
+          typename T>
 __global__ void
 __launch_bounds__((BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE) // maxThreadsPerBlock
 matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
@@ -112,8 +112,8 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   C += (offset_m + warp_id_m * WARP_M) * N + (offset_n + warp_id_n * WARP_N);
 
   extern __shared__ T shm[];
-  T *A_shared = shm;                            // BLOCK_M * BLOCK_K
-  T *B_shared = A_shared + (BLOCK_M * BLOCK_K); // BLOCK_N * BLOCK_K
+  T *A_shared = shm;                               // BLOCK_M * BLOCK_K
+  T *B_shared = A_shared + (BLOCK_M * SHM_STRIDE); // BLOCK_N * BLOCK_K
 
   // all registers are 32-bit (4-byte)
   // - we accumulate to FP32, which is exactly 32-bit
@@ -130,11 +130,12 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
 
   for (int block_k = 0; block_k < K; block_k += BLOCK_K) {
     if constexpr (use_cp_async) {
-      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, BLOCK_K, tid);
-      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(B, K, B_shared, BLOCK_K, tid);
+      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, SHM_STRIDE, tid);
+      global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, SHM_STRIDE, tid);
+      cp_async_wait_all();
     } else {
-      global_to_shared<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, BLOCK_K, tid);
-      global_to_shared<TB_SIZE, BLOCK_M, BLOCK_K>(B, K, B_shared, BLOCK_K, tid);
+      global_to_shared<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, SHM_STRIDE, tid);
+      global_to_shared<TB_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, SHM_STRIDE, tid);
     }
     __syncthreads();
 
@@ -155,8 +156,8 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
       // [8x8-1][8x8-3]
 
       // select the tile this warp is responsible for
-      const T *A_shm_warp = A_shared + (warp_id_m * WARP_M) * BLOCK_K + mma_k;
-      const T *B_shm_warp = B_shared + (warp_id_n * WARP_N) * BLOCK_K + mma_k;
+      const T *A_shm_warp = A_shared + (warp_id_m * WARP_M) * SHM_STRIDE + mma_k;
+      const T *B_shm_warp = B_shared + (warp_id_n * WARP_N) * SHM_STRIDE + mma_k;
 
       // to use ldmatrix: each thread holds the address of 1 row e.g.
       // - thread 0 holds address of row 0
@@ -169,14 +170,14 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
       for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
         // NOTE: we can reduce unnecessary address calculation if we know MMA_K=8 or 16
         // convert generic address to .shared state space address expected by inline PTX
-        const T *B_ptr = B_shm_warp + (mma_id_n * MMA_N + (lane_id % 8)) * BLOCK_K + (lane_id / 8) * 8;
+        const T *B_ptr = B_shm_warp + (mma_id_n * MMA_N + (lane_id % 8)) * SHM_STRIDE + (lane_id / 8) * 8;
         ldmatrix<num_B_regs>(B_reg[mma_id_n], cvta_shared(B_ptr));
       }
 
       for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++) {
         // load A to registers
         uint32_t A_reg[num_A_regs];
-        const T *A_ptr = A_shm_warp + (mma_id_m * MMA_M + (lane_id % 16)) * BLOCK_K + (lane_id / 16) * 8;
+        const T *A_ptr = A_shm_warp + (mma_id_m * MMA_M + (lane_id % 16)) * SHM_STRIDE + (lane_id / 16) * 8;
         ldmatrix<num_A_regs>(A_reg, cvta_shared(A_ptr));
 
         // call mma
@@ -224,14 +225,16 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
   const int WARP_M = 64, WARP_N = 64;
   const int MMA_K = 16;
+  const int SHM_STRIDE = BLOCK_K; // no padding
+  const int use_cp_async = false;
 
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
-  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, false>;
+  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async>;
 
   const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(T);
+  const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(T);
 
   if (shm_size > 48'000)
     CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shm_size));
@@ -249,14 +252,43 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
   const int WARP_M = 64, WARP_N = 64;
   const int MMA_K = 16;
+  const int SHM_STRIDE = BLOCK_K; // no padding
+  const int use_cp_async = true;
 
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
-  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, true>;
+  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async>;
 
   const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(T);
+  const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(T);
+
+  if (shm_size > 48'000)
+    CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shm_size));
+
+  kernel<<<grid_size, TB_SIZE, shm_size>>>(A, B, C, M, N, K);
+  CUDA_CHECK(cudaGetLastError());
+}
+
+void matmul_v3(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+  assert(is_power_of_two(M) && "M must be a power of 2");
+  assert(is_power_of_two(N) && "N must be a power of 2");
+  assert(is_power_of_two(K) && "K must be a power of 2");
+
+  // 4 warps
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
+  const int WARP_M = 64, WARP_N = 64;
+  const int MMA_K = 16;
+  const int SHM_STRIDE = BLOCK_K + 8; // pad shmem to avoid bank conflict
+  const int use_cp_async = true;
+
+  using T = nv_bfloat16;
+  using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
+  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async>;
+
+  const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(T);
 
   if (shm_size > 48'000)
     CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shm_size));
@@ -266,7 +298,7 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
 }
 
 // NOTE: to re-do
-// https://github.com/NVIDIA/cutlass/blob/main/include/cute/swizzle.hpp
+// https://github.com/NVIDIA/cutlass/blob/v3.9.2/include/cute/swizzle.hpp
 template <int WIDTH, typename T> __device__ int swizzle(int x) {
   constexpr int num_elems = 16 / sizeof(T);
   constexpr int stride = WIDTH / num_elems; // stride for 16-byte word.

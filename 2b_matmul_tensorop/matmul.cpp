@@ -11,6 +11,7 @@ typedef void MatmulFn(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
 
 MatmulFn matmul_v1;
 MatmulFn matmul_v2;
+MatmulFn matmul_v3;
 
 template <MatmulFn matmul_fn> torch::Tensor matmul_pt(torch::Tensor A, torch::Tensor B) {
   CHECK_INPUT(A);
@@ -31,4 +32,5 @@ template <MatmulFn matmul_fn> torch::Tensor matmul_pt(torch::Tensor A, torch::Te
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("matmul_v1", &matmul_pt<matmul_v1>, "Matrix multiplication v1");
   m.def("matmul_v2", &matmul_pt<matmul_v2>, "Matrix multiplication v2");
+  m.def("matmul_v3", &matmul_pt<matmul_v3>, "Matrix multiplication v3");
 }
