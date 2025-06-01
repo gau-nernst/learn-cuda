@@ -11,6 +11,7 @@
 
 __host__ __device__ constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
 constexpr bool is_power_of_two(int x) { return x > 0 && (x & (x - 1)) == 0; } // https://stackoverflow.com/a/1804686
+constexpr __device__ int log2_int(int x) { return x == 1 ? 0 : 1 + log2_int(x >> 1); }
 constexpr int WARP_SIZE = 32;
 
 template <int BLOCK_SIZE, int HEIGHT, int WIDTH, typename T>
@@ -33,7 +34,9 @@ template <> __device__ ushort f32_to_b16<half>(float x) { return __half_as_ushor
 template <> __device__ ushort f32_to_b16<nv_bfloat16>(float x) { return __bfloat16_as_ushort(__float2bfloat16(x)); }
 
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_M, int WARP_N, int MMA_M, int MMA_N, int MMA_K, typename T>
-__global__ void matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
+__global__ void
+__launch_bounds__((BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE) // maxThreadsPerBlock
+matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   static_assert(BLOCK_M % WARP_M == 0);
   static_assert(BLOCK_N % WARP_N == 0);
   static_assert(BLOCK_K % MMA_K == 0);
@@ -163,8 +166,6 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_M, MMA_N, MMA_K>
       <<<grid_size, TB_SIZE>>>(A, B, C, M, N, K);
 }
-
-constexpr __device__ int log2_int(int x) { return x == 1 ? 0 : 1 + log2_int(x >> 1); }
 
 // https://github.com/NVIDIA/cutlass/blob/main/include/cute/swizzle.hpp
 template <int WIDTH, typename T> __device__ int swizzle(int x) {
