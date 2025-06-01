@@ -1,12 +1,9 @@
 import argparse
+import time
 
 import torch
 import torch.utils.cpp_extension
 from triton.testing import do_bench
-
-
-def benchmark(f, *args, **kwargs):
-    return do_bench(lambda: f(*args, **kwargs), return_mode="median")
 
 
 module = torch.utils.cpp_extension.load(
@@ -22,6 +19,9 @@ def main():
     parser.add_argument("--profile")
     args = parser.parse_args()
 
+    torch._inductor.config.max_autotune_gemm_backends = "TRITON"
+    # torch._inductor.utils.is_big_gpu = lambda _: True
+
     # for large K, there will be a larger deviation, since sum of many small elements are not accurate
     M, N, K = 4096, 4096, 4096
     A = torch.randn(M, K).bfloat16().cuda()
@@ -33,27 +33,25 @@ def main():
         torch.cuda.synchronize()
         return
 
-    output_ref = torch.matmul(A, B)
-    output_v1 = module.matmul_v1(A, B)
-    output_v2 = module.matmul_v2(A, B)
-    output_v3 = module.matmul_v3(A, B)
-    output_v4 = module.matmul_v4(A, B)
-
-    torch.testing.assert_close(output_v1, output_ref)
-    torch.testing.assert_close(output_v2, output_ref)
-    torch.testing.assert_close(output_v3, output_ref)
-    torch.testing.assert_close(output_v4, output_ref)
-
     def bench_and_print(f, name):
-        latency_ms = benchmark(f, A, B)
+        latency_ms = do_bench(lambda: f(A, B), return_mode="median")
         tflops = 2 * M * N * K / latency_ms / 1e9
         print(f"{name}:\t{latency_ms:.4f} ms\t{tflops:.2f} TFLOPS")
 
+    output_ref = torch.matmul(A, B)
     bench_and_print(torch.matmul, "CuBLAS")
-    bench_and_print(module.matmul_v1, "v1")
-    bench_and_print(module.matmul_v2, "v2")
-    bench_and_print(module.matmul_v3, "v3")
-    bench_and_print(module.matmul_v4, "v4")
+
+    inductor_mm = torch.compile(torch.matmul, mode="max-autotune-no-cudagraphs", dynamic=False)
+    bench_and_print(inductor_mm, "Inductor Triton")
+
+    for i in range(4):
+        fn = getattr(module, f"matmul_v{i + 1}")
+        output = fn(A, B)
+        torch.testing.assert_close(output, output_ref)
+        bench_and_print(fn, f"v{i + 1}")
+
+        # sleep to stabilize thermal
+        time.sleep(1)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile wi
 Kernel name                             | TFLOPS | % of SOL
 ----------------------------------------|--------|----------
 CuBLAS 12.8 (via PyTorch)               | 175.68 |   83.86%
+Inductor Triton (v3.3.1)                | 203.16 |   96.97%
 v1 (block+warp tiling, vectorized load) | 144.01 |   68.74%
 v2 (`cp.async`)                         | 161.90 |   77.28%
 v3 (pad shared memory)                  | 175.22 |   83.64%
