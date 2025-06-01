@@ -9,7 +9,7 @@
   if (cond)                                                                                                            \
     printf(__VA_ARGS__);
 
-#define CHECK_CUDA(call)                                                                                               \
+#define CUDA_CHECK(call)                                                                                               \
   do {                                                                                                                 \
     cudaError_t err = call;                                                                                            \
     if (err != cudaSuccess) {                                                                                          \
@@ -80,8 +80,9 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   B += offset_n * K;
   C += (offset_m + warp_id_m * WARP_M) * N + (offset_n + warp_id_n * WARP_N);
 
-  __shared__ T A_shared[BLOCK_M * BLOCK_K];
-  __shared__ T B_shared[BLOCK_N * BLOCK_K];
+  extern __shared__ T shm[];
+  T *A_shared = shm;  // BLOCK_M * BLOCK_K
+  T *B_shared = A_shared + (BLOCK_M * BLOCK_K);  // BLOCK_N * BLOCK_K
 
   // all registers are 32-bit (4-byte)
   // - we accumulate to FP32, which is exactly 32-bit
@@ -189,10 +190,19 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   const int WARP_M = 64, WARP_N = 64;
   const int MMA_K = 16;
 
+  using T = nv_bfloat16;
+  using KernelFn = void(*)(const T *A, const T *B, T *C, int M, int N, int K);
+  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K>;
+
   const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K><<<grid_size, TB_SIZE>>>(A, B, C, M, N, K);
-  CHECK_CUDA(cudaGetLastError());
+  const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(T);
+
+  if (shm_size > 48'000)
+    CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shm_size));
+
+  kernel<<<grid_size, TB_SIZE, shm_size>>>(A, B, C, M, N, K);
+  CUDA_CHECK(cudaGetLastError());
 }
 
 // NOTE: to re-do
