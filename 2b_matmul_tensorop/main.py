@@ -30,14 +30,17 @@ def main():
     if args.profile is not None:
         fn = {
             "1": module.matmul_v1,
+            "2": module.matmul_v2,
         }[args.profile]
         fn(A, B)
         return
 
     output_ref = torch.matmul(A, B)
     output_v1 = module.matmul_v1(A, B)
+    output_v2 = module.matmul_v2(A, B)
 
     torch.testing.assert_close(output_v1, output_ref)
+    torch.testing.assert_close(output_v2, output_ref)
 
     def bench_and_print(f, name):
         latency_ms = benchmark(f, A, B)
@@ -46,6 +49,7 @@ def main():
 
     bench_and_print(torch.matmul, "CuBLAS")
     bench_and_print(module.matmul_v1, "v1")
+    bench_and_print(module.matmul_v2, "v2")
 
 
 if __name__ == "__main__":

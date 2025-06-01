@@ -9,10 +9,11 @@ Resources:
 For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 12.9, `-O3 --use_fast_math`
 - Theoretical limit: 209.5 TFLOPS
 
-Kernel name                            |  TFLOPS | % of SOL
----------------------------------------|---------|----------
-CuBLAS 12.8 (via PyTorch)              |  177.34 |   84.65%
-v1 (block+warp tiling, `mma.m16n8k16`) |  144.15 |   69.28%
+Kernel name                             |  TFLOPS | % of SOL
+----------------------------------------|---------|----------
+CuBLAS 12.8 (via PyTorch)               |  177.34 |   84.65%
+v1 (block+warp tiling, vectorized load) |  144.15 |   69.28%
+v2 (`cp.async`)                         |  163.35 |   77.97%
 
 Lessons learned:
 - Inline PTX: instruction, outputs, inputs, constraints

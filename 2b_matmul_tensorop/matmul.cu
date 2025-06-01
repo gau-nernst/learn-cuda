@@ -23,26 +23,57 @@ constexpr bool is_power_of_two(int x) { return x > 0 && (x & (x - 1)) == 0; } //
 constexpr __device__ int log2_int(int x) { return x == 1 ? 0 : 1 + log2_int(x >> 1); }
 constexpr int WARP_SIZE = 32;
 
-template <int BLOCK_SIZE, int HEIGHT, int WIDTH, typename T>
-__device__ void load_b128(const T *in, int in_row_stride, T *out, int out_row_stride, int tid) {
-  // number of elements to do 128-bit/16-byte load
-  // e.g. FP32 -> 4 elements, BF16 -> 8 elements.
-  using load_type = uint4;
-  constexpr int num_elems = sizeof(load_type) / sizeof(T);
-
-  for (int idx = tid * num_elems; idx < HEIGHT * WIDTH; idx += BLOCK_SIZE * num_elems) {
-    const int row = idx / WIDTH;
-    const int col = idx % WIDTH;
-    load_type tmp = reinterpret_cast<const load_type *>(&in[row * in_row_stride + col])[0];
-    reinterpret_cast<load_type *>(&out[row * out_row_stride + col])[0] = tmp;
-  }
-}
-
 template <typename T> __device__ ushort f32_to_b16(float x);
 template <> __device__ ushort f32_to_b16<half>(float x) { return __half_as_ushort(__float2half(x)); }
 template <> __device__ ushort f32_to_b16<nv_bfloat16>(float x) { return __bfloat16_as_ushort(__float2bfloat16(x)); }
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_M, int WARP_N, int MMA_K, typename T>
+// convert generic address (C++ address, 64-bit) to shared state space address (32-bit)
+// all PTX instructions expect share memory address to be in shared state space (not 100%)
+__device__ uint32_t cvta_shared(const void *ptr) { return static_cast<uint32_t>(__cvta_generic_to_shared(ptr)); }
+
+// https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-non-bulk-copy
+template <int SIZE> __device__ void cp_async(uint32_t dst, const void *src) {
+  // .ca means cache to L1 and L2. .cg means cache to L2 only.
+  if constexpr (SIZE == 4)
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;" ::"r"(dst), "l"(src));
+  else if constexpr (SIZE == 8)
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;" ::"r"(dst), "l"(src));
+  else if constexpr (SIZE == 16)
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 16;" ::"r"(dst), "l"(src));
+};
+__device__ void cp_async_commit() { asm volatile("cp.async.commit_group;"); };
+__device__ void cp_async_wait_group(int N) { asm volatile("cp.async.wait_group {%0};" ::"r"(N)); };
+__device__ void cp_async_wait_all() { asm volatile("cp.async.wait_all;"); };
+
+template <int TB_SIZE, int HEIGHT, int WIDTH, typename T>
+__device__ void global_to_shared(const T *in, int in_stride, T *out, int out_stride, int tid) {
+  // number of elements to do 128-bit/16-byte load
+  // e.g. FP32 -> 4 elements, BF16 -> 8 elements.
+  using TLoad = uint4;
+  constexpr int num_elems = sizeof(TLoad) / sizeof(T);
+
+  for (int idx = tid * num_elems; idx < HEIGHT * WIDTH; idx += TB_SIZE * num_elems) {
+    const int row = idx / WIDTH;
+    const int col = idx % WIDTH;
+    TLoad tmp = reinterpret_cast<const TLoad *>(&in[row * in_stride + col])[0];
+    reinterpret_cast<TLoad *>(&out[row * out_stride + col])[0] = tmp;
+  }
+}
+
+template <int TB_SIZE, int HEIGHT, int WIDTH, typename T>
+__device__ void global_to_shared_async(const T *in, int in_stride, T *out, int out_stride, int tid) {
+  constexpr int cp_size = 16;
+  constexpr int num_elems = cp_size / sizeof(T);
+
+  for (int idx = tid * num_elems; idx < HEIGHT * WIDTH; idx += TB_SIZE * num_elems) {
+    const int row = idx / WIDTH;
+    const int col = idx % WIDTH;
+    cp_async<cp_size>(cvta_shared(out + row * out_stride + col), in + row * in_stride + col);
+  }
+  cp_async_wait_all();
+}
+
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_M, int WARP_N, int MMA_K, bool use_cp_async, typename T>
 __global__ void
 __launch_bounds__((BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE) // maxThreadsPerBlock
 matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
@@ -81,8 +112,8 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   C += (offset_m + warp_id_m * WARP_M) * N + (offset_n + warp_id_n * WARP_N);
 
   extern __shared__ T shm[];
-  T *A_shared = shm;  // BLOCK_M * BLOCK_K
-  T *B_shared = A_shared + (BLOCK_M * BLOCK_K);  // BLOCK_N * BLOCK_K
+  T *A_shared = shm;                            // BLOCK_M * BLOCK_K
+  T *B_shared = A_shared + (BLOCK_M * BLOCK_K); // BLOCK_N * BLOCK_K
 
   // all registers are 32-bit (4-byte)
   // - we accumulate to FP32, which is exactly 32-bit
@@ -98,9 +129,13 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   float acc[NUM_MMA_M][NUM_MMA_N][num_acc_regs] = {};
 
   for (int block_k = 0; block_k < K; block_k += BLOCK_K) {
-    // TODO: use async copy
-    load_b128<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, BLOCK_K, tid);
-    load_b128<TB_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, BLOCK_K, tid);
+    if constexpr (use_cp_async) {
+      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, BLOCK_K, tid);
+      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(B, K, B_shared, BLOCK_K, tid);
+    } else {
+      global_to_shared<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, BLOCK_K, tid);
+      global_to_shared<TB_SIZE, BLOCK_M, BLOCK_K>(B, K, B_shared, BLOCK_K, tid);
+    }
     __syncthreads();
 
     for (int mma_k = 0; mma_k < BLOCK_K; mma_k += MMA_K) {
@@ -191,8 +226,33 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   const int MMA_K = 16;
 
   using T = nv_bfloat16;
-  using KernelFn = void(*)(const T *A, const T *B, T *C, int M, int N, int K);
-  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K>;
+  using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
+  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, false>;
+
+  const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(T);
+
+  if (shm_size > 48'000)
+    CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shm_size));
+
+  kernel<<<grid_size, TB_SIZE, shm_size>>>(A, B, C, M, N, K);
+  CUDA_CHECK(cudaGetLastError());
+}
+
+void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+  assert(is_power_of_two(M) && "M must be a power of 2");
+  assert(is_power_of_two(N) && "N must be a power of 2");
+  assert(is_power_of_two(K) && "K must be a power of 2");
+
+  // 4 warps
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
+  const int WARP_M = 64, WARP_N = 64;
+  const int MMA_K = 16;
+
+  using T = nv_bfloat16;
+  using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
+  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, true>;
 
   const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);

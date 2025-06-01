@@ -1,20 +1,16 @@
 #include <cstdint>
 #include <cuda_bf16.h>
 
-__device__ uint32_t cvta_shared(void const *ptr) { return static_cast<uint32_t>(__cvta_generic_to_shared(ptr)); }
-
-template <int num> __device__ void ldmatrix(uint32_t *reg, uint32_t addr);
-template <> __device__ void ldmatrix<1>(uint32_t reg[1], uint32_t addr) {
+template <int num> __device__ void ldmatrix(uint32_t *reg, uint32_t addr) {
   // "=r" is output, "r" is input
-  asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];" : "=r"(reg[0]) : "r"(addr));
-}
-template <> __device__ void ldmatrix<2>(uint32_t *reg, uint32_t addr) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];" : "=r"(reg[0]), "=r"(reg[1]) : "r"(addr));
-}
-template <> __device__ void ldmatrix<4>(uint32_t *reg, uint32_t addr) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
-               : "=r"(reg[0]), "=r"(reg[1]), "=r"(reg[2]), "=r"(reg[3])
-               : "r"(addr));
+  if constexpr (num == 1)
+    asm volatile("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];" : "=r"(reg[0]) : "r"(addr));
+  else if constexpr (num == 2)
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];" : "=r"(reg[0]), "=r"(reg[1]) : "r"(addr));
+  else if constexpr (num == 4)
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
+                 : "=r"(reg[0]), "=r"(reg[1]), "=r"(reg[2]), "=r"(reg[3])
+                 : "r"(addr));
 }
 
 template <int MMA_K, typename T> __device__ void mma(uint32_t *A, uint32_t *B, float *acc);
