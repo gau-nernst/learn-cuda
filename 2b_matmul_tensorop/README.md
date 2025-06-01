@@ -11,10 +11,11 @@ For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile wi
 
 Kernel name                             | TFLOPS | % of SOL
 ----------------------------------------|--------|----------
-CuBLAS 12.8 (via PyTorch)               | 177.34 |   84.65%
-v1 (block+warp tiling, vectorized load) | 144.15 |   69.28%
-v2 (`cp.async`)                         | 163.35 |   77.97%
-v3 (pad shared memory)                  | 176.31 |   84.16%
+CuBLAS 12.8 (via PyTorch)               | 175.68 |   83.86%
+v1 (block+warp tiling, vectorized load) | 144.01 |   68.74%
+v2 (`cp.async`)                         | 161.90 |   77.28%
+v3 (pad shared memory)                  | 175.22 |   83.64%
+v4 (swizzle shared memory)              | 176.01 |   84.01%
 
 Lessons learned:
 - Inline PTX: instruction, outputs, inputs, constraints
@@ -23,6 +24,7 @@ Lessons learned:
   - To use `ldmatrix`, we need to convert pointer in generic address to shared address required by PTX using `ctva` instruction (convert address). Most, if not all, PTX instructions expect shared memory address to be 32-bit (instead of 64-bit).
 - `mma`: typical shape for FP16/BF16 is `m16n8k8` and `m16n8k16`. Each thread in a warp must hold specific elements in the tile, which can be done using `ldmatrix`. To load 16x8 tile, we use `ldmatrix.x2`. Similarly, for 16x16 tile, we use `ldmatrix.x4`. Refer to PTX docs on layout of 8x8 tiles.
 - Accumulate result is held in register memory (across threads in a warp). We can write the results from register directly to global memory. Again, each thread hold specific elements of the output.
+- `cp.async`
 - When we use normal layout for shared memory, there will be bank conflicts when using `ldmatrix`.
   - Shared memory is backed by 32 banks. Consecutive 32-bit words (4 bytes) reside in consecutive banks.
   - `ldmatrix` loads one 8x8 tile at a time (according to @firadeoclus from GPU-MODE Discord). It means that for `ldmatrix.x2`, it will load the 1st 8x8 tile then the 2nd 8x8. It also means our analysis is simpler, since we only need to consider a 8x8 tile.
@@ -36,14 +38,12 @@ Lessons learned:
   - -> no bank conflicts! However, this wastes shared memory -> reduce available L1 cache.
   - For `BLOCK_K>=64`, we also get no bank conflict with 8 elements (16-byte) padding.
   - Note that we also want `BLOCK_K>=64` to utilize 128-byte cache line.
-- The better way is to use **swizzled layout** for shared memory. The idea is that we spread 8 rows of each 8x8 `ldmatrix` tile across 32 banks. To use the same amount of shared memory, we need to **permute** the order/position of `ldmatrix` rows within the block tile.
-  - For layout conversion, there is always a mapping of indices between those in the "special" layout (logical view) and those in linear layout (physical view). For swizzled layout, typically the **swizzle functor** only consists of bit manipulation operations.
-  - Each 8x-16bit row must stay together. In other words, we can use 16-byte as our unit of swizzling -> taking the word size as 16-byte. Each 16-byte word resides in 4 consecutive memory banks. We can call this "4-bank group". There are 8 groups in total (32 banks). We need to distribute 8 rows of `ldmatrix` tile (or simply 8x 16-byte words) among the 8 "4-bank groups".
-  - Looking at the index of the 16-byte elements, bits 0-2 determine the "4-bank group" (physical view). We also look that the row index. Which bits determine row index depends on the row stride (or width) of shared memory. **Bank conflict happens when row index changes but bank-group index does not change**.
-  - We XOR bank-group index with row-index -> bank-group index is shuffled by row-index. We should do this only for non-overlapping bits.
-    - Row stride is 1. Bits 0-2 determine row index. Bits fully overlap. No bank conflict
-    - Row stride is 2. Bits 1-3 determine row index. Bits 1-2 overlap (when we change bits 1-2, bank-group index also changes, while if we change bit 3, bank-group index does not change). XOR bit 0 with bit 3 -> when bit 3 changes, bank-group index also changes.
-    - Row stride is 4. Bits 2-4 determine row index. Bit 2 overlaps. XOR bits 0-1 with bits 3-4.
-    - Row stride is 8. Bits 3-5 determine row index. No overlap. XOR bits 0-2 with bits 3-5.
-    - Row stride is 16. Bits 4-6 determine row index. No overlap. XOR bits 0-2 with bits 4-6.
-  - Number of bits to XOR = min(log2(row stride), 3) (aka BBits in CUTE). XOR bit [0,num_bits-1] with [log2(row stride), log2(row stride) + num_bits - 1]. log2(row stride) is SShift in CUTE.
+- The better way is to use **swizzled layout** for shared memory. The idea is that we spread 8 rows of the 8x8 tile across 32 banks. To do so, we **permute** the position of each row within the block tile.
+  - Look at bit pattern of shared memory address. Bit0-1 are within a bank. Bit2-6 determines bank index (32 = 2^5).
+  - Due to 16-byte alignment constraint of `ldmatrix`, bit0-3 of row address are always zeros.
+  - -> we only need to permute bit4-6 of row address (3 bits).
+  - For `BLOCK_K=64` (stride = 128 bytes = 2^7), all row addresses have the same bit0-6 -> 32-way bank conflict.
+  - We XOR bit4-6 with row index to permute row positions in shared memory. XOR ensures that there is one-to-one mapping between input and output.
+  - For `BLOCK_K=32` (stride = 64 bytes = 2^6), all row addresses have the same bit0-5 -> 16-way bank conflict.
+  - We XOR bit4-5 with bit1-2 of row index. Note that we don't use bit0 of row index since that bit changes bit6 of row address.
+  - Note that row index is also encoded in pre-permuted address: it starts at bit-log2(stride), and spans 3 bits.

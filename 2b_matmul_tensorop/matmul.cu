@@ -45,8 +45,19 @@ __device__ void cp_async_commit() { asm volatile("cp.async.commit_group;"); };
 __device__ void cp_async_wait_group(int N) { asm volatile("cp.async.wait_group {%0};" ::"r"(N)); };
 __device__ void cp_async_wait_all() { asm volatile("cp.async.wait_all;"); };
 
-template <int TB_SIZE, int HEIGHT, int WIDTH, typename T>
-__device__ void global_to_shared(const T *in, int in_stride, T *out, int out_stride, int tid) {
+// NOTE: stride in bytes
+template <int STRIDE> __device__ uint32_t swizzle(uint32_t index) {
+  // no need swizzling
+  if constexpr (STRIDE == 16)
+    return index;
+
+  int row_idx = (index / STRIDE) % 8;
+  int bits_to_xor = row_idx / max(64 / STRIDE, 1);
+  return index ^ (bits_to_xor << 4);
+}
+
+template <int TB_SIZE, int HEIGHT, int WIDTH, int OUT_STRIDE, typename T>
+__device__ void global_to_shared(const T *in, int in_stride, T *out, int tid) {
   // number of elements to do 128-bit/16-byte load
   // e.g. FP32 -> 4 elements, BF16 -> 8 elements.
   using TLoad = uint4;
@@ -55,25 +66,29 @@ __device__ void global_to_shared(const T *in, int in_stride, T *out, int out_str
   for (int idx = tid * num_elems; idx < HEIGHT * WIDTH; idx += TB_SIZE * num_elems) {
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
-    TLoad tmp = reinterpret_cast<const TLoad *>(&in[row * in_stride + col])[0];
-    reinterpret_cast<TLoad *>(&out[row * out_stride + col])[0] = tmp;
+    TLoad tmp = reinterpret_cast<const TLoad *>(in + row * in_stride + col)[0];
+    reinterpret_cast<TLoad *>(out + row * OUT_STRIDE + col)[0] = tmp;
   }
 }
 
-template <int TB_SIZE, int HEIGHT, int WIDTH, typename T>
-__device__ void global_to_shared_async(const T *in, int in_stride, T *out, int out_stride, int tid) {
+template <int TB_SIZE, int HEIGHT, int WIDTH, int OUT_STRIDE, bool use_swizzle, typename T>
+__device__ void global_to_shared_async(const T *in, int in_stride, T *out, int tid) {
   constexpr int cp_size = 16;
   constexpr int num_elems = cp_size / sizeof(T);
 
   for (int idx = tid * num_elems; idx < HEIGHT * WIDTH; idx += TB_SIZE * num_elems) {
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
-    cp_async<cp_size>(cvta_shared(out + row * out_stride + col), in + row * in_stride + col);
+
+    uint32_t dst_addr = cvta_shared(out + row * OUT_STRIDE + col);
+    if constexpr (use_swizzle)
+      dst_addr = swizzle<OUT_STRIDE * sizeof(T)>(dst_addr);
+    cp_async<cp_size>(dst_addr, in + row * in_stride + col);
   }
 }
 
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_M, int WARP_N, int MMA_K, int SHM_STRIDE, bool use_cp_async,
-          typename T>
+          bool use_swizzle, typename T>
 __global__ void
 __launch_bounds__((BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE) // maxThreadsPerBlock
 matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
@@ -84,6 +99,7 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   static_assert(BLOCK_K % MMA_K == 0);
   static_assert(WARP_M % MMA_M == 0);
   static_assert(WARP_N % MMA_N == 0);
+  static_assert(use_cp_async || !use_swizzle); // use_swizzle=true requires use_cp_async=true
   constexpr int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
 
   // each warp will do (NUM_MMA_M * NUM_MMA_N) MMAs
@@ -130,12 +146,12 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
 
   for (int block_k = 0; block_k < K; block_k += BLOCK_K) {
     if constexpr (use_cp_async) {
-      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, SHM_STRIDE, tid);
-      global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, SHM_STRIDE, tid);
+      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K, SHM_STRIDE, use_swizzle>(A, K, A_shared, tid);
+      global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K, SHM_STRIDE, use_swizzle>(B, K, B_shared, tid);
       cp_async_wait_all();
     } else {
-      global_to_shared<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, SHM_STRIDE, tid);
-      global_to_shared<TB_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, SHM_STRIDE, tid);
+      global_to_shared<TB_SIZE, BLOCK_M, BLOCK_K, SHM_STRIDE>(A, K, A_shared, tid);
+      global_to_shared<TB_SIZE, BLOCK_N, BLOCK_K, SHM_STRIDE>(B, K, B_shared, tid);
     }
     __syncthreads();
 
@@ -171,14 +187,20 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
         // NOTE: we can reduce unnecessary address calculation if we know MMA_K=8 or 16
         // convert generic address to .shared state space address expected by inline PTX
         const T *B_ptr = B_shm_warp + (mma_id_n * MMA_N + (lane_id % 8)) * SHM_STRIDE + (lane_id / 8) * 8;
-        ldmatrix<num_B_regs>(B_reg[mma_id_n], cvta_shared(B_ptr));
+        uint32_t B_addr = cvta_shared(B_ptr);
+        if constexpr (use_swizzle)
+          B_addr = swizzle<SHM_STRIDE * sizeof(T)>(B_addr);
+        ldmatrix<num_B_regs>(B_reg[mma_id_n], B_addr);
       }
 
       for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++) {
         // load A to registers
         uint32_t A_reg[num_A_regs];
         const T *A_ptr = A_shm_warp + (mma_id_m * MMA_M + (lane_id % 16)) * SHM_STRIDE + (lane_id / 16) * 8;
-        ldmatrix<num_A_regs>(A_reg, cvta_shared(A_ptr));
+        uint32_t A_addr = cvta_shared(A_ptr);
+        if constexpr (use_swizzle)
+          A_addr = swizzle<SHM_STRIDE * sizeof(T)>(A_addr);
+        ldmatrix<num_A_regs>(A_reg, A_addr);
 
         // call mma
         for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
@@ -227,10 +249,12 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K; // no padding
   const int use_cp_async = false;
+  const int use_swizzle = false;
 
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
-  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async>;
+  KernelFn kernel =
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
@@ -254,10 +278,12 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K; // no padding
   const int use_cp_async = true;
+  const int use_swizzle = false;
 
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
-  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async>;
+  KernelFn kernel =
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
@@ -281,10 +307,12 @@ void matmul_v3(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K + 8; // pad shmem to avoid bank conflict
   const int use_cp_async = true;
+  const int use_swizzle = false;
 
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
-  KernelFn kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async>;
+  KernelFn kernel =
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
@@ -297,35 +325,31 @@ void matmul_v3(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   CUDA_CHECK(cudaGetLastError());
 }
 
-// NOTE: to re-do
-// https://github.com/NVIDIA/cutlass/blob/v3.9.2/include/cute/swizzle.hpp
-template <int WIDTH, typename T> __device__ int swizzle(int x) {
-  constexpr int num_elems = 16 / sizeof(T);
-  constexpr int stride = WIDTH / num_elems; // stride for 16-byte word.
-  // we don't touch the first MBase bits because they belong to the same 16-byte row (8x 16-bit).
-  constexpr int MBase = log2_int(num_elems);
-  // TODO: seems like we have to add 1 to BBits? bug in logic?
-  // we permute BBits, which is the no. of non-overlapping bits between row index and 4-bank-group index.
-  constexpr int BBits = std::min(log2_int(stride), 3);
-  constexpr int SShift = log2_int(stride); // relative difference from 4-bank-group index to row index.
+void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+  assert(is_power_of_two(M) && "M must be a power of 2");
+  assert(is_power_of_two(N) && "N must be a power of 2");
+  assert(is_power_of_two(K) && "K must be a power of 2");
 
-  constexpr int mask = ((1 << BBits) - 1) << MBase; // BBits 1s and MBase 0sa
-  if constexpr (BBits == 0)
-    return x;
-  else
-    return x ^ ((x >> SShift) & mask);
-}
+  // 4 warps
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
+  const int WARP_M = 64, WARP_N = 64;
+  const int MMA_K = 16;
+  const int SHM_STRIDE = BLOCK_K;
+  const int use_cp_async = true;
+  const int use_swizzle = true;
 
-template <int BLOCK_SIZE, int HEIGHT, int WIDTH, typename T>
-__device__ void load_shared_swizzle(const T *in, int in_row_stride, T *out, int tid) {
-  constexpr int num_elems = 16 / sizeof(T);
+  using T = nv_bfloat16;
+  using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
+  KernelFn kernel =
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
 
-  for (int idx = tid * num_elems; idx < HEIGHT * WIDTH; idx += BLOCK_SIZE * num_elems) {
-    const int row = idx / WIDTH;
-    const int col = idx % WIDTH;
-    uint4 tmp = reinterpret_cast<const uint4 *>(&in[row * in_row_stride + col])[0];
+  const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(T);
 
-    int swizzled_idx = swizzle<WIDTH, T>(row * WIDTH + col);
-    reinterpret_cast<uint4 *>(&out[swizzled_idx])[0] = tmp;
-  }
+  if (shm_size > 48'000)
+    CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shm_size));
+
+  kernel<<<grid_size, TB_SIZE, shm_size>>>(A, B, C, M, N, K);
+  CUDA_CHECK(cudaGetLastError());
 }
