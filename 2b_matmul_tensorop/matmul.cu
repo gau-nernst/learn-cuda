@@ -82,20 +82,22 @@ __device__ void global_to_shared_async(const T *in, int in_stride, T *out, int t
   }
 }
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_M, int WARP_N, int MMA_K, int SHM_STRIDE, bool use_cp_async,
-          bool use_swizzle, typename T>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int MMA_K, int SHM_STRIDE,
+          bool use_cp_async, bool use_swizzle, typename T>
 __global__ void
-__launch_bounds__((BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE) // maxThreadsPerBlock
+__launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int MMA_M = 16;
   constexpr int MMA_N = 8;
-  static_assert(BLOCK_M % WARP_M == 0);
-  static_assert(BLOCK_N % WARP_N == 0);
+  static_assert(BLOCK_M % NUM_WARP_M == 0);
+  static_assert(BLOCK_N % NUM_WARP_N == 0);
   static_assert(BLOCK_K % MMA_K == 0);
+  constexpr int WARP_M = BLOCK_M / NUM_WARP_M;
+  constexpr int WARP_N = BLOCK_N / NUM_WARP_N;
   static_assert(WARP_M % MMA_M == 0);
   static_assert(WARP_N % MMA_N == 0);
   static_assert(use_cp_async || !use_swizzle); // use_swizzle=true requires use_cp_async=true
-  constexpr int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  constexpr int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
 
   // each warp will do (NUM_MMA_M * NUM_MMA_N) MMAs
   constexpr int NUM_MMA_M = WARP_M / MMA_M;
@@ -113,9 +115,8 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   const int offset_m = bid_m * BLOCK_M;
   const int offset_n = bid_n * BLOCK_N;
 
-  constexpr int num_warps_n = BLOCK_N / WARP_N;
-  const int warp_id_m = warp_id / num_warps_n;
-  const int warp_id_n = warp_id % num_warps_n;
+  const int warp_id_m = warp_id / NUM_WARP_N;
+  const int warp_id_n = warp_id % NUM_WARP_N;
 
   // A is row-major, B is column-major, C is row-major
   A += offset_m * K;
@@ -240,7 +241,7 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
 
   // 4 warps
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
-  const int WARP_M = 64, WARP_N = 64;
+  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K; // no padding
   const int use_cp_async = false;
@@ -249,9 +250,9 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
   KernelFn kernel =
-      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
 
-  const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(T);
 
@@ -269,7 +270,7 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
 
   // 4 warps
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
-  const int WARP_M = 64, WARP_N = 64;
+  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K; // no padding
   const int use_cp_async = true;
@@ -278,9 +279,9 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
   KernelFn kernel =
-      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
 
-  const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(T);
 
@@ -298,7 +299,7 @@ void matmul_v3(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
 
   // 4 warps
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
-  const int WARP_M = 64, WARP_N = 64;
+  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K + 8; // pad shmem to avoid bank conflict
   const int use_cp_async = true;
@@ -307,9 +308,9 @@ void matmul_v3(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
   KernelFn kernel =
-      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
 
-  const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(T);
 
@@ -327,7 +328,7 @@ void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
 
   // 4 warps
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
-  const int WARP_M = 64, WARP_N = 64;
+  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K;
   const int use_cp_async = true;
@@ -336,9 +337,9 @@ void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
   KernelFn kernel =
-      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
 
-  const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(T);
 
@@ -349,16 +350,18 @@ void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   CUDA_CHECK(cudaGetLastError());
 }
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARP_M, int WARP_N, int NUM_STAGES, typename T>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES, typename T>
 __global__ void
-__launch_bounds__((BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE) // maxThreadsPerBlock
+__launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int MMA_M = 16;
   constexpr int MMA_N = 8;
   constexpr int MMA_K = 16;
-  static_assert(BLOCK_M % WARP_M == 0);
-  static_assert(BLOCK_N % WARP_N == 0);
+  static_assert(BLOCK_M % NUM_WARP_M == 0);
+  static_assert(BLOCK_N % NUM_WARP_N == 0);
   static_assert(BLOCK_K % MMA_K == 0);
+  constexpr int WARP_M = BLOCK_M / NUM_WARP_M;
+  constexpr int WARP_N = BLOCK_N / NUM_WARP_N;
   static_assert(WARP_M % MMA_M == 0);
   static_assert(WARP_N % MMA_N == 0);
   constexpr int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
@@ -377,9 +380,8 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   const int offset_m = bid_m * BLOCK_M;
   const int offset_n = bid_n * BLOCK_N;
 
-  constexpr int num_warps_n = BLOCK_N / WARP_N;
-  const int warp_id_m = warp_id / num_warps_n;
-  const int warp_id_n = warp_id % num_warps_n;
+  const int warp_id_m = warp_id / NUM_WARP_N;
+  const int warp_id_n = warp_id % NUM_WARP_N;
 
   // A is row-major, B is column-major, C is row-major
   A += offset_m * K;
@@ -496,14 +498,14 @@ void matmul_v5(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
 
   // 4 warps
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
-  const int WARP_M = 64, WARP_N = 64;
+  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
 
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
-  KernelFn kernel = matmul_v5_kernel<BLOCK_M, BLOCK_N, BLOCK_K, WARP_M, WARP_N, NUM_STAGES>;
+  KernelFn kernel = matmul_v5_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
 
-  const int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(T) * NUM_STAGES;
 
