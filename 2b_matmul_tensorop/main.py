@@ -9,7 +9,12 @@ from triton.testing import do_bench
 module = torch.utils.cpp_extension.load(
     "module",
     sources=["matmul.cu", "matmul.cpp"],
-    extra_cuda_cflags=["-O3", "--use_fast_math", "--ptxas-options=-v"],
+    extra_cuda_cflags=[
+        "-O3",
+        "--use_fast_math",
+        "--ptxas-options=-v",
+        "--generate-line-info",
+    ],
     verbose=True,
 )
 
@@ -26,9 +31,13 @@ def main():
     M, N, K = 4096, 4096, 4096
     A = torch.randn(M, K).bfloat16().cuda()
     B = torch.randn(N, K).bfloat16().cuda().T
+    inductor_mm = torch.compile(torch.matmul, mode="max-autotune-no-cudagraphs", dynamic=False)
 
     if args.profile is not None:
-        fn = getattr(module, f"matmul_v{args.profile}")
+        if args.profile == "inductor":
+            fn = inductor_mm
+        else:
+            fn = getattr(module, f"matmul_v{args.profile}")
         fn(A, B)
         torch.cuda.synchronize()
         return
@@ -40,11 +49,9 @@ def main():
 
     output_ref = torch.matmul(A, B)
     bench_and_print(torch.matmul, "CuBLAS")
-
-    inductor_mm = torch.compile(torch.matmul, mode="max-autotune-no-cudagraphs", dynamic=False)
     bench_and_print(inductor_mm, "Inductor Triton")
 
-    for i in range(4):
+    for i in range(5):
         fn = getattr(module, f"matmul_v{i + 1}")
         output = fn(A, B)
         torch.testing.assert_close(output, output_ref)

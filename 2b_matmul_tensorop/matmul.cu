@@ -20,7 +20,6 @@
 
 __host__ __device__ constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
 constexpr bool is_power_of_two(int x) { return x > 0 && (x & (x - 1)) == 0; } // https://stackoverflow.com/a/1804686
-constexpr __device__ int log2_int(int x) { return x == 1 ? 0 : 1 + log2_int(x >> 1); }
 constexpr int WARP_SIZE = 32;
 
 template <typename T> __device__ ushort f32_to_b16(float x);
@@ -58,7 +57,10 @@ __device__ void global_to_shared(const T *in, int in_stride, T *out, int tid) {
   using TLoad = uint4;
   constexpr int num_elems = sizeof(TLoad) / sizeof(T);
 
-  for (int idx = tid * num_elems; idx < HEIGHT * WIDTH; idx += TB_SIZE * num_elems) {
+  // NOTE: write loop this way to make sure the compiler can fully unroll it.
+  constexpr int num_iters = (HEIGHT * WIDTH) / (TB_SIZE * num_elems);
+  for (int iter = 0; iter < num_iters; iter++) {
+    const int idx = (iter * TB_SIZE + tid) * num_elems;
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
     TLoad tmp = reinterpret_cast<const TLoad *>(in + row * in_stride + col)[0];
@@ -71,7 +73,9 @@ __device__ void global_to_shared_async(const T *in, int in_stride, T *out, int t
   constexpr int cp_size = 16;
   constexpr int num_elems = cp_size / sizeof(T);
 
-  for (int idx = tid * num_elems; idx < HEIGHT * WIDTH; idx += TB_SIZE * num_elems) {
+  constexpr int num_iters = (HEIGHT * WIDTH) / (TB_SIZE * num_elems);
+  for (int iter = 0; iter < num_iters; iter++) {
+    const int idx = (iter * TB_SIZE + tid) * num_elems;
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
 
@@ -104,14 +108,14 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int NUM_MMA_N = WARP_N / MMA_N;
 
   const int tid = threadIdx.x;
-  const int block_id = blockIdx.x;
+  const int bid = blockIdx.x;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
 
   // TODO: threadblock swizzling to improve L2 cache hit rate
   const int num_blocks_n = cdiv(N, BLOCK_N);
-  const int bid_m = block_id / num_blocks_n;
-  const int bid_n = block_id % num_blocks_n;
+  const int bid_m = bid / num_blocks_n;
+  const int bid_n = bid % num_blocks_n;
   const int offset_m = bid_m * BLOCK_M;
   const int offset_n = bid_n * BLOCK_N;
 
@@ -369,14 +373,14 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int NUM_MMA_N = WARP_N / MMA_N;
 
   const int tid = threadIdx.x;
-  const int block_id = blockIdx.x;
+  const int bid = blockIdx.x;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
 
   // TODO: threadblock swizzling to improve L2 cache hit rate
   const int num_blocks_n = cdiv(N, BLOCK_N);
-  const int bid_m = block_id / num_blocks_n;
-  const int bid_n = block_id % num_blocks_n;
+  const int bid_m = bid / num_blocks_n;
+  const int bid_n = bid % num_blocks_n;
   const int offset_m = bid_m * BLOCK_M;
   const int offset_n = bid_n * BLOCK_N;
 

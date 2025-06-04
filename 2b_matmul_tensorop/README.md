@@ -5,6 +5,7 @@ Resources:
 - https://docs.nvidia.com/cuda/parallel-thread-execution/
 - https://docs.nvidia.com/cuda/inline-ptx-assembly/
 - https://github.com/NVIDIA/cutlass/blob/v3.5.1/include/cute/arch (see `copy_smxx.hpp` and `mma_smxx.hpp`)
+- https://research.colfax-intl.com/cutlass-tutorial-design-of-a-gemm-kernel/ (Appendix)
 - https://github.com/NVIDIA/cutlass/blob/v3.9.2/include/cutlass/gemm/threadblock/mma_multistage.h
 
 For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 12.9, `-O3 --use_fast_math`
@@ -49,3 +50,4 @@ Lessons learned:
   - For `BLOCK_K=32` (stride = 64 bytes = 2^6), all row addresses have the same bit0-5 -> 16-way bank conflict.
   - We XOR bit4-5 with bit1-2 of row index. Note that we don't use bit0 of row index since that bit changes bit6 of row address.
   - Note that row index is also encoded in pre-permuted address: it starts at bit-log2(stride), and spans 3 bits.
+- Multi-stage pipeline.
