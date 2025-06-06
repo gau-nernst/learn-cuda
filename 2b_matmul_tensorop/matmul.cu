@@ -45,8 +45,8 @@ template <int STRIDE> __device__ uint32_t swizzle(uint32_t index) {
   if constexpr (STRIDE == 16)
     return index;
 
-  int row_idx = (index / STRIDE) % 8;
-  int bits_to_xor = row_idx / max(64 / STRIDE, 1);
+  uint32_t row_idx = (index / STRIDE) % 8;
+  uint32_t bits_to_xor = row_idx / max(64 / STRIDE, 1);
   return index ^ (bits_to_xor << 4);
 }
 
@@ -73,13 +73,17 @@ __device__ void global_to_shared_async(const T *in, int in_stride, T *out, int t
   constexpr int cp_size = 16;
   constexpr int num_elems = cp_size / sizeof(T);
 
+  // convert to shared state space outside of the loop
+  // TODO: move this to kernel body
+  uint32_t out_addr = cvta_shared(out);
+
   constexpr int num_iters = (HEIGHT * WIDTH) / (TB_SIZE * num_elems);
   for (int iter = 0; iter < num_iters; iter++) {
     const int idx = (iter * TB_SIZE + tid) * num_elems;
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
 
-    uint32_t dst_addr = cvta_shared(out + row * OUT_STRIDE + col);
+    uint32_t dst_addr = out_addr + (row * OUT_STRIDE + col) * sizeof(T);
     if constexpr (use_swizzle)
       dst_addr = swizzle<OUT_STRIDE * sizeof(T)>(dst_addr);
     cp_async<cp_size>(dst_addr, in + row * in_stride + col);
