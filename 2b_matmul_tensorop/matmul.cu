@@ -92,8 +92,8 @@ __device__ void global_to_shared_async(const T *in, int in_stride, T *out, int t
   }
 }
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int SHM_STRIDE,
-          bool use_cp_async, bool use_swizzle, typename T>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int SHM_STRIDE, bool use_cp_async,
+          bool use_swizzle, typename T>
 __global__ void
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
@@ -358,6 +358,23 @@ void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   CUDA_CHECK(cudaGetLastError());
 }
 
+template <int TB_SIZE, int HEIGHT, int WIDTH, typename T>
+__device__ void global_to_shared_async(const T *in, int in_stride, uint32_t out, int tid) {
+  constexpr int cp_size = 16;
+  constexpr int num_elems = cp_size / sizeof(T);
+
+  constexpr int num_iters = (HEIGHT * WIDTH) / (TB_SIZE * num_elems);
+  for (int iter = 0; iter < num_iters; iter++) {
+    const int idx = (iter * TB_SIZE + tid) * num_elems;
+    const int row = idx / WIDTH;
+    const int col = idx % WIDTH;
+
+    // NOTE: perhaps we can move swizzle out of this loop as well
+    uint32_t dst_addr = swizzle<WIDTH * sizeof(T)>(out + (row * WIDTH + col) * sizeof(T));
+    cp_async<cp_size>(dst_addr, in + row * in_stride + col);
+  }
+}
+
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, typename T>
 __global__ void
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
@@ -375,6 +392,7 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   constexpr int NUM_MMA_M = WARP_M / MMA_M;
   constexpr int NUM_MMA_N = WARP_N / MMA_N;
+  constexpr int NUM_MMA_K = BLOCK_K / MMA_K;
 
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
@@ -396,9 +414,10 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   B += offset_n * K;
   C += (offset_m + warp_id_m * WARP_M) * N + (offset_n + warp_id_n * WARP_N);
 
+  // convert shared memory address to 32-bit from the start
   extern __shared__ T shm[];
-  T *A_shared = shm;                            // BLOCK_M * BLOCK_K
-  T *B_shared = A_shared + (BLOCK_M * BLOCK_K); // BLOCK_N * BLOCK_K
+  const uint32_t A_shared = cvta_shared(shm);                           // BLOCK_M * BLOCK_K
+  const uint32_t B_shared = A_shared + (BLOCK_M * BLOCK_K) * sizeof(T); // BLOCK_N * BLOCK_K
 
   constexpr int num_acc_regs = MMA_M * MMA_N / WARP_SIZE;
   constexpr int num_A_regs = MMA_M * MMA_K * sizeof(T) / 4 / WARP_SIZE;  // 4
@@ -408,31 +427,34 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   float acc[NUM_MMA_M][NUM_MMA_N][num_acc_regs] = {};
 
   for (int block_k = 0; block_k < K; block_k += BLOCK_K) {
-    global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K, BLOCK_K, true>(A, K, A_shared, tid);
-    global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K, BLOCK_K, true>(B, K, B_shared, tid);
+    global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, tid);
+    global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, tid);
     cp_async_wait_all();
     __syncthreads();
 
-    for (int mma_k = 0; mma_k < BLOCK_K; mma_k += MMA_K) {
-      // select the tile this warp is responsible for
-      const T *A_shm_warp = A_shared + (warp_id_m * WARP_M) * BLOCK_K + mma_k;
-      const T *B_shm_warp = B_shared + (warp_id_n * WARP_N) * BLOCK_K + mma_k;
+    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++) {
+      // when BLOCK_K=64, swizzling permutes bit4-6
+      // when BLOCK_K=32, swizzling permutes bit4-5
+      // MMA_K=16 -> stride=32 bytes -> increment bit5 -> we cannot move swizzle out of mma_id_k loop
+      const int A_offm = (warp_id_m * WARP_M) + (lane_id % 16);
+      const int A_offk = (mma_id_k * MMA_K) + (lane_id / 16) * 8;
+      const uint32_t A_shm_thread = swizzle<BLOCK_K * sizeof(T)>(A_shared + (A_offm * BLOCK_K + A_offk) * sizeof(T));
+
+      const int B_offn = (warp_id_n * WARP_N) + (lane_id % 8) + (lane_id / 16) * 8;
+      const int B_offk = (mma_id_k * MMA_K) + ((lane_id % 16) / 8) * 8;
+      const uint32_t B_shm_thread = swizzle<BLOCK_K * sizeof(T)>(B_shared + (B_offn * BLOCK_K + B_offk) * sizeof(T));
 
       // load B to registers
-      // NOTE: maybe we can change B layout in registers so address calculation
-      // for loading is easier?
       uint32_t B_reg[NUM_MMA_N][num_B_regs];
       for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-        const T *B_ptr = B_shm_warp + (mma_id_n * MMA_N + (lane_id % 8) + (lane_id / 16) * 8) * BLOCK_K + ((lane_id % 16) / 8) * 8;
-        const uint32_t B_addr = swizzle<BLOCK_K * sizeof(T)>(cvta_shared(B_ptr));
+        const uint32_t B_addr = B_shm_thread + mma_id_n * MMA_N * BLOCK_K * sizeof(T);
         ldmatrix<num_B_regs>(B_reg[mma_id_n], B_addr);
       }
 
       for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++) {
         // load A to registers
         uint32_t A_reg[num_A_regs];
-        const T *A_ptr = A_shm_warp + (mma_id_m * MMA_M + (lane_id % 16)) * BLOCK_K + (lane_id / 16) * 8;
-        uint32_t A_addr = swizzle<BLOCK_K * sizeof(T)>(cvta_shared(A_ptr));
+        const uint32_t A_addr = A_shm_thread + mma_id_m * MMA_M * BLOCK_K * sizeof(T);
         ldmatrix<num_A_regs>(A_reg, A_addr);
 
         // call mma
