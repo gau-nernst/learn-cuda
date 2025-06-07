@@ -33,7 +33,9 @@ __device__ uint32_t cvta_shared(const void *ptr) { return static_cast<uint32_t>(
 // https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-non-bulk-copy
 template <int size> __device__ void cp_async(uint32_t dst, const void *src) {
   // .ca means cache to L1 and L2. .cg means cache to L2 only.
-  asm volatile("cp.async.ca.shared.global [%0], [%1], %2;" ::"r"(dst), "l"(src), "n"(size));
+  // .ca results in significantly slower kernel, probably because it uses up L1 resources
+  // + additional copy, which is unnecessary, since we already manually cache it in shared memory.
+  asm volatile("cp.async.cg.shared.global [%0], [%1], %2;" ::"r"(dst), "l"(src), "n"(size));
 };
 __device__ void cp_async_commit_group() { asm volatile("cp.async.commit_group;"); };
 template <int N> __device__ void cp_async_wait_group() { asm volatile("cp.async.wait_group %0;" ::"n"(N)); };
@@ -90,13 +92,14 @@ __device__ void global_to_shared_async(const T *in, int in_stride, T *out, int t
   }
 }
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int MMA_K, int SHM_STRIDE,
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int SHM_STRIDE,
           bool use_cp_async, bool use_swizzle, typename T>
 __global__ void
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int MMA_M = 16;
   constexpr int MMA_N = 8;
+  constexpr int MMA_K = 16;
   static_assert(BLOCK_M % NUM_WARP_M == 0);
   static_assert(BLOCK_N % NUM_WARP_N == 0);
   static_assert(BLOCK_K % MMA_K == 0);
@@ -208,7 +211,7 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
 
         // call mma
         for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
-          mma<MMA_K, T>(A_reg, B_reg[mma_id_n], acc[mma_id_m][mma_id_n]);
+          mma<T>(A_reg, B_reg[mma_id_n], acc[mma_id_m][mma_id_n]);
       }
     }
     __syncthreads();
@@ -224,6 +227,7 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   const int a0_col = (lane_id % 4) * 2;
   C += a0_row * N + a0_col;
 
+  // NOTE: we can do some warp shuffle to get coalesced write
   for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
     for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
       T *C_local = C + mma_id_m * MMA_M * N + mma_id_n * MMA_N;
@@ -250,7 +254,6 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   // 4 warps
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
-  const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K; // no padding
   const int use_cp_async = false;
   const int use_swizzle = false;
@@ -258,7 +261,7 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
   KernelFn kernel =
-      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
@@ -279,7 +282,6 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   // 4 warps
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
-  const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K; // no padding
   const int use_cp_async = true;
   const int use_swizzle = false;
@@ -287,7 +289,7 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
   KernelFn kernel =
-      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
@@ -308,7 +310,6 @@ void matmul_v3(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   // 4 warps
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
-  const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K + 8; // pad shmem to avoid bank conflict
   const int use_cp_async = true;
   const int use_swizzle = false;
@@ -316,7 +317,7 @@ void matmul_v3(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
   KernelFn kernel =
-      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
@@ -337,7 +338,6 @@ void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   // 4 warps
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
-  const int MMA_K = 16;
   const int SHM_STRIDE = BLOCK_K;
   const int use_cp_async = true;
   const int use_swizzle = true;
@@ -345,7 +345,7 @@ void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
   KernelFn kernel =
-      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, MMA_K, SHM_STRIDE, use_cp_async, use_swizzle>;
+      matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
@@ -358,12 +358,12 @@ void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   CUDA_CHECK(cudaGetLastError());
 }
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES, typename T>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, typename T>
 __global__ void
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int MMA_M = 16;
-  constexpr int MMA_N = 8;
+  constexpr int MMA_N = 16;
   constexpr int MMA_K = 16;
   static_assert(BLOCK_M % NUM_WARP_M == 0);
   static_assert(BLOCK_N % NUM_WARP_N == 0);
@@ -372,7 +372,7 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int WARP_N = BLOCK_N / NUM_WARP_N;
   static_assert(WARP_M % MMA_M == 0);
   static_assert(WARP_N % MMA_N == 0);
-  constexpr int TB_SIZE = (BLOCK_M * BLOCK_N) / (WARP_M * WARP_N) * WARP_SIZE;
+  constexpr int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   constexpr int NUM_MMA_M = WARP_M / MMA_M;
   constexpr int NUM_MMA_N = WARP_N / MMA_N;
 
@@ -397,53 +397,33 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   C += (offset_m + warp_id_m * WARP_M) * N + (offset_n + warp_id_n * WARP_N);
 
   extern __shared__ T shm[];
+  T *A_shared = shm;                            // BLOCK_M * BLOCK_K
+  T *B_shared = A_shared + (BLOCK_M * BLOCK_K); // BLOCK_N * BLOCK_K
 
   constexpr int num_acc_regs = MMA_M * MMA_N / WARP_SIZE;
-  constexpr int num_A_regs = MMA_M * MMA_K * sizeof(T) / 4 / WARP_SIZE;
-  constexpr int num_B_regs = MMA_N * MMA_K * sizeof(T) / 4 / WARP_SIZE;
+  constexpr int num_A_regs = MMA_M * MMA_K * sizeof(T) / 4 / WARP_SIZE;  // 4
+  constexpr int num_B_regs = MMA_N * MMA_K * sizeof(T) / 4 / WARP_SIZE;  // 4
+  static_assert(num_A_regs == 4);
+  static_assert(num_B_regs == 4);
   float acc[NUM_MMA_M][NUM_MMA_N][num_acc_regs] = {};
 
-  // initiate NUM_STAGES-1 async global->shared
-  for (int stage = 0; stage < NUM_STAGES - 1; stage++) {
-    if (stage * BLOCK_K < K) {
-      T *A_shared = shm + stage * (BLOCK_M + BLOCK_N) * BLOCK_K; // BLOCK_M, BLOCK_K
-      T *B_shared = A_shared + BLOCK_M * BLOCK_K;                // BLOCK_N, BLOCK_K
-      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K, BLOCK_K, true>(A, K, A_shared, tid);
-      global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K, BLOCK_K, true>(B, K, B_shared, tid);
-
-      // NOTE: A and B pointers now track position for global->shared load
-      A += BLOCK_K;
-      B += BLOCK_K;
-    }
-
-    // mark this stage as a commit group. we still need to commit empty groups
-    // so that we have invariance of NUM_STAGES-1 prefetch in flight.
-    cp_async_commit_group();
-  }
-
-  // loop invariance: NUM_STAGES-1 global->shared prefetch in flight
-  for (int k_iter = 0; k_iter < K / BLOCK_K; k_iter++) {
-    // select the shared memory of this stage
-    const int stage = k_iter % NUM_STAGES;
-    T *A_shared = shm + stage * (BLOCK_M + BLOCK_N) * BLOCK_K;
-    T *B_shared = A_shared + BLOCK_M * BLOCK_K;
-
-    // wait for the 1st commit group to finish i.e. FIFO
-    // this consumes 1 prefetch
-    // TODO: learn about barrier
-    cp_async_wait_group<NUM_STAGES - 2>();
+  for (int block_k = 0; block_k < K; block_k += BLOCK_K) {
+    global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K, BLOCK_K, true>(A, K, A_shared, tid);
+    global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K, BLOCK_K, true>(B, K, B_shared, tid);
+    cp_async_wait_all();
     __syncthreads();
 
-    // we should also pipeline this loop? shared->registers
     for (int mma_k = 0; mma_k < BLOCK_K; mma_k += MMA_K) {
       // select the tile this warp is responsible for
       const T *A_shm_warp = A_shared + (warp_id_m * WARP_M) * BLOCK_K + mma_k;
       const T *B_shm_warp = B_shared + (warp_id_n * WARP_N) * BLOCK_K + mma_k;
 
       // load B to registers
+      // NOTE: maybe we can change B layout in registers so address calculation
+      // for loading is easier?
       uint32_t B_reg[NUM_MMA_N][num_B_regs];
       for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-        const T *B_ptr = B_shm_warp + (mma_id_n * MMA_N + (lane_id % 8)) * BLOCK_K + (lane_id / 8) * 8;
+        const T *B_ptr = B_shm_warp + (mma_id_n * MMA_N + (lane_id % 8) + (lane_id / 16) * 8) * BLOCK_K + ((lane_id % 16) / 8) * 8;
         const uint32_t B_addr = swizzle<BLOCK_K * sizeof(T)>(cvta_shared(B_ptr));
         ldmatrix<num_B_regs>(B_reg[mma_id_n], B_addr);
       }
@@ -452,31 +432,22 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
         // load A to registers
         uint32_t A_reg[num_A_regs];
         const T *A_ptr = A_shm_warp + (mma_id_m * MMA_M + (lane_id % 16)) * BLOCK_K + (lane_id / 16) * 8;
-        const uint32_t A_addr = swizzle<BLOCK_K * sizeof(T)>(cvta_shared(A_ptr));
+        uint32_t A_addr = swizzle<BLOCK_K * sizeof(T)>(cvta_shared(A_ptr));
         ldmatrix<num_A_regs>(A_reg, A_addr);
 
         // call mma
-        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
-          mma<MMA_K, T>(A_reg, B_reg[mma_id_n], acc[mma_id_m][mma_id_n]);
+        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
+          mma<T>(A_reg, B_reg[mma_id_n], acc[mma_id_m][mma_id_n]);
+          mma<T>(A_reg, B_reg[mma_id_n] + (num_B_regs / 2), acc[mma_id_m][mma_id_n] + (num_acc_regs / 2));
+        }
       }
     }
+    __syncthreads();
 
-    // prefetch the next block. this produces 1 prefetch, restore loop invariance
-    if ((k_iter + NUM_STAGES - 1) * BLOCK_K < K) {
-      const int stage = (k_iter + NUM_STAGES - 1) % NUM_STAGES;
-      A_shared = shm + stage * (BLOCK_M + BLOCK_N) * BLOCK_K;
-      B_shared = A_shared + BLOCK_M * BLOCK_K;
-      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K, BLOCK_K, true>(A, K, A_shared, tid);
-      global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K, BLOCK_K, true>(B, K, B_shared, tid);
-      A += BLOCK_K;
-      B += BLOCK_K;
-    }
-    cp_async_commit_group();
+    A += BLOCK_K;
+    B += BLOCK_K;
   }
 
-  // check output layout here
-  // https://docs.nvidia.com/cuda/parallel-thread-execution/#mma-1688-c-f16-f32
-  // m16n8k16 has the same layout
   const int a0_row = lane_id >> 2;
   const int a0_col = (lane_id % 4) * 2;
   C += a0_row * N + a0_col;
@@ -496,6 +467,16 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
       tmp.x = f32_to_b16<T>(acc_frag[2]);
       tmp.y = f32_to_b16<T>(acc_frag[3]);
       reinterpret_cast<ushort2 *>(C_local + 8 * N)[0] = tmp;
+
+      // write a4 and a5
+      tmp.x = f32_to_b16<T>(acc_frag[4]);
+      tmp.y = f32_to_b16<T>(acc_frag[5]);
+      reinterpret_cast<ushort2 *>(C_local + 8)[0] = tmp;
+
+      // write a6 and a7
+      tmp.x = f32_to_b16<T>(acc_frag[6]);
+      tmp.y = f32_to_b16<T>(acc_frag[7]);
+      reinterpret_cast<ushort2 *>(C_local + 8 * N + 8)[0] = tmp;
     }
 }
 
@@ -505,17 +486,16 @@ void matmul_v5(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   assert(is_power_of_two(K) && "K must be a power of 2");
 
   // 4 warps
-  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
-  const int NUM_STAGES = 2;
 
   using T = nv_bfloat16;
   using KernelFn = void (*)(const T *A, const T *B, T *C, int M, int N, int K);
-  KernelFn kernel = matmul_v5_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
+  KernelFn kernel = matmul_v5_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(T) * NUM_STAGES;
+  const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(T);
 
   if (shm_size > 48'000)
     CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shm_size));

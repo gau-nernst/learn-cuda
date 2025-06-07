@@ -15,10 +15,11 @@ Kernel name                             | TFLOPS | % of SOL
 ----------------------------------------|--------|----------
 CuBLAS 12.8 (via PyTorch)               | 175.68 |   83.86%
 Inductor Triton (v3.3.1)                | 203.16 |   96.97%
-v1 (block+warp tiling, vectorized load) | 144.01 |   68.74%
-v2 (`cp.async`)                         | 161.90 |   77.28%
-v3 (pad shared memory)                  | 175.22 |   83.64%
-v4 (swizzle shared memory)              | 176.01 |   84.01%
+v1 (block+warp tiling, vectorized load) | 146.44 |   69.90%
+v2 (`cp.async`)                         | 157.12 |   75.00%
+v3 (pad shared memory)                  | 172.11 |   82.15%
+v4 (swizzle shared memory)              | 191.83 |   91.57%
+v5 (`ldmatrix.x4` for B)                | 192.22 |   91.75%
 
 Lessons learned:
 - Inline PTX: instruction, outputs, inputs, constraints

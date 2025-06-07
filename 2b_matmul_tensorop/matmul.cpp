@@ -23,6 +23,7 @@ template <MatmulFn matmul_fn> torch::Tensor matmul_pt(torch::Tensor A, torch::Te
   int K = A.size(1);
   int N = B.size(1);
   torch::Tensor C = torch::empty({M, N}, A.options());
+  // torch::Tensor C = torch::zeros({M, N}, A.options());  // for correctness check, use this
   matmul_fn(
     reinterpret_cast<nv_bfloat16 *>(A.data_ptr<at::BFloat16>()),
     reinterpret_cast<nv_bfloat16 *>(B.data_ptr<at::BFloat16>()),

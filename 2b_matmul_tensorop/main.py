@@ -42,10 +42,16 @@ def main():
         torch.cuda.synchronize()
         return
 
+    SOL_LOOKUP = {
+        "NVIDIA GeForce RTX 5090": 209.5,
+    }
+    sol = SOL_LOOKUP.get(torch.cuda.get_device_name(), 0)
+
     def bench_and_print(f, name):
         latency_ms = do_bench(lambda: f(A, B), return_mode="median")
         tflops = 2 * M * N * K / latency_ms / 1e9
-        print(f"{name}:\t{latency_ms:.4f} ms\t{tflops:.2f} TFLOPS")
+        pct_sol = tflops / sol * 100
+        print(f"{name}:\t{latency_ms:.4f} ms\t{tflops:.2f} TFLOPS\t{pct_sol:.2f}% SOL")
 
     output_ref = torch.matmul(A, B)
     bench_and_print(torch.matmul, "CuBLAS")
