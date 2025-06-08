@@ -22,19 +22,23 @@ module = torch.utils.cpp_extension.load(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile")
+    parser.add_argument("--shape", type=int, nargs="+", default=[4096, 4096, 4096])
     args = parser.parse_args()
 
     torch._inductor.config.max_autotune_gemm_backends = "TRITON"
     # torch._inductor.utils.is_big_gpu = lambda _: True
 
     # for large K, there will be a larger deviation, since sum of many small elements are not accurate
-    M, N, K = 4096, 4096, 4096
+    M, N, K = args.shape
+    print(f"{M=}, {N=}, {K=}")
     A = torch.randn(M, K).bfloat16().cuda()
     B = torch.randn(N, K).bfloat16().cuda().T
-    inductor_mm = torch.compile(torch.matmul, mode="max-autotune-no-cudagraphs", dynamic=False)
+    inductor_mm = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
 
     if args.profile is not None:
-        if args.profile == "inductor":
+        if args.profile == "cublas":
+            fn = torch.mm
+        elif args.profile == "inductor":
             fn = inductor_mm
         else:
             fn = getattr(module, f"matmul_v{args.profile}")
@@ -57,7 +61,7 @@ def main():
     bench_and_print(torch.matmul, "CuBLAS")
     bench_and_print(inductor_mm, "Inductor Triton")
 
-    for i in range(5):
+    for i in range(6):
         fn = getattr(module, f"matmul_v{i + 1}")
         output = fn(A, B)
         torch.testing.assert_close(output, output_ref)

@@ -12,15 +12,16 @@ Resources:
 For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 12.9, `-O3 --use_fast_math`
 - Theoretical limit: 209.5 TFLOPS
 
-Kernel name                             | TFLOPS | % of SOL
-----------------------------------------|--------|----------
-CuBLAS 12.8 (via PyTorch)               | 175.68 |   83.86%
-Inductor Triton (v3.3.1)                | 203.16 |   96.97%
-v1 (block+warp tiling, vectorized load) | 146.44 |   69.90%
-v2 (`cp.async`)                         | 157.12 |   75.00%
-v3 (pad shared memory)                  | 172.11 |   82.15%
-v4 (swizzle shared memory)              | 191.83 |   91.57%
-v5 (`ldmatrix.x4` for B)                | 192.22 |   91.75%
+Kernel name                                            | TFLOPS | % of SOL
+-------------------------------------------------------|--------|----------
+CuBLAS 12.8 (via PyTorch)                              | 175.68 |   83.86%
+Inductor Triton (v3.3.1)                               | 203.16 |   96.97%
+v1 (block+warp tiling, vectorized load)                | 146.44 |   69.90%
+v2 (`cp.async`)                                        | 157.12 |   75.00%
+v3 (pad shared memory)                                 | 172.11 |   82.15%
+v4 (swizzle shared memory)                             | 191.83 |   91.57%
+v5 (`ldmatrix.x4` for B, optimize address computation) | 192.22 |   91.75%
+v5b (tune launch params)                               | 198.84 |   94.91%
 
 Lessons learned:
 - Inline PTX: instruction, outputs, inputs, constraints
