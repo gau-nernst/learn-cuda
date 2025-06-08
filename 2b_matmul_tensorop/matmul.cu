@@ -223,7 +223,7 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   // check output layout here
   // https://docs.nvidia.com/cuda/parallel-thread-execution/#mma-1688-c-f16-f32
   // m16n8k16 has the same layout
-  const int a0_row = lane_id >> 2;
+  const int a0_row = lane_id / 4;
   const int a0_col = (lane_id % 4) * 2;
   C += a0_row * N + a0_col;
 
@@ -234,12 +234,12 @@ matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
       float *acc_frag = acc[mma_id_m][mma_id_n];
       ushort2 tmp;
 
-      // write a0 and a1
+      // write c0 and c1
       tmp.x = f32_to_b16<T>(acc_frag[0]);
       tmp.y = f32_to_b16<T>(acc_frag[1]);
       reinterpret_cast<ushort2 *>(C_local)[0] = tmp;
 
-      // write a2 and a3
+      // write c2 and c3
       tmp.x = f32_to_b16<T>(acc_frag[2]);
       tmp.y = f32_to_b16<T>(acc_frag[3]);
       reinterpret_cast<ushort2 *>(C_local + 8 * N)[0] = tmp;
@@ -422,9 +422,17 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int num_acc_regs = MMA_M * MMA_N / WARP_SIZE;
   constexpr int num_A_regs = MMA_M * MMA_K * sizeof(T) / 4 / WARP_SIZE;  // 4
   constexpr int num_B_regs = MMA_N * MMA_K * sizeof(T) / 4 / WARP_SIZE;  // 4
-  static_assert(num_A_regs == 4);
-  static_assert(num_B_regs == 4);
   float acc[NUM_MMA_M][NUM_MMA_N][num_acc_regs] = {};
+
+  // pre-compute address used for ldmatrix
+  // also pre-compute swizzling
+  const int A_offm = (warp_id_m * WARP_M) + (lane_id % 16);
+  const int A_offk = (lane_id / 16) * 8;
+  const uint32_t A_shm_thread = swizzle<BLOCK_K * sizeof(T)>(A_shared + (A_offm * BLOCK_K + A_offk) * sizeof(T));
+
+  const int B_offn = (warp_id_n * WARP_N) + (lane_id % 8) + (lane_id / 16) * 8;
+  const int B_offk = ((lane_id % 16) / 8) * 8;
+  const uint32_t B_shm_thread = swizzle<BLOCK_K * sizeof(T)>(B_shared + (B_offn * BLOCK_K + B_offk) * sizeof(T));
 
   for (int block_k = 0; block_k < K; block_k += BLOCK_K) {
     global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, tid);
@@ -433,29 +441,24 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
     __syncthreads();
 
     for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++) {
-      // when BLOCK_K=64, swizzling permutes bit4-6
-      // when BLOCK_K=32, swizzling permutes bit4-5
-      // MMA_K=16 -> stride=32 bytes -> increment bit5 -> we cannot move swizzle out of mma_id_k loop
-      const int A_offm = (warp_id_m * WARP_M) + (lane_id % 16);
-      const int A_offk = (mma_id_k * MMA_K) + (lane_id / 16) * 8;
-      const uint32_t A_shm_thread = swizzle<BLOCK_K * sizeof(T)>(A_shared + (A_offm * BLOCK_K + A_offk) * sizeof(T));
-
-      const int B_offn = (warp_id_n * WARP_N) + (lane_id % 8) + (lane_id / 16) * 8;
-      const int B_offk = (mma_id_k * MMA_K) + ((lane_id % 16) / 8) * 8;
-      const uint32_t B_shm_thread = swizzle<BLOCK_K * sizeof(T)>(B_shared + (B_offn * BLOCK_K + B_offk) * sizeof(T));
+      // iterate MMA_K=16 -> increment bit5 (32 bytes) -> affects swizzled bits
+      // assume we have alignment (bit0-6 are all zeros), increment bit5
+      // is equivalent to XOR mma_id_k directly, which is commutative with swizzling
+      // -> we can move swizzling outside of this loop
+      // the kernel compiles to fewer instructions, but no speedup
 
       // load B to registers
       uint32_t B_reg[NUM_MMA_N][num_B_regs];
       for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
         const uint32_t B_addr = B_shm_thread + mma_id_n * MMA_N * BLOCK_K * sizeof(T);
-        ldmatrix<num_B_regs>(B_reg[mma_id_n], B_addr);
+        ldmatrix<num_B_regs>(B_reg[mma_id_n], B_addr ^ (mma_id_k * MMA_K * sizeof(T)));
       }
 
       for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++) {
         // load A to registers
         uint32_t A_reg[num_A_regs];
         const uint32_t A_addr = A_shm_thread + mma_id_m * MMA_M * BLOCK_K * sizeof(T);
-        ldmatrix<num_A_regs>(A_reg, A_addr);
+        ldmatrix<num_A_regs>(A_reg, A_addr ^ (mma_id_k * MMA_K * sizeof(T)));
 
         // call mma
         for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
@@ -480,22 +483,22 @@ matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
       float *acc_frag = acc[mma_id_m][mma_id_n];
       ushort2 tmp;
 
-      // write a0 and a1
+      // write c0 and c1
       tmp.x = f32_to_b16<T>(acc_frag[0]);
       tmp.y = f32_to_b16<T>(acc_frag[1]);
       reinterpret_cast<ushort2 *>(C_local)[0] = tmp;
 
-      // write a2 and a3
+      // write c2 and c3
       tmp.x = f32_to_b16<T>(acc_frag[2]);
       tmp.y = f32_to_b16<T>(acc_frag[3]);
       reinterpret_cast<ushort2 *>(C_local + 8 * N)[0] = tmp;
 
-      // write a4 and a5
+      // write c4 and c5
       tmp.x = f32_to_b16<T>(acc_frag[4]);
       tmp.y = f32_to_b16<T>(acc_frag[5]);
       reinterpret_cast<ushort2 *>(C_local + 8)[0] = tmp;
 
-      // write a6 and a7
+      // write c6 and c7
       tmp.x = f32_to_b16<T>(acc_frag[6]);
       tmp.y = f32_to_b16<T>(acc_frag[7]);
       reinterpret_cast<ushort2 *>(C_local + 8 * N + 8)[0] = tmp;
