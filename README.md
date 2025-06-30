@@ -16,7 +16,9 @@ Name | Description
 4\. [Softmax](4_softmax) | Naive (safe) softmax, online softmax. `atomicCAS()`. Single-block and multi-block per row.
 5\. [FP6](5_fp6) | FP6 primitives (FP32/FP16/BF16<->FP6).
 6\. [Box blur](6_box_blur/) | 2D CUDA blocks/threads. TODO: optimize with separable filters, moving average.
-... optimizers, quantization, flash attention, gemv (split-K, stream-K), scan | TODO
+7\. [Optimizer](7_optimizer/)
+8\. [Attention](8_attention/) | Flash attention
+... quantization, gemv (split-K, stream-K), scan | TODO
 
 ```bash
 # profile a CUDA kernel
