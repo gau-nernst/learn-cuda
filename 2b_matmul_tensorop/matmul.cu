@@ -90,8 +90,8 @@ __device__ void global_to_shared_async(const T *in, int in_stride, T *out, int t
 
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int SHM_STRIDE, bool use_cp_async,
           bool use_swizzle, typename T>
-__global__ void
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
+__global__ void
 matmul_v1_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int MMA_M = 16;
   constexpr int MMA_N = 8;
@@ -372,8 +372,8 @@ __device__ void global_to_shared_async(const T *in, int in_stride, uint32_t out,
 }
 
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, typename T>
-__global__ void
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
+__global__ void
 matmul_v5_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int MMA_M = 16;
   constexpr int MMA_N = 16;
@@ -527,8 +527,8 @@ void matmul_v5(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
 }
 
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES, typename T>
-__global__ void
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
+__global__ void
 matmul_v6_kernel(const T *A, const T *B, T *C, int M, int N, int K) {
   constexpr int MMA_M = 16;
   constexpr int MMA_N = 16;
