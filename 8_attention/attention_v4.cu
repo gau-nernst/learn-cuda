@@ -171,11 +171,16 @@ void attention_v4_kernel(
           QK_regs[mma_id_q][mma_id_kv][reg_id] *= softmax_scale;
 
       // rowmax
-      float this_rowmax[2] = {-FLT_MAX, -FLT_MAX};
+      float this_rowmax[2];
       for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
         float *regs = QK_regs[mma_id_q][mma_id_kv];
-        this_rowmax[0] = max(this_rowmax[0], max(regs[0], regs[1]));  // c0 and c1
-        this_rowmax[1] = max(this_rowmax[1], max(regs[2], regs[3]));  // c2 and c3
+        if (mma_id_kv == 0) {
+          this_rowmax[0] = max(regs[0], regs[1]);  // c0 and c1
+          this_rowmax[1] = max(regs[2], regs[3]);  // c2 and c3
+        } else {
+          this_rowmax[0] = max(this_rowmax[0], max(regs[0], regs[1]));  // c0 and c1
+          this_rowmax[1] = max(this_rowmax[1], max(regs[2], regs[3]));  // c2 and c3
+        }
       }
 
       // butterfly reduction within 4 threads
@@ -204,7 +209,7 @@ void attention_v4_kernel(
       rowmax[mma_id_q][1] = this_rowmax[1];
 
       // rowsumexp
-      float this_rowsumexp[2] = {};
+      float this_rowsumexp[2];
       for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
         float *regs = QK_regs[mma_id_q][mma_id_kv];
         regs[0] = __expf(regs[0] - rowmax[mma_id_q][0]);  // c0
@@ -212,8 +217,13 @@ void attention_v4_kernel(
         regs[2] = __expf(regs[2] - rowmax[mma_id_q][1]);  // c2
         regs[3] = __expf(regs[3] - rowmax[mma_id_q][1]);  // c3
 
-        this_rowsumexp[0] += regs[0] + regs[1];
-        this_rowsumexp[1] += regs[2] + regs[3];
+        if (mma_id_kv == 0) {
+          this_rowsumexp[0] = regs[0] + regs[1];
+          this_rowsumexp[1] = regs[2] + regs[3];
+        } else {
+          this_rowsumexp[0] += regs[0] + regs[1];
+          this_rowsumexp[1] += regs[2] + regs[3];
+        }
 
         // pack to P registers for next MMA
         // we need to change from m16n8 to m16k16
