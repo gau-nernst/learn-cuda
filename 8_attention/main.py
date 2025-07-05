@@ -24,30 +24,33 @@ module = load(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile")
-    parser.add_argument("--bs", default=1)
+    parser.add_argument("--bs", default=4)
+    parser.add_argument("--nh", default=8)
     parser.add_argument("--lq", default=2048)
     parser.add_argument("--lkv", default=4096)
     args = parser.parse_args()
 
     bs = args.bs
+    nh = args.nh
     lq = args.lq
     lkv = args.lkv
     head_dim = 128
 
     # add a small offset so that output does not have a mean of zero,
     # which will result in large relative error
-    Q = torch.randn(bs, lq, head_dim, dtype=torch.bfloat16, device="cuda") + 0.5
-    K = torch.randn(bs, lkv, head_dim, dtype=torch.bfloat16, device="cuda") + 0.5
-    V = torch.randn(bs, lkv, head_dim, dtype=torch.bfloat16, device="cuda") + 0.5
+    # F.sdpa doesn't use FA/CuDNN for 3D inputs
+    Q = torch.randn(bs, nh, lq, head_dim, dtype=torch.bfloat16, device="cuda") + 0.5
+    K = torch.randn(bs, nh, lkv, head_dim, dtype=torch.bfloat16, device="cuda") + 0.5
+    V = torch.randn(bs, nh, lkv, head_dim, dtype=torch.bfloat16, device="cuda") + 0.5
 
     if args.profile is not None:
         if args.profile == "fa":
             with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
-                F.scaled_dot_product_attention(Q[None], K[None], V[None])
+                F.scaled_dot_product_attention(Q, K, V)
 
         elif args.profile == "cudnn":
             with sdpa_kernel([SDPBackend.CUDNN_ATTENTION]):
-                F.scaled_dot_product_attention(Q[None], K[None], V[None])
+                F.scaled_dot_product_attention(Q, K, V)
 
         else:
             f = getattr(module, f"sdpa_v{args.profile}")
@@ -66,11 +69,11 @@ def main():
         time.sleep(1)
 
         latency_ms = do_bench(lambda: f(Q, K, V), return_mode="median")
-        tflops = 4 * bs * lq * lkv * head_dim / latency_ms / 1e9
+        tflops = 4 * bs * nh * lq * lkv * head_dim / latency_ms / 1e9
         pct_sol = tflops / sol * 100
         print(f"{name}:\t{latency_ms:.4f} ms\t{tflops:.2f} TFLOPS\t{pct_sol:.2f}% SOL")
 
-    out_ref = F.scaled_dot_product_attention(Q[None], K[None], V[None])[0]
+    out_ref = F.scaled_dot_product_attention(Q, K, V)
     bench_and_print(F.scaled_dot_product_attention, "F.sdpa")
 
     for i in range(1):

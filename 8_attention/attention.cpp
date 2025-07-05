@@ -19,10 +19,10 @@ at::Tensor sdpa(
   const at::Tensor& K,
   const at::Tensor& V) {
 
-  const int bs = Q.size(0);
-  const int len_q = Q.size(1);
-  const int len_kv = K.size(1);
-  const int dim = Q.size(2);
+  const int bs = Q.size(0) * Q.size(1);
+  const int len_q = Q.size(2);
+  const int len_kv = K.size(2);
+  const int dim = Q.size(3);
 
   at::Tensor O = at::empty_like(Q);
 
