@@ -1,17 +1,17 @@
 import argparse
 import time
+from pathlib import Path
 
 import torch
 import torch.utils.cpp_extension
 from triton.testing import do_bench
 
+CURRENT_DIR = Path(__file__).parent
 
 module = torch.utils.cpp_extension.load(
     "module",
-    sources=["matmul.cu", "matmul.cpp"],
+    sources=list(CURRENT_DIR.glob("matmul*")),
     extra_cuda_cflags=[
-        "-O3",
-        "--use_fast_math",
         "--ptxas-options=-v",
         "--generate-line-info",
     ],
@@ -33,7 +33,9 @@ def main():
     print(f"{M=}, {N=}, {K=}")
     A = torch.randn(M, K).bfloat16().cuda()
     B = torch.randn(N, K).bfloat16().cuda().T
-    inductor_mm = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
+    inductor_mm = torch.compile(
+        torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False
+    )
 
     if args.profile is not None:
         if args.profile == "cublas":

@@ -9,7 +9,7 @@ Resources:
 - https://github.com/NVIDIA/cutlass/blob/v3.9.2/include/cutlass/gemm/threadblock/mma_multistage.h
 - https://www.spatters.ca/mma-matmul
 
-For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 12.9, `-O3 --use_fast_math`
+For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 12.9
 - Theoretical limit: 209.5 TFLOPS
 
 TODO: TMA
