@@ -124,29 +124,20 @@ void attention_kernel(
   uint32_t P_regs[WARP_Q / MMA_M][BLOCK_KV / MMA_K][num_A_regs];
   uint32_t V_regs[BLOCK_KV / MMA_K][DIM / MMA_N][num_B_regs];
 
-  // we use the same registers for O_regs and PV_regs
-  // rescale O_regs once we obtain new rowmax, then accumulate to O_regs
-  float O_regs[WARP_Q / MMA_M][DIM / MMA_N][num_acc_regs];
-
-  float rowmax[WARP_Q / MMA_M][2];
-  float rowsumexp[WARP_Q / MMA_M][2];
-
-  // const float softmax_scale = __frsqrt_rn(static_cast<float>(DIM));
-  const float softmax_scale = 1.0f;
+  const float softmax_scale = rsqrtf(static_cast<float>(DIM));
 
   for (int off_q = 0; off_q < len_q; off_q += BLOCK_Q) {
+    float rowmax[WARP_Q / MMA_M][2];
+    float rowsumexp[WARP_Q / MMA_M][2] = {};
+
     for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++) {
       rowmax[mma_id_q][0] = -FLT_MAX;
       rowmax[mma_id_q][1] = -FLT_MAX;
-      rowsumexp[mma_id_q][0] = 0.0f;
-      rowsumexp[mma_id_q][1] = 0.0f;
     }
 
-    // clear O accumulator
-    for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
-      for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++)
-        for (int reg_id = 0; reg_id < num_acc_regs; reg_id++)
-          O_regs[mma_id_q][mma_id_d][reg_id] = 0.0f;
+    // we use the same registers for O_regs and PV_regs
+    // rescale O_regs once we obtain new rowmax, then accumulate to O_regs
+    float O_regs[WARP_Q / MMA_M][DIM / MMA_N][num_acc_regs] = {};
 
     // load Q [BLOCK_Q, DIM]
     global_to_shared<BLOCK_Q, DIM, TB_SIZE>(Q_shm, Q, DIM, tid);
@@ -194,24 +185,24 @@ void attention_kernel(
                          QK_regs[mma_id_q][mma_id_kv]);
 
       for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++) {
+        // apply softmax scale
+        for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
+          for (int reg_id = 0; reg_id < num_acc_regs; reg_id++)
+            QK_regs[mma_id_q][mma_id_kv][reg_id] *= softmax_scale;
+
         // rowmax
         float this_rowmax[2] = {-FLT_MAX, -FLT_MAX};
         for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
           float *regs = QK_regs[mma_id_q][mma_id_kv];
-
-          // apply softmax scale
-          for (int reg_id = 0; reg_id < num_acc_regs; reg_id++)
-            regs[reg_id] *= softmax_scale;
-
           this_rowmax[0] = max(this_rowmax[0], max(regs[0], regs[1]));  // c0 and c1
           this_rowmax[1] = max(this_rowmax[1], max(regs[2], regs[3]));  // c2 and c3
         }
 
         // butterfly reduction within 4 threads
-        this_rowmax[0] = max(this_rowmax[0], __shfl_xor_sync(0xFFFF'FFFF, this_rowmax[0], 0x1));
-        this_rowmax[0] = max(this_rowmax[0], __shfl_xor_sync(0xFFFF'FFFF, this_rowmax[0], 0x10));
-        this_rowmax[1] = max(this_rowmax[1], __shfl_xor_sync(0xFFFF'FFFF, this_rowmax[1], 0x1));
-        this_rowmax[1] = max(this_rowmax[1], __shfl_xor_sync(0xFFFF'FFFF, this_rowmax[1], 0x10));
+        this_rowmax[0] = max(this_rowmax[0], __shfl_xor_sync(0xFFFF'FFFF, this_rowmax[0], 1));
+        this_rowmax[0] = max(this_rowmax[0], __shfl_xor_sync(0xFFFF'FFFF, this_rowmax[0], 2));
+        this_rowmax[1] = max(this_rowmax[1], __shfl_xor_sync(0xFFFF'FFFF, this_rowmax[1], 1));
+        this_rowmax[1] = max(this_rowmax[1], __shfl_xor_sync(0xFFFF'FFFF, this_rowmax[1], 2));
 
         // new rowmax
         this_rowmax[0] = max(this_rowmax[0], rowmax[mma_id_q][0]);
@@ -252,10 +243,10 @@ void attention_kernel(
         }
 
         // butterfly reduction within 4 threads
-        this_rowsumexp[0] += __shfl_xor_sync(0xFFFF'FFFF, this_rowsumexp[0], 0x1);
-        this_rowsumexp[0] += __shfl_xor_sync(0xFFFF'FFFF, this_rowsumexp[0], 0x10);
-        this_rowsumexp[1] += __shfl_xor_sync(0xFFFF'FFFF, this_rowsumexp[1], 0x1);
-        this_rowsumexp[1] += __shfl_xor_sync(0xFFFF'FFFF, this_rowsumexp[1], 0x10);
+        this_rowsumexp[0] += __shfl_xor_sync(0xFFFF'FFFF, this_rowsumexp[0], 1);
+        this_rowsumexp[0] += __shfl_xor_sync(0xFFFF'FFFF, this_rowsumexp[0], 2);
+        this_rowsumexp[1] += __shfl_xor_sync(0xFFFF'FFFF, this_rowsumexp[1], 1);
+        this_rowsumexp[1] += __shfl_xor_sync(0xFFFF'FFFF, this_rowsumexp[1], 2);
 
         // accumulate to total rowsumexp
         rowsumexp[mma_id_q][0] = rowsumexp[mma_id_q][0] * rescale[0] + this_rowsumexp[0];
