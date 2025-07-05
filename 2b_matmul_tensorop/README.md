@@ -12,6 +12,8 @@ Resources:
 For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 12.9, `-O3 --use_fast_math`
 - Theoretical limit: 209.5 TFLOPS
 
+TODO: TMA
+
 Kernel name                                            | TFLOPS | % of SOL
 -------------------------------------------------------|--------|----------
 CuBLAS 12.8 (via PyTorch)                              | 175.68 |   83.86%
