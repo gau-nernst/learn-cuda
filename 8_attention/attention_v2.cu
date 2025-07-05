@@ -233,7 +233,6 @@ void attention_v2_kernel(
                         V_regs[mma_id_kv][mma_id_d],
                         O_regs[mma_id_q][mma_id_d]);
 
-    __syncthreads();
     K += BLOCK_KV * DIM;
     V += BLOCK_KV * DIM;
   }
