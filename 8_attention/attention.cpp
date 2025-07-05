@@ -5,7 +5,7 @@ using AttentionFn = void(
   const nv_bfloat16 *Q,  // [bs, len_q, DIM]
   const nv_bfloat16 *K,  // [bs, len_kv, DIM]
   const nv_bfloat16 *V,  // [bs, len_kv, DIM]
-  nv_bfloat16 *O,  // [bs, len_q, DIM]
+  nv_bfloat16 *O,        // [bs, len_q, DIM]
   int bs,
   int len_q,
   int len_kv,

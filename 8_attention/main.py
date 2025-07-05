@@ -21,10 +21,10 @@ module = load(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile")
-    parser.add_argument("--bs", default=4)
-    parser.add_argument("--nh", default=8)
-    parser.add_argument("--lq", default=2048)
-    parser.add_argument("--lkv", default=4096)
+    parser.add_argument("--bs", type=int, default=4)
+    parser.add_argument("--nh", type=int, default=8)
+    parser.add_argument("--lq", type=int, default=2048)
+    parser.add_argument("--lkv", type=int, default=4096)
     args = parser.parse_args()
 
     bs = args.bs
@@ -74,7 +74,11 @@ def main():
         print(f"{name}:\t{latency_ms:.4f} ms\t{tflops:.2f} TFLOPS\t{pct_sol:.2f}% SOL")
 
     out_ref = F.scaled_dot_product_attention(Q, K, V)
-    bench_and_print(F.scaled_dot_product_attention, "F.sdpa")
+
+    with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
+        bench_and_print(F.scaled_dot_product_attention, "Flash")
+    with sdpa_kernel([SDPBackend.CUDNN_ATTENTION]):
+        bench_and_print(F.scaled_dot_product_attention, "CuDNN")
 
     for i in range(1):
         f = getattr(module, f"sdpa_v{i + 1}")

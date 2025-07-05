@@ -1,3 +1,5 @@
+#pragma once
+
 #include <iostream>
 #include <cstdint>
 
@@ -12,10 +14,13 @@
     }                                                                                                                  \
   }
 
-constexpr int WARP_SIZE = 32;
+inline constexpr int WARP_SIZE = 32;
+
+__device__ __host__ constexpr
+int cdiv(int a, int b) { return (a + b - 1) / b; }
 
 template <int HEIGHT, int WIDTH, int TB_SIZE>
-__device__
+__device__ inline
 void global_to_shared(uint32_t dst, const nv_bfloat16 *src, int src_stride, int tid) {
   constexpr int num_elems = 16 / sizeof(nv_bfloat16);
   constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
@@ -31,28 +36,28 @@ void global_to_shared(uint32_t dst, const nv_bfloat16 *src, int src_stride, int 
   }
 }
 
-__device__
+__device__ inline
 void ldmatrix_x4(uint32_t regs[4], uint32_t addr) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.b16 {%0, %1, %2, %3}, [%4];"
               : "=r"(regs[0]), "=r"(regs[1]), "=r"(regs[2]), "=r"(regs[3])
               : "r"(addr));
 }
 
-__device__
+__device__ inline
 void ldmatrix_x2(uint32_t regs[2], uint32_t addr) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x2.b16 {%0, %1}, [%2];"
               : "=r"(regs[0]), "=r"(regs[1])
               : "r"(addr));
 }
 
-__device__
+__device__ inline
 void ldmatrix_x2_trans(uint32_t regs[2], uint32_t addr) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.b16 {%0, %1}, [%2];"
               : "=r"(regs[0]), "=r"(regs[1])
               : "r"(addr));
 }
 
-__device__
+__device__ inline
 void mma_m16n8k16(uint32_t A[4], uint32_t B[2], float D[4]) {
   asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
               "{%0, %1, %2, %3}, "
