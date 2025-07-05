@@ -13,6 +13,7 @@ using AttentionFn = void(
 
 AttentionFn attention_v1;
 AttentionFn attention_v2;
+AttentionFn attention_v3;
 
 template<AttentionFn attention>
 at::Tensor sdpa(
@@ -40,4 +41,5 @@ at::Tensor sdpa(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("sdpa_v1", &sdpa<attention_v1>);
   m.def("sdpa_v2", &sdpa<attention_v2>);
+  m.def("sdpa_v3", &sdpa<attention_v3>);
 }

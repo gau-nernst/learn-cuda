@@ -8,7 +8,7 @@
 template<int BLOCK_Q, int BLOCK_KV, int DIM, int NUM_WARPS>
 __launch_bounds__(NUM_WARPS * WARP_SIZE)
 __global__
-void attention_v2_kernel(
+void attention_v3_kernel(
   const nv_bfloat16 *Q,  // [bs, len_q, DIM]
   const nv_bfloat16 *K,  // [bs, len_kv, DIM]
   const nv_bfloat16 *V,  // [bs, len_kv, DIM]
@@ -113,20 +113,42 @@ void attention_v2_kernel(
   // before finishing loading Q shared->reg
   __syncthreads();
 
-  for (int off_kv = 0; off_kv < len_kv; off_kv += BLOCK_KV) {
+  const int num_kv_iter = cdiv(len_kv, BLOCK_KV);
+
+  auto load_K = [&](int kv_id) {
+    if (kv_id < num_kv_iter) {
+      const uint32_t dst = K_shm + (kv_id % 2) * (2 * BLOCK_KV * DIM * sizeof(nv_bfloat16));
+      global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(dst, K, DIM, tid);
+      K += BLOCK_KV * DIM;
+    }
+    asm volatile("cp.async.commit_group;");
+  };
+  auto load_V = [&](int kv_id) {
+    if (kv_id < num_kv_iter) {
+      const uint32_t dst = V_shm + (kv_id % 2) * (2 * BLOCK_KV * DIM * sizeof(nv_bfloat16));
+      global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(dst, V, DIM, tid);
+      V += BLOCK_KV * DIM;
+    }
+    asm volatile("cp.async.commit_group;");
+  };
+
+  // prefetch K and V
+  load_K(0);
+  load_V(0);
+
+  for (int kv_id = 0; kv_id < num_kv_iter; kv_id++) {
     float QK_regs[WARP_Q / MMA_M][BLOCK_KV / MMA_N][num_acc_regs] = {};
 
-    // load K [BLOCK_KV, DIM]
-    global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(K_shm, K, DIM, tid);
-    asm volatile("cp.async.commit_group;");
-    asm volatile("cp.async.wait_all;");
+    // prefetch K
+    load_K(kv_id + 1);
+    asm volatile("cp.async.wait_group 2;");
     __syncthreads();
 
     // shared -> registers
     for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
       for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++) {
         // swizzle(addr + offset) = swizzle(addr) XOR offset
-        uint32_t addr = K_shm_thread;
+        uint32_t addr = K_shm_thread + (kv_id % 2) * (2 * BLOCK_KV * DIM * sizeof(nv_bfloat16));
         addr += mma_id_kv * MMA_N * DIM * sizeof(nv_bfloat16);  // row
         addr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);  // col
         ldmatrix_x2(K_regs[mma_id_kv][mma_id_d], addr);
@@ -137,8 +159,11 @@ void attention_v2_kernel(
       for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
         for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++)
           mma_m16n8k16(Q_regs[mma_id_q][mma_id_d],
-                        K_regs[mma_id_kv][mma_id_d],
-                        QK_regs[mma_id_q][mma_id_kv]);
+                       K_regs[mma_id_kv][mma_id_d],
+                       QK_regs[mma_id_q][mma_id_kv]);
+
+    // prefetch V
+    load_V(kv_id + 1);
 
     for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++) {
       // apply softmax scale
@@ -209,17 +234,14 @@ void attention_v2_kernel(
       rowsumexp[mma_id_q][1] = rowsumexp[mma_id_q][1] * rescale[1] + this_rowsumexp[1];
     }
 
-    // load V [BLOCK_KV, DIM]
-    // NOTE: we can schedule to load V global->shared earlier
-    global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(V_shm, V, DIM, tid);
-    asm volatile("cp.async.commit_group;");
-    asm volatile("cp.async.wait_all;");
+    // wait V load to finish
+    asm volatile("cp.async.wait_group 2;");
     __syncthreads();
 
     // shared -> registers
     for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K; mma_id_kv++)
       for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
-        uint32_t addr = V_shm_thread;
+        uint32_t addr = V_shm_thread + (kv_id % 2) * (2 * BLOCK_KV * DIM * sizeof(nv_bfloat16));
         addr += mma_id_kv * MMA_K * DIM * sizeof(nv_bfloat16);  // row
         addr ^= mma_id_d * MMA_N * sizeof(nv_bfloat16);  // col
         ldmatrix_x2_trans(V_regs[mma_id_kv][mma_id_d], addr);
@@ -232,9 +254,6 @@ void attention_v2_kernel(
           mma_m16n8k16(P_regs[mma_id_q][mma_id_kv],
                        V_regs[mma_id_kv][mma_id_d],
                        O_regs[mma_id_q][mma_id_d]);
-
-    K += BLOCK_KV * DIM;
-    V += BLOCK_KV * DIM;
   }
 
   // write to O
@@ -256,7 +275,7 @@ void attention_v2_kernel(
     }
 }
 
-void attention_v2(
+void attention_v3(
   const nv_bfloat16 *Q,  // [bs, len_q, DIM]
   const nv_bfloat16 *K,  // [bs, len_kv, DIM]
   const nv_bfloat16 *V,  // [bs, len_kv, DIM]
@@ -272,14 +291,14 @@ void attention_v2(
   }
 
   const int BLOCK_Q = 64;
-  const int BLOCK_KV = 64;
+  const int BLOCK_KV = 32;
   const int DIM = 128;
   const int NUM_WARPS = 4;
 
   const int num_blocks = bs * cdiv(len_q, BLOCK_Q);
   const int TB_SIZE = NUM_WARPS * WARP_SIZE;
-  const int shm_size = max(BLOCK_Q, BLOCK_KV * 2) * DIM * sizeof(nv_bfloat16);
+  const int shm_size = max(BLOCK_Q, BLOCK_KV * 2 * 2) * DIM * sizeof(nv_bfloat16);
 
-  auto kernel = attention_v2_kernel<BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS>;
+  auto kernel = attention_v3_kernel<BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS>;
   launch_kernel(kernel, num_blocks, TB_SIZE, shm_size, Q, K, V, O, bs, len_q, len_kv);
 }

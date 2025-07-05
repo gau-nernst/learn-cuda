@@ -115,8 +115,8 @@ void attention_v1_kernel(
       for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
         for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++)
           mma_m16n8k16(Q_regs[mma_id_q][mma_id_d],
-                        K_regs[mma_id_kv][mma_id_d],
-                        QK_regs[mma_id_q][mma_id_kv]);
+                       K_regs[mma_id_kv][mma_id_d],
+                       QK_regs[mma_id_q][mma_id_kv]);
 
     for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++) {
       // apply softmax scale
@@ -208,8 +208,8 @@ void attention_v1_kernel(
       for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++)
         for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K; mma_id_kv++)
           mma_m16n8k16(P_regs[mma_id_q][mma_id_kv],
-                        V_regs[mma_id_kv][mma_id_d],
-                        O_regs[mma_id_q][mma_id_d]);
+                       V_regs[mma_id_kv][mma_id_d],
+                       O_regs[mma_id_q][mma_id_d]);
 
     K += BLOCK_KV * DIM;
     V += BLOCK_KV * DIM;
