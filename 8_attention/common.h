@@ -19,6 +19,19 @@ inline constexpr int WARP_SIZE = 32;
 __device__ __host__ constexpr
 int cdiv(int a, int b) { return (a + b - 1) / b; }
 
+// NOTE: stride in bytes
+template <int STRIDE>
+__device__
+uint32_t swizzle(uint32_t index) {
+  // no need swizzling
+  if constexpr (STRIDE == 16)
+    return index;
+
+  uint32_t row_idx = (index / STRIDE) % 8;
+  uint32_t bits_to_xor = row_idx / max(64 / STRIDE, 1);
+  return index ^ (bits_to_xor << 4);
+}
+
 template <int HEIGHT, int WIDTH, int TB_SIZE>
 __device__ inline
 void global_to_shared(uint32_t dst, const nv_bfloat16 *src, int src_stride, int tid) {
@@ -31,6 +44,23 @@ void global_to_shared(uint32_t dst, const nv_bfloat16 *src, int src_stride, int 
     const int col = idx % WIDTH;
 
     const uint32_t dst_addr = dst + (row * WIDTH + col) * sizeof(nv_bfloat16);
+    const nv_bfloat16 *src_addr = src + (row * src_stride + col);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(dst_addr), "l"(src_addr));
+  }
+}
+
+template <int HEIGHT, int WIDTH, int TB_SIZE>
+__device__ inline
+void global_to_shared_swizzle(uint32_t dst, const nv_bfloat16 *src, int src_stride, int tid) {
+  constexpr int num_elems = 16 / sizeof(nv_bfloat16);
+  constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
+
+  for (int iter = 0; iter < num_iters; iter++) {
+    const int idx = (iter * TB_SIZE + tid) * num_elems;
+    const int row = idx / WIDTH;
+    const int col = idx % WIDTH;
+
+    const uint32_t dst_addr = swizzle<WIDTH * sizeof(nv_bfloat16)>(dst + (row * WIDTH + col) * sizeof(nv_bfloat16));
     const nv_bfloat16 *src_addr = src + (row * src_stride + col);
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(dst_addr), "l"(src_addr));
   }

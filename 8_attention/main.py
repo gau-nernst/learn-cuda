@@ -23,8 +23,8 @@ def main():
     parser.add_argument("--profile")
     parser.add_argument("--bs", type=int, default=4)
     parser.add_argument("--nh", type=int, default=8)
-    parser.add_argument("--lq", type=int, default=2048)
-    parser.add_argument("--lkv", type=int, default=4096)
+    parser.add_argument("--lq", type=int, default=4096)
+    parser.add_argument("--lkv", type=int, default=8192)
     args = parser.parse_args()
 
     bs = args.bs
@@ -80,7 +80,7 @@ def main():
     with sdpa_kernel([SDPBackend.CUDNN_ATTENTION]):
         bench_and_print(F.scaled_dot_product_attention, "CuDNN")
 
-    for i in range(1):
+    for i in range(2):
         f = getattr(module, f"sdpa_v{i + 1}")
         out = f(Q, K, V)
         torch.testing.assert_close(out, out_ref)
