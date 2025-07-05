@@ -12,10 +12,7 @@ CURRENT_DIR = Path(__file__).parent
 
 module = load(
     "my_ext",
-    sources=[
-        str(CURRENT_DIR / "attention.cu"),
-        str(CURRENT_DIR / "attention.cpp"),
-    ],
+    sources=list(CURRENT_DIR.glob("attention*")),
     extra_cuda_cflags=["-lineinfo", "--ptxas-options=-v"],
     verbose=True,
 )
@@ -39,9 +36,12 @@ def main():
     # add a small offset so that output does not have a mean of zero,
     # which will result in large relative error
     # F.sdpa doesn't use FA/CuDNN for 3D inputs
-    Q = torch.randn(bs, nh, lq, head_dim, dtype=torch.bfloat16, device="cuda") + 0.5
-    K = torch.randn(bs, nh, lkv, head_dim, dtype=torch.bfloat16, device="cuda") + 0.5
-    V = torch.randn(bs, nh, lkv, head_dim, dtype=torch.bfloat16, device="cuda") + 0.5
+    def generate_input(*shape):
+        return torch.randn(shape).add(0.5).bfloat16().cuda()
+
+    Q = generate_input(bs, nh, lq, head_dim)
+    K = generate_input(bs, nh, lkv, head_dim)
+    V = generate_input(bs, nh, lkv, head_dim)
 
     if args.profile is not None:
         if args.profile == "fa":

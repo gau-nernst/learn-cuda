@@ -1,69 +1,9 @@
+#include "common.h"
+
 #include <cuda_bf16.h>
 #include <cstdint>
 #include <float.h>
 #include <iostream>
-
-#define CUDA_CHECK(x)                                                                                                  \
-  {                                                                                                                    \
-    auto error = x;                                                                                                    \
-    if (error != cudaSuccess) {                                                                                        \
-      std::cerr << "CUDA error - L" << __LINE__ << ": " << cudaGetErrorString(error) << std::endl;                     \
-      exit(1);                                                                                                         \
-    }                                                                                                                  \
-  }
-
-constexpr int WARP_SIZE = 32;
-
-template <int HEIGHT, int WIDTH, int TB_SIZE>
-__device__
-void global_to_shared(uint32_t dst, const nv_bfloat16 *src, int src_stride, int tid) {
-  constexpr int num_elems = 16 / sizeof(nv_bfloat16);
-  constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
-
-  for (int iter = 0; iter < num_iters; iter++) {
-    const int idx = (iter * TB_SIZE + tid) * num_elems;
-    const int row = idx / WIDTH;
-    const int col = idx % WIDTH;
-
-    const uint32_t dst_addr = dst + (row * WIDTH + col) * sizeof(nv_bfloat16);
-    const nv_bfloat16 *src_addr = src + (row * src_stride + col);
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(dst_addr), "l"(src_addr));
-  }
-}
-
-__device__
-void ldmatrix_x4(uint32_t regs[4], uint32_t addr) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.b16 {%0, %1, %2, %3}, [%4];"
-              : "=r"(regs[0]), "=r"(regs[1]), "=r"(regs[2]), "=r"(regs[3])
-              : "r"(addr));
-}
-
-__device__
-void ldmatrix_x2(uint32_t regs[2], uint32_t addr) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x2.b16 {%0, %1}, [%2];"
-              : "=r"(regs[0]), "=r"(regs[1])
-              : "r"(addr));
-}
-
-__device__
-void ldmatrix_x2_trans(uint32_t regs[2], uint32_t addr) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.b16 {%0, %1}, [%2];"
-              : "=r"(regs[0]), "=r"(regs[1])
-              : "r"(addr));
-}
-
-__device__
-void mma_m16n8k16(uint32_t A[4], uint32_t B[2], float D[4]) {
-  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-              "{%0, %1, %2, %3}, "
-              "{%4, %5, %6, %7}, "
-              "{%8, %9}, "
-              "{%10, %11, %12, %13};"
-              : "=f"(D[0]), "=f"(D[1]), "=f"(D[2]), "=f"(D[3])
-              : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]),
-                "r"(B[0]), "r"(B[1]),
-                "f"(D[0]), "f"(D[1]), "f"(D[2]), "f"(D[3]));
-}
 
 template<int BLOCK_Q, int BLOCK_KV, int DIM, int NUM_WARPS>
 __global__
@@ -300,32 +240,6 @@ void attention_v1_kernel(
   }
 }
 
-template<int DIM>
-void attention_v1_dispatch(
-  const nv_bfloat16 *Q,  // [bs, len_q, DIM]
-  const nv_bfloat16 *K,  // [bs, len_kv, DIM]
-  const nv_bfloat16 *V,  // [bs, len_kv, DIM]
-  nv_bfloat16 *O,  // [bs, len_q, DIM]
-  int bs,
-  int len_q,
-  int len_kv) {
-
-  const int BLOCK_Q = 128;
-  const int BLOCK_KV = 64;
-  const int NUM_WARPS = 4;
-
-  const int num_tbs = bs;
-  const int TB_SIZE = NUM_WARPS * WARP_SIZE;
-  const int shm_size = (BLOCK_Q + BLOCK_KV * 2) * DIM * sizeof(nv_bfloat16);
-
-  auto kernel = attention_v1_kernel<BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS>;
-  if (shm_size > 48'000) {
-    CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shm_size));
-  }
-  kernel<<<num_tbs, TB_SIZE, shm_size>>>(Q, K, V, O, bs, len_q, len_kv);
-  CUDA_CHECK(cudaGetLastError());
-}
-
 void attention_v1(
   const nv_bfloat16 *Q,  // [bs, len_q, DIM]
   const nv_bfloat16 *K,  // [bs, len_kv, DIM]
@@ -336,10 +250,20 @@ void attention_v1(
   int len_kv,
   int dim) {
 
-  if (dim == 128)
-    attention_v1_dispatch<128>(Q, K, V, O, bs, len_q, len_kv);
-  else {
+  if (dim != 128) {
     std::cerr << "Unsupported dim=" << dim << std::endl;
     exit(1);
   }
+
+  const int BLOCK_Q = 128;
+  const int BLOCK_KV = 64;
+  const int DIM = 128;
+  const int NUM_WARPS = 4;
+
+  const int num_tbs = bs;
+  const int TB_SIZE = NUM_WARPS * WARP_SIZE;
+  const int shm_size = (BLOCK_Q + BLOCK_KV * 2) * DIM * sizeof(nv_bfloat16);
+
+  auto kernel = attention_v1_kernel<BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS>;
+  launch_kernel(kernel, num_tbs, TB_SIZE, shm_size, Q, K, V, O, bs, len_q, len_kv);
 }
