@@ -13,14 +13,6 @@
   }
 
 constexpr int WARP_SIZE = 32;
-using KernelFn = void(*)(
-  const nv_bfloat16 *Q,  // [bs, len_q, DIM]
-  const nv_bfloat16 *K,  // [bs, len_kv, DIM]
-  const nv_bfloat16 *V,  // [bs, len_kv, DIM]
-  nv_bfloat16 *O,  // [bs, len_q, DIM]
-  int bs,
-  int len_q,
-  int len_kv);
 
 template <int HEIGHT, int WIDTH, int TB_SIZE>
 __device__
@@ -75,7 +67,7 @@ void mma_m16n8k16(uint32_t A[4], uint32_t B[2], float D[4]) {
 
 template<int BLOCK_Q, int BLOCK_KV, int DIM, int NUM_WARPS>
 __global__
-void attention_kernel(
+void attention_v1_kernel(
   const nv_bfloat16 *Q,  // [bs, len_q, DIM]
   const nv_bfloat16 *K,  // [bs, len_kv, DIM]
   const nv_bfloat16 *V,  // [bs, len_kv, DIM]
@@ -309,7 +301,7 @@ void attention_kernel(
 }
 
 template<int DIM>
-void attention_dispatch(
+void attention_v1_dispatch(
   const nv_bfloat16 *Q,  // [bs, len_q, DIM]
   const nv_bfloat16 *K,  // [bs, len_kv, DIM]
   const nv_bfloat16 *V,  // [bs, len_kv, DIM]
@@ -326,8 +318,7 @@ void attention_dispatch(
   const int TB_SIZE = NUM_WARPS * WARP_SIZE;
   const int shm_size = (BLOCK_Q + BLOCK_KV * 2) * DIM * sizeof(nv_bfloat16);
 
-  KernelFn kernel = attention_kernel<BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS>;
-
+  auto kernel = attention_v1_kernel<BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS>;
   if (shm_size > 48'000) {
     CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shm_size));
   }
@@ -335,7 +326,7 @@ void attention_dispatch(
   CUDA_CHECK(cudaGetLastError());
 }
 
-void attention(
+void attention_v1(
   const nv_bfloat16 *Q,  // [bs, len_q, DIM]
   const nv_bfloat16 *K,  // [bs, len_kv, DIM]
   const nv_bfloat16 *V,  // [bs, len_kv, DIM]
@@ -346,5 +337,9 @@ void attention(
   int dim) {
 
   if (dim == 128)
-    attention_dispatch<128>(Q, K, V, O, bs, len_q, len_kv);
+    attention_v1_dispatch<128>(Q, K, V, O, bs, len_q, len_kv);
+  else {
+    std::cerr << "Unsupported dim=" << dim << std::endl;
+    exit(1);
+  }
 }

@@ -1,7 +1,7 @@
 #include <torch/extension.h>
 #include <cuda_bf16.h>
 
-void attention(
+using AttentionFn = void(
   const nv_bfloat16 *Q,  // [bs, len_q, DIM]
   const nv_bfloat16 *K,  // [bs, len_kv, DIM]
   const nv_bfloat16 *V,  // [bs, len_kv, DIM]
@@ -11,6 +11,9 @@ void attention(
   int len_kv,
   int dim);
 
+AttentionFn attention_v1;
+
+template<AttentionFn attention>
 at::Tensor sdpa(
   const at::Tensor& Q,
   const at::Tensor& K,
@@ -20,7 +23,6 @@ at::Tensor sdpa(
   const int len_q = Q.size(1);
   const int len_kv = K.size(1);
   const int dim = Q.size(2);
-  TORCH_CHECK(dim == 128, "dim must be 128");
 
   at::Tensor O = at::empty_like(Q);
 
@@ -35,5 +37,5 @@ at::Tensor sdpa(
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("sdpa", &sdpa);
+  m.def("sdpa_v1", &sdpa<attention_v1>);
 }

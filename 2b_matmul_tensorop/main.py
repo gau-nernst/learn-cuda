@@ -52,6 +52,9 @@ def main():
     sol = SOL_LOOKUP.get(torch.cuda.get_device_name(), 0)
 
     def bench_and_print(f, name):
+        # sleep to stabilize thermal
+        time.sleep(1)
+
         latency_ms = do_bench(lambda: f(A, B), return_mode="median")
         tflops = 2 * M * N * K / latency_ms / 1e9
         pct_sol = tflops / sol * 100
@@ -66,9 +69,6 @@ def main():
         output = fn(A, B)
         torch.testing.assert_close(output, output_ref)
         bench_and_print(fn, f"v{i + 1}")
-
-        # sleep to stabilize thermal
-        time.sleep(1)
 
 
 if __name__ == "__main__":
