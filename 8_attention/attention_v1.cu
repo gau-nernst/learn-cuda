@@ -34,9 +34,10 @@ void attention_v1_kernel(
   V += bs_id * len_kv * DIM;
   O += (bs_id * num_q_blocks + q_block_id) * BLOCK_Q * DIM;
 
+  // we overlap Q_shm with (K_shm + V_shm), since we only need to load Q_shm once
   extern __shared__ nv_bfloat16 shm[];
   const uint32_t Q_shm = __cvta_generic_to_shared(shm);
-  const uint32_t K_shm = Q_shm + BLOCK_Q * DIM * sizeof(nv_bfloat16);
+  const uint32_t K_shm = Q_shm;
   const uint32_t V_shm = K_shm + BLOCK_KV * DIM * sizeof(nv_bfloat16);
 
   // FA2: shard BLOCK_Q among all warps
@@ -87,6 +88,9 @@ void attention_v1_kernel(
       const uint32_t addr = Q_shm + (row * DIM + col) * sizeof(nv_bfloat16);
       ldmatrix_x4(Q_regs[mma_id_q][mma_id_d], addr);
     }
+  // we need a syncthreads() here so that we don't load K global->shared
+  // before finishing loading Q shared->reg
+  __syncthreads();
 
   for (int off_kv = 0; off_kv < len_kv; off_kv += BLOCK_KV) {
     float QK_regs[WARP_Q / MMA_M][BLOCK_KV / MMA_N][num_acc_regs] = {};
@@ -253,7 +257,7 @@ void attention_v1(
 
   const int num_blocks = bs * cdiv(len_q, BLOCK_Q);
   const int TB_SIZE = NUM_WARPS * WARP_SIZE;
-  const int shm_size = (BLOCK_Q + BLOCK_KV * 2) * DIM * sizeof(nv_bfloat16);
+  const int shm_size = max(BLOCK_Q, BLOCK_KV * 2) * DIM * sizeof(nv_bfloat16);
 
   auto kernel = attention_v1_kernel<BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS>;
   launch_kernel(kernel, num_blocks, TB_SIZE, shm_size, Q, K, V, O, bs, len_q, len_kv);
