@@ -80,7 +80,7 @@ def main():
     with sdpa_kernel([SDPBackend.CUDNN_ATTENTION]):
         bench_and_print(F.scaled_dot_product_attention, "CuDNN")
 
-    for i in range(3):
+    for i in range(4):
         f = getattr(module, f"sdpa_v{i + 1}")
         out = f(Q, K, V)
         torch.testing.assert_close(out, out_ref)
