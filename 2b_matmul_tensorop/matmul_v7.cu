@@ -11,6 +11,13 @@ namespace cde = cuda::device::experimental;
 // trick to get 128-byte aligned shared memory
 typedef struct __align__(128) {} Aligned128B;
 
+template <int SWIZZLE_WIDTH>
+__device__
+uint32_t tma_swizzle(uint32_t addr) {
+  const uint32_t row = (addr / 128) % (SWIZZLE_WIDTH / 16);
+  return addr ^ (row << 4);
+}
+
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
@@ -57,18 +64,20 @@ void matmul_v7_kernel(const __grid_constant__ CUtensorMap A_tensor_map,
   constexpr int num_A_regs = MMA_M * MMA_K * sizeof(nv_bfloat16) / 4 / WARP_SIZE; // 4
   constexpr int num_B_regs = MMA_N * MMA_K * sizeof(nv_bfloat16) / 4 / WARP_SIZE; // 4
   float acc[NUM_MMA_M][NUM_MMA_N][num_acc_regs] = {};
-  uint32_t A_regs[NUM_MMA_K][NUM_MMA_M][num_A_regs];
-  uint32_t B_regs[NUM_MMA_K][NUM_MMA_N][num_B_regs];
+  uint32_t A_regs[NUM_MMA_M][NUM_MMA_K][num_A_regs];
+  uint32_t B_regs[NUM_MMA_N][NUM_MMA_K][num_B_regs];
 
   // pre-compute address used for ldmatrix
   // also pre-compute swizzling
   const int A_offm = (warp_id_m * WARP_M) + (lane_id % 16);
   const int A_offk = (lane_id / 16) * 8;
-  const uint32_t A_shm_thread = swizzle<BLOCK_K * sizeof(nv_bfloat16)>(cvta_shared(A_smem) + (A_offm * BLOCK_K + A_offk) * sizeof(nv_bfloat16));
+  uint32_t A_shm_thread = cvta_shared(A_smem) + (A_offm * BLOCK_K + A_offk) * sizeof(nv_bfloat16);
+  A_shm_thread = tma_swizzle<BLOCK_K * sizeof(nv_bfloat16)>(A_shm_thread);
 
-  const int B_offn = (warp_id_n * WARP_N) + (lane_id % 8) + (lane_id / 16) * 8;
-  const int B_offk = ((lane_id % 16) / 8) * 8;
-  const uint32_t B_shm_thread = swizzle<BLOCK_K * sizeof(nv_bfloat16)>(cvta_shared(B_smem) + (B_offn * BLOCK_K + B_offk) * sizeof(nv_bfloat16));
+  const int B_offn = (warp_id_n * WARP_N) + (lane_id % 8);
+  const int B_offk = (lane_id / 8) * 8;
+  uint32_t B_shm_thread = cvta_shared(B_smem) + (B_offn * BLOCK_K + B_offk) * sizeof(nv_bfloat16);
+  B_shm_thread = tma_swizzle<BLOCK_K * sizeof(nv_bfloat16)>(B_shm_thread);
 
   // https://docs.nvidia.com/cuda/cuda-c-programming-guide/#asynchronous-data-copies-using-the-tensor-memory-accelerator-tma
   #pragma nv_diag_suppress static_var_with_dynamic_init
@@ -95,29 +104,29 @@ void matmul_v7_kernel(const __grid_constant__ CUtensorMap A_tensor_map,
     bar.wait(std::move(token));
 
     // A shared->regs
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
-      for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++) {
+    for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
+      for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++) {
         uint32_t A_addr = A_shm_thread;
         A_addr += mma_id_m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
         A_addr ^= mma_id_k * MMA_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(A_regs[mma_id_k][mma_id_m], A_addr);
+        ldmatrix_x4(A_regs[mma_id_m][mma_id_k], A_addr);
       }
 
     // B shared->regs
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
-      for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n += 2) {
+    for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
+      for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k += 2) {
         uint32_t B_addr = B_shm_thread;
         B_addr += mma_id_n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
         B_addr ^= mma_id_k * MMA_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(B_regs[mma_id_k][mma_id_n], B_addr);
+        ldmatrix_x4(B_regs[mma_id_n][mma_id_k], B_addr);
       }
 
     // do MMA. NUM_STAGES-1 prefetch stages are still on-going
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
-      for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
-        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
-          mma_m16n8k16(A_regs[mma_id_k][mma_id_m],
-                       B_regs[mma_id_k][mma_id_n],
+    for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
+      for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
+        for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
+          mma_m16n8k16(A_regs[mma_id_m][mma_id_k],
+                       B_regs[mma_id_n][mma_id_k],
                        acc[mma_id_m][mma_id_n]);
     __syncthreads();
   }
@@ -141,9 +150,6 @@ void matmul_v7(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   assert(is_power_of_two(K) && "K must be a power of 2");
 
   // 4 warps
-  // BLOCK_K must be 64 for TMA swizzling
-  // haven't figured out how to do TMA with BLOCK_K = 32.
-  // BLOCK_K = 128 will violate the constraint that shared box's inner dim <= 128 bytes for CU_TENSOR_MAP_SWIZZLE_128B.
   const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
 
@@ -162,6 +168,23 @@ void matmul_v7(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
     uint64_t stride[rank - 1] = {GMEM_WIDTH * sizeof(nv_bfloat16)};
     uint32_t box_size[rank] = {SMEM_WIDTH, SMEM_HEIGHT};
     uint32_t elem_stride[rank] = {1, 1};
+
+    // BLOCK_K = 128 will violate the constraint that shared box's inner dim <= 128 bytes for CU_TENSOR_MAP_SWIZZLE_128B.
+    // TODO: support BLOCK_K = 128
+    CUtensorMapSwizzle_enum swizzle_mode;
+    if constexpr (BLOCK_K <= 8)
+      swizzle_mode = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE;
+    else if constexpr (BLOCK_K == 16)
+      swizzle_mode = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_32B;
+    else if constexpr (BLOCK_K == 32)
+      swizzle_mode = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B;
+    else if constexpr (BLOCK_K == 64)
+      swizzle_mode = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B;
+    else {
+      std::cerr << "Unsupported BLOCK_K=" << BLOCK_K << std::endl;
+      exit(1);
+    }
+
     auto res = cuTensorMapEncodeTiled(
       tensor_map,
       CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
@@ -172,7 +195,7 @@ void matmul_v7(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
       box_size,
       elem_stride,
       CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
+      swizzle_mode,
       CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
       CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
     if (res != CUDA_SUCCESS) {
