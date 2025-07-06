@@ -8,6 +8,8 @@ Resources:
 - https://research.colfax-intl.com/cutlass-tutorial-design-of-a-gemm-kernel/ (Appendix)
 - https://github.com/NVIDIA/cutlass/blob/v3.9.2/include/cutlass/gemm/threadblock/mma_multistage.h
 - https://www.spatters.ca/mma-matmul
+- https://cudaforfun.substack.com/p/outperforming-cublas-on-h100-a-worklog - TMA
+- https://docs.nvidia.com/cuda/cuda-c-programming-guide/#asynchronous-data-copies-using-the-tensor-memory-accelerator-tma
 
 For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 12.9
 - Theoretical limit: 209.5 TFLOPS

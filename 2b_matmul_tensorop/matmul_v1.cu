@@ -274,20 +274,3 @@ void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
 
   launch_kernel(kernel, grid_size, TB_SIZE, shm_size, A, B, C, M, N, K);
 }
-
-template <int TB_SIZE, int HEIGHT, int WIDTH>
-__device__
-void global_to_shared_async(const nv_bfloat16 *in, int in_stride, uint32_t out, int tid) {
-  constexpr int num_elems = 16 / sizeof(nv_bfloat16);
-  constexpr int num_iters = (HEIGHT * WIDTH) / (TB_SIZE * num_elems);
-
-  for (int iter = 0; iter < num_iters; iter++) {
-    const int idx = (iter * TB_SIZE + tid) * num_elems;
-    const int row = idx / WIDTH;
-    const int col = idx % WIDTH;
-
-    // NOTE: perhaps we can move swizzle out of this loop as well
-    uint32_t dst_addr = swizzle<WIDTH * sizeof(nv_bfloat16)>(out + (row * WIDTH + col) * sizeof(nv_bfloat16));
-    cp_async(dst_addr, in + row * in_stride + col);
-  }
-}
