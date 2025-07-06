@@ -83,24 +83,34 @@ void matmul_v7_kernel(const __grid_constant__ CUtensorMap A_tensor_map,
   #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ barrier bar;
   if (tid == 0) {
-    init(&bar, TB_SIZE);
+    // mbarrier.init.shared::cta in PTX
+    init(&bar, TB_SIZE);  // TB_SIZE count
+
+    // fency.proxy.async.shared::cta in PTX
     cde::fence_proxy_async_shared_cta();
   }
   __syncthreads();
 
   const int num_k_iters = cdiv(K, BLOCK_K);
   for (int k_iter = 0; k_iter < num_k_iters; k_iter++) {
-    // 1st thread initiate TMA copy / cp.async.bulk
     barrier::arrival_token token;
     if (tid == 0) {
+      // 1st thread initiate TMA copy / cp.async.bulk
       cde::cp_async_bulk_tensor_2d_global_to_shared(A_smem, &A_tensor_map, k_iter * BLOCK_K, offset_m, bar);
       cde::cp_async_bulk_tensor_2d_global_to_shared(B_smem, &B_tensor_map, k_iter * BLOCK_K, offset_n, bar);
+
+      // expect-tx op, then arrive-on op
+      // mbarrier.arrive.expect_tx in PTX
       token = cuda::device::barrier_arrive_tx(bar, 1, (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16));
     } else {
+      // other threads just signal arrive
+      // mbarrier.arrive in PTX
       token = bar.arrive();
     }
 
-    // wait for global->shared to finish
+    // wait for TB_SIZE arrives i.e. global->shared to finish
+    // this will run a loop that keeps checking whether mbarrier has completed a phase
+    // mbarrier.try_wait in PTX
     bar.wait(std::move(token));
 
     // A shared->regs
