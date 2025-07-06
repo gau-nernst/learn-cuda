@@ -228,7 +228,7 @@ void attention_v4_kernel(
         // pack to P registers for next MMA
         // we need to change from m16n8 to m16k16
         nv_bfloat162 *this_P_regs = reinterpret_cast<nv_bfloat162 *>(P_regs[mma_id_q][mma_id_kv / 2]);
-        this_P_regs[(mma_id_kv % 2) * 2] = __float22bfloat162_rn({regs[0], regs[1]});
+        this_P_regs[(mma_id_kv % 2) * 2]     = __float22bfloat162_rn({regs[0], regs[1]});
         this_P_regs[(mma_id_kv % 2) * 2 + 1] = __float22bfloat162_rn({regs[2], regs[3]});
       }
 
@@ -273,14 +273,14 @@ void attention_v4_kernel(
       nv_bfloat16 *O_ptr = O + row * DIM + col;
 
       // divide by softmax denominator
-      float *this_O_regs = O_regs[mma_id_q][mma_id_d];
-      this_O_regs[0] /= rowsumexp[mma_id_q][0];
-      this_O_regs[1] /= rowsumexp[mma_id_q][0];
-      this_O_regs[2] /= rowsumexp[mma_id_q][1];
-      this_O_regs[3] /= rowsumexp[mma_id_q][1];
+      float *regs = O_regs[mma_id_q][mma_id_d];
+      regs[0] /= rowsumexp[mma_id_q][0];
+      regs[1] /= rowsumexp[mma_id_q][0];
+      regs[2] /= rowsumexp[mma_id_q][1];
+      regs[3] /= rowsumexp[mma_id_q][1];
 
-      reinterpret_cast<nv_bfloat162 *>(O_ptr)[0] = __float22bfloat162_rn({this_O_regs[0], this_O_regs[1]});
-      reinterpret_cast<nv_bfloat162 *>(O_ptr + 8 * DIM)[0] = __float22bfloat162_rn({this_O_regs[2], this_O_regs[3]});
+      reinterpret_cast<nv_bfloat162 *>(O_ptr)[0]           = __float22bfloat162_rn({regs[0], regs[1]});
+      reinterpret_cast<nv_bfloat162 *>(O_ptr + 8 * DIM)[0] = __float22bfloat162_rn({regs[2], regs[3]});
     }
 }
 
