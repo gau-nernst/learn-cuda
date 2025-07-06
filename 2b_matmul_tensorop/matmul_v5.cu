@@ -25,7 +25,7 @@ __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
 void matmul_v5_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
   constexpr int MMA_M = 16;
-  constexpr int MMA_N = 16;
+  constexpr int MMA_N = 8;
   constexpr int MMA_K = 16;
   static_assert(BLOCK_M % NUM_WARP_M == 0);
   static_assert(BLOCK_N % NUM_WARP_N == 0);
@@ -94,7 +94,7 @@ void matmul_v5_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
 
       // load B to registers
       uint32_t B_reg[NUM_MMA_N][num_B_regs];
-      for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
+      for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n += 2) {
         const uint32_t B_addr = B_shm_thread + mma_id_n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
         ldmatrix_x4(B_reg[mma_id_n], B_addr ^ (mma_id_k * MMA_K * sizeof(nv_bfloat16)));
       }
@@ -106,10 +106,8 @@ void matmul_v5_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
         ldmatrix_x4(A_reg, A_addr ^ (mma_id_k * MMA_K * sizeof(nv_bfloat16)));
 
         // call mma
-        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
+        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
           mma_m16n8k16(A_reg, B_reg[mma_id_n], acc[mma_id_m][mma_id_n]);
-          mma_m16n8k16(A_reg, B_reg[mma_id_n] + 2, acc[mma_id_m][mma_id_n] + 4);
-        }
       }
     }
     __syncthreads();
@@ -118,19 +116,15 @@ void matmul_v5_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
     B += BLOCK_K;
   }
 
-  const int a0_row = lane_id >> 2;
-  const int a0_col = (lane_id % 4) * 2;
-  C += a0_row * N + a0_col;
-
   for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
     for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-      nv_bfloat16 *C_local = C + (mma_id_m * MMA_M) * N + (mma_id_n * MMA_N);
-      float *regs = acc[mma_id_m][mma_id_n];
+      const int row = mma_id_m * MMA_M + (lane_id / 4);
+      const int col = mma_id_n * MMA_N + (lane_id % 4) * 2;
+      nv_bfloat16 *C_local = C + row * N + col;
 
-      reinterpret_cast<nv_bfloat162 *>(C_local)[0]             = __float22bfloat162_rn({regs[0], regs[1]});
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N)[0]     = __float22bfloat162_rn({regs[2], regs[3]});
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8)[0]         = __float22bfloat162_rn({regs[4], regs[5]});
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N + 8)[0] = __float22bfloat162_rn({regs[6], regs[7]});
+      float *regs = acc[mma_id_m][mma_id_n];
+      reinterpret_cast<nv_bfloat162 *>(C_local)[0]         = __float22bfloat162_rn({regs[0], regs[1]});
+      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N)[0] = __float22bfloat162_rn({regs[2], regs[3]});
     }
 }
 

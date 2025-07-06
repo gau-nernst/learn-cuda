@@ -25,7 +25,7 @@ __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
 void matmul_v6_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
   constexpr int MMA_M = 16;
-  constexpr int MMA_N = 16;
+  constexpr int MMA_N = 8;
   constexpr int MMA_K = 16;
   static_assert(BLOCK_M % NUM_WARP_M == 0);
   static_assert(BLOCK_N % NUM_WARP_N == 0);
@@ -62,8 +62,8 @@ void matmul_v6_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
   // convert shared memory address to 32-bit from the start
   extern __shared__ nv_bfloat16 shm[];
   const uint32_t shm_u32 = cvta_shared(shm);
-  const uint32_t A0_shm = shm_u32;
-  const uint32_t B0_shm = A0_shm + BLOCK_M * BLOCK_K * sizeof(nv_bfloat16);
+  const uint32_t A_shm = shm_u32;
+  const uint32_t B_shm = A_shm + BLOCK_M * BLOCK_K * sizeof(nv_bfloat16);
 
   constexpr int num_acc_regs = MMA_M * MMA_N / WARP_SIZE;
   constexpr int num_A_regs = MMA_M * MMA_K * sizeof(nv_bfloat16) / 4 / WARP_SIZE; // 4
@@ -76,106 +76,92 @@ void matmul_v6_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
   // also pre-compute swizzling
   const int A_offm = (warp_id_m * WARP_M) + (lane_id % 16);
   const int A_offk = (lane_id / 16) * 8;
-  const uint32_t A0_shm_thread = swizzle<BLOCK_K * sizeof(nv_bfloat16)>(A0_shm + (A_offm * BLOCK_K + A_offk) * sizeof(nv_bfloat16));
+  const uint32_t A_shm_thread = swizzle<BLOCK_K * sizeof(nv_bfloat16)>(A_shm + (A_offm * BLOCK_K + A_offk) * sizeof(nv_bfloat16));
 
   const int B_offn = (warp_id_n * WARP_N) + (lane_id % 8) + (lane_id / 16) * 8;
   const int B_offk = ((lane_id % 16) / 8) * 8;
-  const uint32_t B0_shm_thread = swizzle<BLOCK_K * sizeof(nv_bfloat16)>(B0_shm + (B_offn * BLOCK_K + B_offk) * sizeof(nv_bfloat16));
+  const uint32_t B_shm_thread = swizzle<BLOCK_K * sizeof(nv_bfloat16)>(B_shm + (B_offn * BLOCK_K + B_offk) * sizeof(nv_bfloat16));
 
   // pre-compute the address for each stage
-  uint32_t A_shm_thread[NUM_STAGES];
-  uint32_t B_shm_thread[NUM_STAGES];
+  uint32_t A_buffers[NUM_STAGES];
+  uint32_t B_buffers[NUM_STAGES];
   for (int stage = 0; stage < NUM_STAGES; stage++) {
-    A_shm_thread[stage] = A0_shm_thread + stage * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
-    B_shm_thread[stage] = B0_shm_thread + stage * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
+    A_buffers[stage] = A_shm_thread + stage * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
+    B_buffers[stage] = B_shm_thread + stage * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
   }
 
-  // initiate NUM_STAGES-1 async global->shared
-  auto global_to_shared = [&](int stage) {
-    const uint32_t A_shared = shm_u32 + stage * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16); // BLOCK_M, BLOCK_K
-    const uint32_t B_shared = A_shared + BLOCK_M * BLOCK_K * sizeof(nv_bfloat16);                    // BLOCK_N, BLOCK_K
-    global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, tid);
-    global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, tid);
+  const int num_k_iters = cdiv(K, BLOCK_K);
 
-    // mark this stage as a commit group
+  auto load_AB = [&](int k_iter) {
+    if (k_iter < num_k_iters) {
+      // select the correct shared memory buffer
+      const uint32_t A_shared = A_shm + (k_iter % NUM_STAGES) * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
+      const uint32_t B_shared = B_shm + (k_iter % NUM_STAGES) * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
+
+      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shared, tid);
+      global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shared, tid);
+
+      // A/B pointer tracks position for global->shared load
+      A += BLOCK_K;
+      B += BLOCK_K;
+    }
     cp_async_commit_group();
-
-    // NOTE: A and B pointers now track position for global->shared load
-    A += BLOCK_K;
-    B += BLOCK_K;
   };
 
-  // NOTE: we don't take care when num_k_iters < NUM_STAGES
+  // initiate NUM_STAGES-1 stages
   for (int stage = 0; stage < NUM_STAGES - 1; stage++)
-    global_to_shared(stage);
+    load_AB(stage);
 
   // loop invariance: there is always NUM_STAGES - 1 prefetch stages in-flight
   // thanks to pipelining, this loop now only has 1 __syncthreads()
-  for (int k_iter = 0; k_iter < K / BLOCK_K; k_iter++) {
-    if constexpr (NUM_STAGES > 1) {
-      // wait for the 1st commit group to finish i.e. FIFO
-      // this consumes 1 prefetch
-      cp_async_wait_group<NUM_STAGES - 2>();
-      __syncthreads(); // why can't we move this after prefetch?
+  for (int k_iter = 0; k_iter < num_k_iters; k_iter++) {
+    // wait for previous MMA to finish using the shared buffer
+    __syncthreads();
 
-      // prefetch the next stage. restore loop invariance
-      // NOTE: to avoid branching here, we can do K / BLOCK_K - NUM_STAGES + 1 in the mainloop
-      // and unroll the last NUM_STAGES-1 iterations.
-      // NOTE: the location of prefetch in main loop is important.
-      // imagine using 2 stages. if we don't issue prefetch immediately after wait_group above,
-      // global->shared is not busy anymore. for 3 stages, maybe issue global->shared later is fine?
-      const int prefetch_iter = k_iter + NUM_STAGES - 1;
-      if (prefetch_iter < (K / BLOCK_K))
-        global_to_shared(prefetch_iter % NUM_STAGES);
-      else
-        cp_async_commit_group();
-    } else {
-      // without pipelining
-      __syncthreads();
-      global_to_shared(0);
-      cp_async_wait_all();
-      __syncthreads();
-    }
+    // prefetch the next stage. add 1 more stage to the pipeline
+    load_AB(k_iter + NUM_STAGES - 1);
 
-    const int stage = k_iter % NUM_STAGES;
+    // wait for the 1st stage to finish. remove 1 stage from the pipeline
+    // -> restore loop invariance
+    cp_async_wait_group<NUM_STAGES - 1>();
+    __syncthreads();
 
-    // shared->registers
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++) {
+    // A shared->regs
+    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
       for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++) {
-        const uint32_t A_addr = A_shm_thread[stage] + mma_id_m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(A_regs[mma_id_k][mma_id_m], A_addr ^ (mma_id_k * MMA_K * sizeof(nv_bfloat16)));
+        uint32_t A_addr = A_buffers[k_iter % NUM_STAGES];
+        A_addr += mma_id_m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
+        A_addr ^= mma_id_k * MMA_K * sizeof(nv_bfloat16);
+        ldmatrix_x4(A_regs[mma_id_k][mma_id_m], A_addr);
       }
-      for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-        const uint32_t B_addr = B_shm_thread[stage] + mma_id_n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(B_regs[mma_id_k][mma_id_n], B_addr ^ (mma_id_k * MMA_K * sizeof(nv_bfloat16)));
+
+    // B shared->regs
+    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
+      for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n += 2) {
+        uint32_t B_addr = B_buffers[k_iter % NUM_STAGES];
+        B_addr += mma_id_n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
+        B_addr ^= mma_id_k * MMA_K * sizeof(nv_bfloat16);
+        ldmatrix_x4(B_regs[mma_id_k][mma_id_n], B_addr);
       }
-    }
 
     // do MMA. NUM_STAGES-1 prefetch stages are still on-going
     for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
       for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
-        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-          uint32_t *A_reg = A_regs[mma_id_k][mma_id_m];
-          uint32_t *B_reg = B_regs[mma_id_k][mma_id_n];
-          float *acc_reg = acc[mma_id_m][mma_id_n];
-          mma_m16n8k16(A_reg, B_reg, acc_reg);
-          mma_m16n8k16(A_reg, B_reg + 2, acc_reg + 4);
-        }
+        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
+          mma_m16n8k16(A_regs[mma_id_k][mma_id_m],
+                       B_regs[mma_id_k][mma_id_n],
+                       acc[mma_id_m][mma_id_n]);
   }
-
-  const int a0_row = lane_id >> 2;
-  const int a0_col = (lane_id % 4) * 2;
-  C += a0_row * N + a0_col;
 
   for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
     for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-      nv_bfloat16 *C_local = C + (mma_id_m * MMA_M) * N + (mma_id_n * MMA_N);
-      float *regs = acc[mma_id_m][mma_id_n];
+      const int row = mma_id_m * MMA_M + (lane_id / 4);
+      const int col = mma_id_n * MMA_N + (lane_id % 4) * 2;
+      nv_bfloat16 *C_local = C + row * N + col;
 
-      reinterpret_cast<nv_bfloat162 *>(C_local)[0]             = __float22bfloat162_rn({regs[0], regs[1]});
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N)[0]     = __float22bfloat162_rn({regs[2], regs[3]});
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8)[0]         = __float22bfloat162_rn({regs[4], regs[5]});
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N + 8)[0] = __float22bfloat162_rn({regs[6], regs[7]});
+      float *regs = acc[mma_id_m][mma_id_n];
+      reinterpret_cast<nv_bfloat162 *>(C_local)[0]         = __float22bfloat162_rn({regs[0], regs[1]});
+      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N)[0] = __float22bfloat162_rn({regs[2], regs[3]});
     }
 }
 

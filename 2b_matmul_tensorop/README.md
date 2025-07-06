@@ -16,14 +16,14 @@ TODO: TMA
 
 Kernel name                                            | TFLOPS | % of SOL
 -------------------------------------------------------|--------|----------
-CuBLAS 12.8 (via PyTorch)                              | 175.68 |   83.86%
-Inductor Triton (v3.3.1)                               | 203.16 |   96.97%
-v1 (block+warp tiling, vectorized load)                | 146.44 |   69.90%
-v2 (`cp.async`)                                        | 157.12 |   75.00%
-v3 (pad shared memory)                                 | 172.11 |   82.15%
-v4 (swizzle shared memory)                             | 191.83 |   91.57%
-v5 (`ldmatrix.x4` for B, optimize address computation) | 192.22 |   91.75%
-v5b (tune launch params)                               | 198.84 |   94.91%
+CuBLAS 12.8 (via PyTorch)                              | 176.89 |   84.44%
+Inductor Triton (v3.3.1)                               | 203.81 |   97.29%
+v1 (block+warp tiling, vectorized load)                | 147.44 |   70.38%
+v2 (`cp.async`)                                        | 157.67 |   75.26%
+v3 (pad shared memory)                                 | 172.47 |   82.33%
+v4 (swizzle shared memory)                             | 192.68 |   91.97%
+v5 (`ldmatrix.x4` for B, optimize address computation) | 200.03 |   95.48%
+v6 (2-stage pipelining)                                | 202.05 |   96.44%
 
 Lessons learned:
 - Inline PTX: instruction, outputs, inputs, constraints

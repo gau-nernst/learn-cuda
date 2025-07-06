@@ -173,18 +173,15 @@ void matmul_v1_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
   }
 
   // check output layout here
-  // https://docs.nvidia.com/cuda/parallel-thread-execution/#mma-1688-c-f16-f32
-  // m16n8k16 has the same layout
-  const int a0_row = lane_id / 4;
-  const int a0_col = (lane_id % 4) * 2;
-  C += a0_row * N + a0_col;
-
+  // https://docs.nvidia.com/cuda/parallel-thread-execution/#mma-16816-c
   // NOTE: we can do some warp shuffle to get coalesced write
   for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
     for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-      nv_bfloat16 *C_local = C + (mma_id_m * MMA_M) * N + (mma_id_n * MMA_N);
-      float *regs = acc[mma_id_m][mma_id_n];
+      const int row = mma_id_m * MMA_M + (lane_id / 4);
+      const int col = mma_id_n * MMA_N + (lane_id % 4) * 2;
+      nv_bfloat16 *C_local = C + row * N + col;
 
+      float *regs = acc[mma_id_m][mma_id_n];
       reinterpret_cast<nv_bfloat162 *>(C_local)[0]         = __float22bfloat162_rn({regs[0], regs[1]});  // c0 and c1
       reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N)[0] = __float22bfloat162_rn({regs[2], regs[3]});  // c2 and c3
     }
