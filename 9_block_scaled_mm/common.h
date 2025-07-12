@@ -35,26 +35,47 @@ uint32_t swizzle(uint32_t index) {
 template <int HEIGHT, int WIDTH, int TB_SIZE, typename T>
 __device__ inline
 void global_to_shared_swizzle(uint32_t dst, const T *src, int src_stride, int tid) {
+  static_assert(WIDTH * sizeof(T) >= 16);
   constexpr int num_elems = 16 / sizeof(T);
-  static_assert((HEIGHT * WIDTH) % (TB_SIZE * num_elems) == 0);
-  constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
+  // static_assert((HEIGHT * WIDTH) % (TB_SIZE * num_elems) == 0);
 
-  for (int iter = 0; iter < num_iters; iter++) {
-    const int idx = (iter * TB_SIZE + tid) * num_elems;
+  auto load = [&](int idx) {
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
 
     const uint32_t dst_addr = swizzle<WIDTH * sizeof(T)>(dst + (row * WIDTH + col) * sizeof(T));
     const T *src_addr = src + (row * src_stride + col);
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(dst_addr), "l"(src_addr));
+  };
+
+  constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
+  for (int iter = 0; iter < num_iters; iter++)
+    load((iter * TB_SIZE + tid) * num_elems);
+
+  // handle the case when tile size is not divisible by threadblock size
+  if constexpr ((HEIGHT * WIDTH) % (TB_SIZE * num_elems) != 0) {
+    const int idx = (num_iters * TB_SIZE + tid) * num_elems;
+    if (idx < HEIGHT * WIDTH)
+      load(idx);
   }
 }
 
+template <int num>
 __device__ inline
-void ldmatrix_x4(uint32_t regs[4], uint32_t addr) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.b16 {%0, %1, %2, %3}, [%4];"
-              : "=r"(regs[0]), "=r"(regs[1]), "=r"(regs[2]), "=r"(regs[3])
-              : "r"(addr));
+void ldmatrix(uint32_t *regs, uint32_t addr) {
+  static_assert(num == 1 || num == 2 || num == 4);
+  if constexpr (num == 1)
+    asm volatile("ldmatrix.sync.aligned.m8n8.x1.b16 {%0}, [%1];"
+                : "=r"(regs[0])
+                : "r"(addr));
+  else if constexpr (num == 2)
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.b16 {%0, %1}, [%2];"
+                : "=r"(regs[0]), "=r"(regs[1])
+                : "r"(addr));
+  else if constexpr (num == 4)
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.b16 {%0, %1, %2, %3}, [%4];"
+                : "=r"(regs[0]), "=r"(regs[1]), "=r"(regs[2]), "=r"(regs[3])
+                : "r"(addr));
 }
 
 __device__ inline

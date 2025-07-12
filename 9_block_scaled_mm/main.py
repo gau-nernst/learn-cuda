@@ -34,10 +34,13 @@ def cublas_scaled_mm(A: Tensor, B: Tensor, scale_A: Tensor, scale_B: Tensor):
 
 def permute_cublas_scale(scale: Tensor):
     M, N = scale.shape
-    scale = scale.view(M // 128, 128, N // 4, 4).transpose(1, 2)  # [M/128, N/4, 128, 4]
-    scale = scale.reshape(M // 128, N // 4, 4, 32, 4).transpose(
-        2, 3
-    )  # [M/128, N/4, 32, 4, 4]
+    scale = scale.view(M // 128, 4, 32, N // 4, 4).permute(0, 3, 2, 1, 4)  # [M/128,N/4,32,4,4]
+    return scale.contiguous()
+
+
+def permute_scale(scale: Tensor):
+    M, N = scale.shape
+    scale = scale.view(M // 32, 4, 8, N // 4, 4).permute(0, 2, 3, 1, 4)  # [M/32,8,N/4,4,4]
     return scale.contiguous()
 
 
@@ -100,9 +103,7 @@ def main():
         sol *= 2
 
     def bench_and_print(f, name):
-        # sleep to stabilize thermal
-        time.sleep(1)
-
+        time.sleep(1)  # stabilize thermal
         latency_ms = do_bench(lambda: f(A, B.T, scale_A, scale_B), return_mode="median")
         tflops = 2 * M * N * K / latency_ms / 1e9
         pct_sol = tflops / sol * 100
@@ -119,9 +120,15 @@ def main():
     torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)
     bench_and_print(cublas_scaled_mm, "CuBLAS")
 
-    for i in range(1):
+    for i in range(2):
         fn = getattr(module, f"mxfp8_mm_v{i + 1}")
-        output = fn(A, B.T, scale_A, scale_B)
+        if i + 1 == 2:
+            this_scale_A = permute_scale(scale_A)
+            this_scale_B = permute_scale(scale_B)
+        else:
+            this_scale_A = scale_A
+            this_scale_B = scale_B
+        output = fn(A, B.T, this_scale_A, this_scale_B)
         torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)
         bench_and_print(fn, f"v{i + 1}")
 
