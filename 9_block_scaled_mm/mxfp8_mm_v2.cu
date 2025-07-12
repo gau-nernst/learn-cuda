@@ -78,8 +78,6 @@ void mxfp8_mm_v2_kernel(const __nv_fp8_e4m3 *A,        // [M, K]
   for (int k_iter = 0; k_iter < num_k_iters; k_iter++) {
     global_to_shared_swizzle<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem, A, K, tid);
     global_to_shared_swizzle<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem, B, K, tid);
-    // global_to_shared_swizzle<BLOCK_M / 4, BLOCK_K / 8, TB_SIZE>(scale_A_smem, scale_A, K / 8, tid);
-    // global_to_shared_swizzle<BLOCK_N / 4, BLOCK_K / 8, TB_SIZE>(scale_B_smem, scale_B, K / 8, tid);
     global_to_shared_swizzle<BLOCK_M / 4, BLOCK_K / 8, TB_SIZE>(scale_A_smem, scale_A, K / 8, tid);
     global_to_shared_swizzle<BLOCK_N / 4, BLOCK_K / 8, TB_SIZE>(scale_B_smem, scale_B, K / 8, tid);
 
