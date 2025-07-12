@@ -174,8 +174,8 @@ void mxfp8_mm_v1(const __nv_fp8_e4m3 *A,        // [M, K]
   const int num_blocks = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
 
-  // 34/32 = (1 + 2/32), where 1/32 is the amount of each scale_A/B
-  const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K / 32 * 34;
+  // 33/32 = (1 + 1/32), where 1/32 is the amount of each scale_A/B
+  const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K / 32 * 33;
 
   auto kernel = mxfp8_mm_v1_kernel<BLOCK_M, BLOCK_N, NUM_WARP_M, NUM_WARP_N>;
   launch_kernel(kernel, num_blocks, TB_SIZE, smem_size, A, B, scale_A, scale_B, C, M, N, K);
