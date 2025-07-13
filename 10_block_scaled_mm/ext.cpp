@@ -18,6 +18,7 @@ typedef void MxFp8MmFn(const __nv_fp8_e4m3 *A,
 
 MxFp8MmFn mxfp8_mm_v1;
 MxFp8MmFn mxfp8_mm_v2;
+MxFp8MmFn mxfp8_mm_v3;
 
 template <MxFp8MmFn mxfp8_mm_fn>
 at::Tensor mxfp8_mm(const at::Tensor &A,
@@ -47,4 +48,5 @@ at::Tensor mxfp8_mm(const at::Tensor &A,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("mxfp8_mm_v1", &mxfp8_mm<mxfp8_mm_v1>);
   m.def("mxfp8_mm_v2", &mxfp8_mm<mxfp8_mm_v2>);
+  m.def("mxfp8_mm_v3", &mxfp8_mm<mxfp8_mm_v3>);
 }

@@ -9,6 +9,7 @@ import torch
 import torch.utils.cpp_extension
 from torch import Tensor
 from triton.testing import do_bench
+from torch._inductor.utils import do_bench_using_profiling
 
 torch.utils.cpp_extension.include_paths("cuda")
 CURRENT_DIR = Path(__file__).parent
@@ -104,7 +105,8 @@ def main():
 
     def bench_and_print(f, name):
         time.sleep(1)  # stabilize thermal
-        latency_ms = do_bench(lambda: f(A, B.T, scale_A, scale_B), return_mode="median")
+        # latency_ms = do_bench(lambda: f(A, B.T, scale_A, scale_B), return_mode="median")
+        latency_ms = do_bench_using_profiling(lambda: f(A, B.T, scale_A, scale_B))
         tflops = 2 * M * N * K / latency_ms / 1e9
         pct_sol = tflops / sol * 100
         print(f"{name}:\t{latency_ms:.4f} ms\t{tflops:.2f} TFLOPS\t{pct_sol:.2f}% SOL")
@@ -120,9 +122,9 @@ def main():
     torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)
     bench_and_print(cublas_scaled_mm, "CuBLAS")
 
-    for i in range(2):
+    for i in range(3):
         fn = getattr(module, f"mxfp8_mm_v{i + 1}")
-        if i + 1 == 2:
+        if i + 1 >= 2:
             this_scale_A = permute_scale(scale_A)
             this_scale_B = permute_scale(scale_B)
         else:
