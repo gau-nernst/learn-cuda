@@ -37,7 +37,6 @@ __device__ inline
 void global_to_shared_swizzle(uint32_t dst, const T *src, int src_stride, int tid) {
   static_assert(WIDTH * sizeof(T) >= 16);
   constexpr int num_elems = 16 / sizeof(T);
-  // static_assert((HEIGHT * WIDTH) % (TB_SIZE * num_elems) == 0);
 
   auto load = [&](int idx) {
     const int row = idx / WIDTH;

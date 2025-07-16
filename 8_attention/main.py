@@ -41,7 +41,6 @@ def main():
 
     # add a small offset so that output does not have a mean of zero,
     # which will result in large relative error
-    # F.sdpa doesn't use FA/CuDNN for 3D inputs
     def generate_input(*shape):
         return torch.randn(shape).add(0.5).bfloat16().cuda()
 
