@@ -9,16 +9,16 @@ Resources:
 
 Name | Description
 -----|-------------
-1\. [Vector addition](1_vector_addition/) | Simple example to get everything working.
-2a\. [Matrix multiplication SIMT](2a_matmul_simt/) | Block tiling, thread tiling, warp tiling.
-2b\. [Matrix multiplication TensorOp](2b_matmul_tensorop/) | Inline PTX, `cvta`, `ldmatrix`, `mma`.
-3\. [Sum](3_sum/) | Reduction in general.  Prepare for softmax (max and sum).
-4\. [Softmax](4_softmax) | Naive (safe) softmax, online softmax. `atomicCAS()`. Single-block and multi-block per row.
-5\. [FP6](5_fp6) | FP6 primitives (FP32/FP16/BF16<->FP6).
-6\. [Box blur](6_box_blur/) | 2D CUDA blocks/threads. TODO: optimize with separable filters, moving average.
-7\. [Optimizer](7_optimizer/)
-8\. [Attention](8_attention/) | Flash attention
-... quantization, gemv (split-K, stream-K), scan | TODO
+01\. [Vector addition](01_vector_addition/) | Simple example to get everything working.
+02a\. [Matrix multiplication SIMT](02a_matmul_simt/) | Block tiling, thread tiling, warp tiling.
+02b\. [Matrix multiplication TensorOp](02b_matmul_tensorop/) | Inline PTX, `cvta`, `ldmatrix`, `mma`.
+03\. [Sum](03_sum/) | Reduction in general.  Prepare for softmax (max and sum).
+04\. [Softmax](04_softmax/) | Naive (safe) softmax, online softmax. `atomicCAS()`. Single-block and multi-block per row.
+05\. [FP6](05_fp6/) | FP6 primitives (FP32/FP16/BF16<->FP6).
+06\. [Box blur](06_box_blur/) | 2D CUDA blocks/threads. TODO: optimize with separable filters, moving average.
+07\. [Attention](07_attention/) | Flash attention
+08\. [Row-scaled matmul](08_row_scaled_mm/) | Simple epilogue
+09\. [Block-scaled matmul](09_block_scaled_mm/) | MXFP8
 
 ```bash
 # profile a CUDA kernel
