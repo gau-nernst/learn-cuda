@@ -112,10 +112,10 @@ void launch_kernel(
   T *kernel,
   int num_blocks,
   int block_size,
-  int shm_size,
+  int smem_size,
   Args... args) {
-  if (shm_size > 48'000)
-    CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shm_size));
-  kernel<<<num_blocks, block_size, shm_size>>>(args...);
+  if (smem_size > 48'000)
+    CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+  kernel<<<num_blocks, block_size, smem_size>>>(args...);
   CUDA_CHECK(cudaGetLastError());
 }

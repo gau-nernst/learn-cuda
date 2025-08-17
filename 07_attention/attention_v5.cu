@@ -34,11 +34,11 @@ void attention_v5_kernel(
   V += bs_id * len_kv * DIM;
   O += (bs_id * num_q_blocks + q_block_id) * BLOCK_Q * DIM;
 
-  // we overlap Q_shm with (K_shm + V_shm), since we only need to load Q_shm once
-  extern __shared__ nv_bfloat16 shm[];
-  const uint32_t Q_shm = __cvta_generic_to_shared(shm);
-  const uint32_t K_shm = Q_shm;  // double buffer for K
-  const uint32_t V_shm = K_shm + 2 * BLOCK_KV * DIM * sizeof(nv_bfloat16);
+  // we overlap Q_smem with (K_smem + V_smem), since we only need to load Q_smem once
+  extern __shared__ nv_bfloat16 smem[];
+  const uint32_t Q_smem = __cvta_generic_to_shared(smem);
+  const uint32_t K_smem = Q_smem;  // double buffer for K
+  const uint32_t V_smem = K_smem + 2 * BLOCK_KV * DIM * sizeof(nv_bfloat16);
 
   // FA2: shard BLOCK_Q among all warps
   // replicate K and V on all warps
@@ -48,41 +48,37 @@ void attention_v5_kernel(
   constexpr int MMA_M = 16;
   constexpr int MMA_N = 8;
   constexpr int MMA_K = 16;
-  constexpr int num_A_regs = MMA_M * MMA_K * sizeof(nv_bfloat16) / 4 / WARP_SIZE;
-  constexpr int num_B_regs = MMA_N * MMA_K * sizeof(nv_bfloat16) / 4 / WARP_SIZE;
-  constexpr int num_acc_regs = MMA_M * MMA_N / WARP_SIZE;
 
   // set up registers
-  uint32_t Q_regs[WARP_Q / MMA_M][DIM / MMA_K][num_A_regs];
-  uint32_t K_regs[BLOCK_KV / MMA_N][DIM / MMA_K][num_B_regs];
+  uint32_t Q_rmem[WARP_Q / MMA_M][DIM / MMA_K][4];
+  uint32_t K_rmem[BLOCK_KV / MMA_N][DIM / MMA_K][2];
 
   // let compiler decide register reuse?
-  uint32_t P_regs[WARP_Q / MMA_M][BLOCK_KV / MMA_K][num_A_regs];
-  uint32_t V_regs[BLOCK_KV / MMA_K][DIM / MMA_N][num_B_regs];
+  uint32_t P_rmem[WARP_Q / MMA_M][BLOCK_KV / MMA_K][4];
+  uint32_t V_rmem[BLOCK_KV / MMA_K][DIM / MMA_N][2];
 
-  // we use the same registers for O_regs and PV_regs
-  // rescale O_regs once we obtain new rowmax, then accumulate to O_regs
-  float O_regs[WARP_Q / MMA_M][DIM / MMA_N][num_acc_regs] = {};
+  // rescale O_rmem once we obtain new rowmax, then accumulate to O_rmem for P @ V
+  float O_rmem[WARP_Q / MMA_M][DIM / MMA_N][4] = {};
 
   // pre-compute address and swizzling for ldmatrix
-  uint32_t Q_shm_thread, K_shm_thread, V_shm_thread;
+  uint32_t Q_smem_thread, K_smem_thread, V_smem_thread;
   {
     // A tile
     const int row_off = warp_id * WARP_Q + (lane_id % 16);
     const int col_off = lane_id / 16 * 8;
-    Q_shm_thread = swizzle<DIM * sizeof(nv_bfloat16)>(Q_shm + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
+    Q_smem_thread = swizzle<DIM * sizeof(nv_bfloat16)>(Q_smem + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
   }
   {
     // B tile
     const int row_off = lane_id % 8;
     const int col_off = lane_id / 8 * 8;
-    K_shm_thread = swizzle<DIM * sizeof(nv_bfloat16)>(K_shm + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
+    K_smem_thread = swizzle<DIM * sizeof(nv_bfloat16)>(K_smem + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
   }
   {
     // B tile trans
     const int row_off = lane_id % 16;
     const int col_off = lane_id / 16 * 8;
-    V_shm_thread = swizzle<DIM * sizeof(nv_bfloat16)>(V_shm + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
+    V_smem_thread = swizzle<DIM * sizeof(nv_bfloat16)>(V_smem + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
   }
 
   const float softmax_scale = rsqrtf(static_cast<float>(DIM));
@@ -96,7 +92,7 @@ void attention_v5_kernel(
   }
 
   // load Q [BLOCK_Q, DIM]
-  global_to_shared_swizzle<BLOCK_Q, DIM, TB_SIZE>(Q_shm, Q, DIM, tid);
+  global_to_shared_swizzle<BLOCK_Q, DIM, TB_SIZE>(Q_smem, Q, DIM, tid);
   asm volatile("cp.async.commit_group;");
   asm volatile("cp.async.wait_all;");
   __syncthreads();
@@ -104,10 +100,10 @@ void attention_v5_kernel(
   // shared -> registers
   for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
     for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++) {
-      uint32_t addr = Q_shm_thread;
+      uint32_t addr = Q_smem_thread;
       addr += mma_id_q * MMA_M * DIM * sizeof(nv_bfloat16);  // row
       addr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);  // col
-      ldmatrix_x4(Q_regs[mma_id_q][mma_id_d], addr);
+      ldmatrix_x4(Q_rmem[mma_id_q][mma_id_d], addr);
     }
   // we need a syncthreads() here so that we don't load K global->shared
   // before finishing loading Q shared->reg
@@ -118,7 +114,7 @@ void attention_v5_kernel(
   auto load_K = [&](int kv_id) {
     if (kv_id < num_kv_iter) {
       // double buffer for K
-      const uint32_t dst = K_shm + (kv_id % 2) * (BLOCK_KV * DIM * sizeof(nv_bfloat16));
+      const uint32_t dst = K_smem + (kv_id % 2) * (BLOCK_KV * DIM * sizeof(nv_bfloat16));
       global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(dst, K, DIM, tid);
       K += BLOCK_KV * DIM;
     }
@@ -126,7 +122,7 @@ void attention_v5_kernel(
   };
   auto load_V = [&](int kv_id) {
     // single buffer for V
-    const uint32_t dst = V_shm;
+    const uint32_t dst = V_smem;
     global_to_shared_swizzle<BLOCK_KV, DIM, TB_SIZE>(dst, V, DIM, tid);
     V += BLOCK_KV * DIM;
     asm volatile("cp.async.commit_group;");
@@ -136,10 +132,10 @@ void attention_v5_kernel(
   load_K(0);
 
   for (int kv_id = 0; kv_id < num_kv_iter; kv_id++) {
-    float QK_regs[WARP_Q / MMA_M][BLOCK_KV / MMA_N][num_acc_regs] = {};
+    float S_rmem[WARP_Q / MMA_M][BLOCK_KV / MMA_N][4] = {};
 
     // prefetch V
-    // __syncthreads() here is required to make sure we finish using V_shm
+    // __syncthreads() here is required to make sure we finish using V_smem
     // from the previous iteration, since there is only 1 shared buffer for V.
     __syncthreads();
     load_V(kv_id);
@@ -149,19 +145,19 @@ void attention_v5_kernel(
     __syncthreads();
     for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
       for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d += 2) {
-        uint32_t addr = K_shm_thread + (kv_id % 2) * (BLOCK_KV * DIM * sizeof(nv_bfloat16));
+        uint32_t addr = K_smem_thread + (kv_id % 2) * (BLOCK_KV * DIM * sizeof(nv_bfloat16));
         addr += mma_id_kv * MMA_N * DIM * sizeof(nv_bfloat16);  // row
         addr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);  // col
-        ldmatrix_x4(K_regs[mma_id_kv][mma_id_d], addr);
+        ldmatrix_x4(K_rmem[mma_id_kv][mma_id_d], addr);
       }
 
     // MMA S = Q @ K.T [BLOCK_Q, BLOCK_KV]
     for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
       for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
         for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++)
-          mma_m16n8k16(Q_regs[mma_id_q][mma_id_d],
-                       K_regs[mma_id_kv][mma_id_d],
-                       QK_regs[mma_id_q][mma_id_kv]);
+          mma_m16n8k16(Q_rmem[mma_id_q][mma_id_d],
+                       K_rmem[mma_id_kv][mma_id_d],
+                       S_rmem[mma_id_q][mma_id_kv]);
 
     // prefetch K
     load_K(kv_id + 1);
@@ -169,13 +165,13 @@ void attention_v5_kernel(
     for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++) {
       // apply softmax scale
       for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
-        for (int reg_id = 0; reg_id < num_acc_regs; reg_id++)
-          QK_regs[mma_id_q][mma_id_kv][reg_id] *= softmax_scale;
+        for (int reg_id = 0; reg_id < 4; reg_id++)
+          S_rmem[mma_id_q][mma_id_kv][reg_id] *= softmax_scale;
 
       // rowmax
       float this_rowmax[2];
       for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
-        float *regs = QK_regs[mma_id_q][mma_id_kv];
+        float *regs = S_rmem[mma_id_q][mma_id_kv];
         if (mma_id_kv == 0) {
           this_rowmax[0] = max(regs[0], regs[1]);  // c0 and c1
           this_rowmax[1] = max(regs[2], regs[3]);  // c2 and c3
@@ -200,10 +196,10 @@ void attention_v5_kernel(
       rescale[0] = __expf(rowmax[mma_id_q][0] - this_rowmax[0]);
       rescale[1] = __expf(rowmax[mma_id_q][1] - this_rowmax[1]);
       for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
-        O_regs[mma_id_q][mma_id_d][0] *= rescale[0];
-        O_regs[mma_id_q][mma_id_d][1] *= rescale[0];
-        O_regs[mma_id_q][mma_id_d][2] *= rescale[1];
-        O_regs[mma_id_q][mma_id_d][3] *= rescale[1];
+        O_rmem[mma_id_q][mma_id_d][0] *= rescale[0];
+        O_rmem[mma_id_q][mma_id_d][1] *= rescale[0];
+        O_rmem[mma_id_q][mma_id_d][2] *= rescale[1];
+        O_rmem[mma_id_q][mma_id_d][3] *= rescale[1];
       }
 
       // save new rowmax
@@ -213,7 +209,7 @@ void attention_v5_kernel(
       // rowsumexp
       float this_rowsumexp[2];
       for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
-        float *regs = QK_regs[mma_id_q][mma_id_kv];
+        float *regs = S_rmem[mma_id_q][mma_id_kv];
         regs[0] = __expf(regs[0] - rowmax[mma_id_q][0]);  // c0
         regs[1] = __expf(regs[1] - rowmax[mma_id_q][0]);  // c1
         regs[2] = __expf(regs[2] - rowmax[mma_id_q][1]);  // c2
@@ -229,9 +225,9 @@ void attention_v5_kernel(
 
         // pack to P registers for next MMA
         // we need to change from m16n8 to m16k16
-        nv_bfloat162 *this_P_regs = reinterpret_cast<nv_bfloat162 *>(P_regs[mma_id_q][mma_id_kv / 2]);
-        this_P_regs[(mma_id_kv % 2) * 2]     = __float22bfloat162_rn({regs[0], regs[1]});
-        this_P_regs[(mma_id_kv % 2) * 2 + 1] = __float22bfloat162_rn({regs[2], regs[3]});
+        nv_bfloat162 *this_P_rmem = reinterpret_cast<nv_bfloat162 *>(P_rmem[mma_id_q][mma_id_kv / 2]);
+        this_P_rmem[(mma_id_kv % 2) * 2]     = __float22bfloat162_rn({regs[0], regs[1]});
+        this_P_rmem[(mma_id_kv % 2) * 2 + 1] = __float22bfloat162_rn({regs[2], regs[3]});
       }
 
       // butterfly reduction within 4 threads
@@ -250,19 +246,19 @@ void attention_v5_kernel(
     __syncthreads();
     for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K; mma_id_kv++)
       for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d += 2) {
-        uint32_t addr = V_shm_thread;
+        uint32_t addr = V_smem_thread;
         addr += mma_id_kv * MMA_K * DIM * sizeof(nv_bfloat16);  // row
         addr ^= mma_id_d * MMA_N * sizeof(nv_bfloat16);  // col
-        ldmatrix_x4_trans(V_regs[mma_id_kv][mma_id_d], addr);
+        ldmatrix_x4_trans(V_rmem[mma_id_kv][mma_id_d], addr);
       }
 
-    // MMA P = S @ V [BLOCK_Q, DIM]
+    // MMA O += P @ V [BLOCK_Q, DIM]
     for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
       for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++)
         for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K; mma_id_kv++)
-          mma_m16n8k16(P_regs[mma_id_q][mma_id_kv],
-                       V_regs[mma_id_kv][mma_id_d],
-                       O_regs[mma_id_q][mma_id_d]);
+          mma_m16n8k16(P_rmem[mma_id_q][mma_id_kv],
+                       V_rmem[mma_id_kv][mma_id_d],
+                       O_rmem[mma_id_q][mma_id_d]);
   }
 
   // write to O
@@ -270,17 +266,16 @@ void attention_v5_kernel(
     for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
       const int row = warp_id * WARP_Q + mma_id_q * MMA_M + (lane_id / 4);
       const int col = mma_id_d * MMA_N + (lane_id % 4) * 2;
-      nv_bfloat16 *O_ptr = O + row * DIM + col;
 
       // divide by softmax denominator
-      float *regs = O_regs[mma_id_q][mma_id_d];
+      float *regs = O_rmem[mma_id_q][mma_id_d];
       regs[0] /= rowsumexp[mma_id_q][0];
       regs[1] /= rowsumexp[mma_id_q][0];
       regs[2] /= rowsumexp[mma_id_q][1];
       regs[3] /= rowsumexp[mma_id_q][1];
 
-      reinterpret_cast<nv_bfloat162 *>(O_ptr)[0]           = __float22bfloat162_rn({regs[0], regs[1]});
-      reinterpret_cast<nv_bfloat162 *>(O_ptr + 8 * DIM)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+      reinterpret_cast<nv_bfloat162 *>(O + (row + 0) * DIM + col)[0] = __float22bfloat162_rn({regs[0], regs[1]});
+      reinterpret_cast<nv_bfloat162 *>(O + (row + 8) * DIM + col)[0] = __float22bfloat162_rn({regs[2], regs[3]});
     }
 }
 
@@ -306,8 +301,8 @@ void attention_v5(
 
   const int num_blocks = bs * cdiv(len_q, BLOCK_Q);
   const int TB_SIZE = NUM_WARPS * WARP_SIZE;
-  const int shm_size = max(BLOCK_Q, BLOCK_KV * 3) * DIM * sizeof(nv_bfloat16);
+  const int smem_size = max(BLOCK_Q, BLOCK_KV * 3) * DIM * sizeof(nv_bfloat16);
 
   auto kernel = attention_v5_kernel<BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS>;
-  launch_kernel(kernel, num_blocks, TB_SIZE, shm_size, Q, K, V, O, bs, len_q, len_kv);
+  launch_kernel(kernel, num_blocks, TB_SIZE, smem_size, Q, K, V, O, bs, len_q, len_kv);
 }
