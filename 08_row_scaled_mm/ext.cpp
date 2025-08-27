@@ -9,24 +9,21 @@
   CHECK_CUDA(x);                                                                                                       \
   CHECK_CONTIGUOUS(x)
 
-typedef void Int8MmFn(const int8_t *A,
-                      const int8_t *B,
-                      const float *scale_A,
-                      const float *scale_B,
-                      nv_bfloat16 *C,
-                      int M, int N, int K);
+template <typename input_type>
+using ScaledMmFn = void(const input_type *A,
+                        const input_type *B,
+                        const float *scale_A,
+                        const float *scale_B,
+                        nv_bfloat16 *C,
+                        int M, int N, int K);
 
-typedef void Fp8MmFn(const __nv_fp8_e4m3 *A,
-                     const __nv_fp8_e4m3 *B,
-                     const float *scale_A,
-                     const float *scale_B,
-                     nv_bfloat16 *C,
-                     int M, int N, int K);
+using Int8ScaledMmFn = ScaledMmFn<int8_t>;
+using Fp8ScaledMmFn = ScaledMmFn<__nv_fp8_e4m3>;
 
-Int8MmFn row_scaled_mm_v1;
-Fp8MmFn row_scaled_mm_v1;
+Int8ScaledMmFn row_scaled_mm_v1;
+Fp8ScaledMmFn row_scaled_mm_v1;
 
-template <Int8MmFn int8_mm_fn, Fp8MmFn fp8_mm_fn>
+template <Int8ScaledMmFn int8_mm_fn, Fp8ScaledMmFn fp8_mm_fn>
 at::Tensor row_scaled_mm(const at::Tensor &A,
                          const at::Tensor &B,
                          const at::Tensor &scale_A,
