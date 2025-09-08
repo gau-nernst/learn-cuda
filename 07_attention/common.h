@@ -68,28 +68,28 @@ void global_to_shared_swizzle(uint32_t dst, const nv_bfloat16 *src, int src_stri
 
 __device__ inline
 void ldmatrix_x2(uint32_t regs[2], uint32_t addr) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x2.b16 {%0, %1}, [%2];"
+  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
               : "=r"(regs[0]), "=r"(regs[1])
               : "r"(addr));
 }
 
 __device__ inline
 void ldmatrix_x4(uint32_t regs[4], uint32_t addr) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.b16 {%0, %1, %2, %3}, [%4];"
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
               : "=r"(regs[0]), "=r"(regs[1]), "=r"(regs[2]), "=r"(regs[3])
               : "r"(addr));
 }
 
 __device__ inline
 void ldmatrix_x2_trans(uint32_t regs[2], uint32_t addr) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.b16 {%0, %1}, [%2];"
+  asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];"
               : "=r"(regs[0]), "=r"(regs[1])
               : "r"(addr));
 }
 
 __device__ inline
 void ldmatrix_x4_trans(uint32_t regs[4], uint32_t addr) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.b16 {%0, %1, %2, %3}, [%4];"
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];"
               : "=r"(regs[0]), "=r"(regs[1]), "=r"(regs[2]), "=r"(regs[3])
               : "r"(addr));
 }
