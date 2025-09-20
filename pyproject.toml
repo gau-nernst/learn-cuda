@@ -1,7 +1,6 @@
-[tool.black]
+[tool.ruff]
 line-length = 120
 
-[tool.isort]
-profile = "black"
-line_length = 120
-lines_after_imports = 2
+[tool.ruff.lint]
+extend-select = ["I"]
+extend-ignore = ["F401"]

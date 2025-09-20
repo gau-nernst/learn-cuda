@@ -78,9 +78,7 @@ def main():
         latency_ms = do_bench(lambda: f(*args), return_mode="median")
         tflops = 4 * bs * nh * lq * lkv * head_dim / latency_ms / 1e9
         pct_sol = tflops / sol * 100
-        results.append(
-            [name, round(latency_ms, 4), round(tflops, 2), round(pct_sol, 2)]
-        )
+        results.append([name, round(latency_ms, 4), round(tflops, 2), round(pct_sol, 2)])
 
     out_ref = F.scaled_dot_product_attention(Q, K, V)
 
@@ -90,9 +88,7 @@ def main():
         bench_and_print(F.scaled_dot_product_attention, "F.sdpa() - CuDNN", Q, K, V)
 
     if flash_attn_func is not None:
-        out = flash_attn_func(
-            Q.transpose(1, 2), K.transpose(1, 2), V.transpose(1, 2)
-        ).transpose(1, 2)
+        out = flash_attn_func(Q.transpose(1, 2), K.transpose(1, 2), V.transpose(1, 2)).transpose(1, 2)
         torch.testing.assert_close(out, out_ref)
         bench_and_print(
             flash_attn_func,

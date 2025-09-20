@@ -3,7 +3,6 @@ import os
 import time
 from pathlib import Path
 
-
 os.environ["TORCH_CUDA_ARCH_LIST"] = "12.0a"
 
 import torch

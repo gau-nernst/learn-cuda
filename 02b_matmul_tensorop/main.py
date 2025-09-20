@@ -34,9 +34,7 @@ def main():
     print(f"{M=}, {N=}, {K=}")
     A = torch.randn(M, K).bfloat16().cuda()
     B = torch.randn(N, K).bfloat16().cuda().T
-    inductor_mm = torch.compile(
-        torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False
-    )
+    inductor_mm = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
 
     if args.profile is not None:
         if args.profile == "cublas":

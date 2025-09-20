@@ -8,8 +8,8 @@ os.environ["TORCH_CUDA_ARCH_LIST"] = "12.0a"
 import torch
 import torch.utils.cpp_extension
 from torch import Tensor
-from triton.testing import do_bench
 from torch._inductor.utils import do_bench_using_profiling
+from triton.testing import do_bench
 
 torch.utils.cpp_extension.include_paths("cuda")
 CURRENT_DIR = Path(__file__).parent
@@ -47,9 +47,7 @@ def permute_scale(scale: Tensor):
 
 def ref_scaled_mm(A: Tensor, B: Tensor, scale_A: Tensor, scale_B: Tensor):
     A_f32 = (A.float().unflatten(1, (-1, 32)) * scale_A.float().unsqueeze(2)).flatten(1)
-    B_f32 = (B.T.float().unflatten(1, (-1, 32)) * scale_B.float().unsqueeze(2)).flatten(
-        1
-    )
+    B_f32 = (B.T.float().unflatten(1, (-1, 32)) * scale_B.float().unsqueeze(2)).flatten(1)
     return (A_f32 @ B_f32.T).bfloat16()
 
 
@@ -71,12 +69,8 @@ def main():
             scale = torch.randn(M, N // 32).div(448).to(torch.float8_e8m0fnu)
 
         elif args.format == "nvfp4":
-            data_lp = torch.randint(-128, 127, size=(M, N // 2), dtype=torch.int8).view(
-                torch.float4_e2m1fn_x2
-            )
-            scale = (
-                torch.randn(M, N // 16).div(6).clip(-448, 448).to(torch.float8_e4m3fn)
-            )
+            data_lp = torch.randint(-128, 127, size=(M, N // 2), dtype=torch.int8).view(torch.float4_e2m1fn_x2)
+            scale = torch.randn(M, N // 16).div(6).clip(-448, 448).to(torch.float8_e4m3fn)
 
         else:
             raise ValueError(f"Unsupported {args.format=}")

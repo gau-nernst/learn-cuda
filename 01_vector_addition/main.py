@@ -1,7 +1,6 @@
 import torch
 import torch.utils.cpp_extension
 
-
 module = torch.utils.cpp_extension.load(
     "module",
     sources=["add.cu"],
