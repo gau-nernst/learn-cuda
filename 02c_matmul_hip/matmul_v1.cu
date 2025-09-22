@@ -157,8 +157,8 @@ void matmul_kernel(
   __syncthreads();
   for (int mma_id_m = 0; mma_id_m < WARP_M / MMA_M; mma_id_m++)
     for (int mma_id_n = 0; mma_id_n < WARP_N / MMA_N; mma_id_n++) {
-      const int row = (lane_id / 16) * 4;
-      const int col = lane_id % 16;
+      const int row = mma_id_m * MMA_M + (lane_id / 16) * 4;
+      const int col = mma_id_n * MMA_N + (lane_id % 16);
 
       my_float4 data = C_rmem[mma_id_m][mma_id_n];
       C_gmem[(row + 0) * N + col] = __float2bfloat16(data[0]);
