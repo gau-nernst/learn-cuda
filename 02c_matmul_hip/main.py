@@ -27,10 +27,11 @@ def main(args):
     B = torch.randn(N, K, dtype=dtype).cuda().T
 
     if args.profile is not None:
-        f = dict(
-            pt=torch.mm,
-            v1=ops.matmul_v1,
-        )[args.profile]
+        if args.profile == "pt":
+            f = torch.mm
+        else:
+            f = getattr(ops, f"matmul_{args.profile}")
+
         f(A, B)
         return
 
@@ -46,7 +47,8 @@ def main(args):
         print(f"{name}: {tflops:.2f} TFLOPS, {diff}")
 
     bench("PyTorch", torch.mm)
-    bench("v1", ops.matmul_v1)
+    bench("v1a", ops.matmul_v1a)
+    bench("v1b", ops.matmul_v1b)
 
 
 if __name__ == "__main__":

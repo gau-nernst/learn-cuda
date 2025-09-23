@@ -7,7 +7,8 @@
 
 using MatmulFunc = void(const __hip_bfloat16 *, const __hip_bfloat16 *, __hip_bfloat16 *, int, int, int, hipStream_t);
 
-MatmulFunc matmul_v1;
+MatmulFunc matmul_v1a;
+MatmulFunc matmul_v1b;
 
 template <MatmulFunc matmul_raw>
 at::Tensor matmul(const at::Tensor& A, const at::Tensor& B) {
@@ -20,6 +21,7 @@ at::Tensor matmul(const at::Tensor& A, const at::Tensor& B) {
   const int K = A.size(1);
 
   at::Tensor C = at::empty({M, N}, A.options());
+  // at::Tensor C = at::zeros({M, N}, A.options());  // for correctness check
 
   auto A_gmem = reinterpret_cast<const __hip_bfloat16 *>(A.data_ptr());
   auto B_gmem = reinterpret_cast<const __hip_bfloat16 *>(B.data_ptr());
@@ -32,6 +34,9 @@ at::Tensor matmul(const at::Tensor& A, const at::Tensor& B) {
 }
 
 TORCH_LIBRARY(hip_matmul, m) {
-  m.def("matmul_v1(Tensor A, Tensor B) -> Tensor");
-  m.impl("matmul_v1", at::kCUDA, &matmul<matmul_v1>);
+  m.def("matmul_v1a(Tensor A, Tensor B) -> Tensor");
+  m.def("matmul_v1b(Tensor A, Tensor B) -> Tensor");
+
+  m.impl("matmul_v1a", at::kCUDA, &matmul<matmul_v1a>);
+  m.impl("matmul_v1b", at::kCUDA, &matmul<matmul_v1b>);
 }

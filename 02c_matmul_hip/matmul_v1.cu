@@ -1,7 +1,7 @@
 #include "common.h"
 #include <hip/hip_bf16.h>
 
-template <int HEIGHT, int WIDTH, int TB_SIZE, typename T>
+template <int HEIGHT, int WIDTH, int SMEM_STRIDE, int TB_SIZE, typename T>
 __device__
 void gmem_to_smem(T *dst, const T *src, int src_stride, int tid) {
   // TODO: figure out optimal load width for MI300X
@@ -15,11 +15,11 @@ void gmem_to_smem(T *dst, const T *src, int src_stride, int tid) {
     const int col = idx % WIDTH;
 
     const float4 data = reinterpret_cast<const float4 *>(src + row * src_stride + col)[0];
-    reinterpret_cast<float4 *>(dst + row * WIDTH + col)[0] = data;
+    reinterpret_cast<float4 *>(dst + row * SMEM_STRIDE + col)[0] = data;
   }
 }
 
-template<int BLOCK_M, int BLOCK_N, int BLOCK_K, int GROUP_M, int NUM_WARP_M, int NUM_WARP_N>
+template<int BLOCK_M, int BLOCK_N, int BLOCK_K, int SMEM_STRIDE, int GROUP_M, int NUM_WARP_M, int NUM_WARP_N>
 __global__
 void matmul_v1_kernel(
   const __hip_bfloat16 *A_gmem,
@@ -66,33 +66,33 @@ void matmul_v1_kernel(
   // shared memory
   extern __shared__ __hip_bfloat16 smem[];
   __hip_bfloat16 *A_smem = smem;
-  __hip_bfloat16 *B_smem = A_smem + BLOCK_M * BLOCK_K;
+  __hip_bfloat16 *B_smem = A_smem + BLOCK_M * SMEM_STRIDE;
 
   // pre-compute offset for smem->rmem
   __hip_bfloat16 *A_smem_thread, *B_smem_thread;
   {
     const int row = (warp_id_m * WARP_M) + (lane_id % 16);
     const int col = (lane_id / 16) * 4;
-    A_smem_thread = A_smem + row * BLOCK_K + col;
+    A_smem_thread = A_smem + row * SMEM_STRIDE + col;
   }
   {
     const int row = (warp_id_n * WARP_N) + (lane_id % 16);
     const int col = (lane_id / 16) * 4;
-    B_smem_thread = B_smem + row * BLOCK_K + col;
+    B_smem_thread = B_smem + row * SMEM_STRIDE + col;
   }
 
   // register memory
   // do it this way to use mfma intrinsic
-  my_short4 A_rmem[WARP_M / MMA_M][BLOCK_K / MMA_K];
-  my_short4 B_rmem[WARP_N / MMA_N][BLOCK_K / MMA_K];
-  my_float4 C_rmem[WARP_M / MMA_M][WARP_N / MMA_N] = {};
+  s16x4 A_rmem[WARP_M / MMA_M][BLOCK_K / MMA_K];
+  s16x4 B_rmem[WARP_N / MMA_N][BLOCK_K / MMA_K];
+  fp32x4 C_rmem[WARP_M / MMA_M][WARP_N / MMA_N] = {};
 
   const int num_k_iters = cdiv(K, BLOCK_K);
   for (int iter_k = 0; iter_k < num_k_iters; iter_k++) {
     // gmem->smem
     __syncthreads();
-    gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem, A_gmem, K, tid);
-    gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem, B_gmem, K, tid);
+    gmem_to_smem<BLOCK_M, BLOCK_K, SMEM_STRIDE, TB_SIZE>(A_smem, A_gmem, K, tid);
+    gmem_to_smem<BLOCK_N, BLOCK_K, SMEM_STRIDE, TB_SIZE>(B_smem, B_gmem, K, tid);
     A_gmem += BLOCK_K;
     B_gmem += BLOCK_K;
 
@@ -106,15 +106,15 @@ void matmul_v1_kernel(
       for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k++) {
         const int row = mma_id_m * MMA_M;
         const int col = mma_id_k * MMA_K;
-        __hip_bfloat16 *addr = A_smem_thread + row * BLOCK_K + col;
-        A_rmem[mma_id_m][mma_id_k] = reinterpret_cast<my_short4 *>(addr)[0];
+        __hip_bfloat16 *addr = A_smem_thread + row * SMEM_STRIDE + col;
+        A_rmem[mma_id_m][mma_id_k] = reinterpret_cast<s16x4 *>(addr)[0];
       }
     for (int mma_id_n = 0; mma_id_n < WARP_N / MMA_N; mma_id_n++)
       for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k++) {
         const int row = mma_id_n * MMA_N;
         const int col = mma_id_k * MMA_K;
-        __hip_bfloat16 *addr = B_smem_thread + row * BLOCK_K + col;
-        B_rmem[mma_id_n][mma_id_k] = reinterpret_cast<my_short4 *>(addr)[0];
+        __hip_bfloat16 *addr = B_smem_thread + row * SMEM_STRIDE + col;
+        B_rmem[mma_id_n][mma_id_k] = reinterpret_cast<s16x4 *>(addr)[0];
       }
 
     // mma
@@ -142,7 +142,7 @@ void matmul_v1_kernel(
       const int row = mma_id_m * MMA_M + (lane_id / 16) * 4;
       const int col = mma_id_n * MMA_N + (lane_id % 16);
 
-      my_float4 data = C_rmem[mma_id_m][mma_id_n];
+      fp32x4 data = C_rmem[mma_id_m][mma_id_n];
       C_gmem[(row + 0) * N + col] = __float2bfloat16(data[0]);
       C_gmem[(row + 1) * N + col] = __float2bfloat16(data[1]);
       C_gmem[(row + 2) * N + col] = __float2bfloat16(data[2]);
@@ -150,7 +150,7 @@ void matmul_v1_kernel(
     }
 }
 
-void matmul_v1(
+void matmul_v1a(
   const __hip_bfloat16 *A,
   const __hip_bfloat16 *B,
         __hip_bfloat16 *C,
@@ -160,6 +160,7 @@ void matmul_v1(
   constexpr int BLOCK_M = 128;
   constexpr int BLOCK_N = 128;
   constexpr int BLOCK_K = 64;
+  constexpr int SMEM_STRIDE = BLOCK_K;
   constexpr int GROUP_M = 1;
 
   constexpr int NUM_WARP_M = 2;
@@ -172,6 +173,33 @@ void matmul_v1(
   const int tb_size = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(__hip_bfloat16);
 
-  matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M, NUM_WARP_M, NUM_WARP_N>
+  matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, SMEM_STRIDE, GROUP_M, NUM_WARP_M, NUM_WARP_N>
+    <<<grid_size, tb_size, smem_size, stream>>>(A, B, C, M, N, K);
+}
+
+void matmul_v1b(
+  const __hip_bfloat16 *A,
+  const __hip_bfloat16 *B,
+        __hip_bfloat16 *C,
+  int M, int N, int K,
+  hipStream_t stream
+) {
+  constexpr int BLOCK_M = 128;
+  constexpr int BLOCK_N = 128;
+  constexpr int BLOCK_K = 64;
+  constexpr int SMEM_STRIDE = BLOCK_K + 8;
+  constexpr int GROUP_M = 1;
+
+  constexpr int NUM_WARP_M = 2;
+  constexpr int NUM_WARP_N = 2;
+
+  const int grid_m = cdiv(M, BLOCK_M);
+  const int grid_n = cdiv(N, BLOCK_N);
+  const int grid_size = grid_m * grid_n;
+
+  const int tb_size = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
+  const int smem_size = (BLOCK_M + BLOCK_N) * SMEM_STRIDE * sizeof(__hip_bfloat16);
+
+  matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, SMEM_STRIDE, GROUP_M, NUM_WARP_M, NUM_WARP_N>
     <<<grid_size, tb_size, smem_size, stream>>>(A, B, C, M, N, K);
 }

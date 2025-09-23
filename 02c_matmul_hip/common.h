@@ -1,6 +1,6 @@
 // for mfma intrinsics later
-using my_short4 = short __attribute__((__vector_size__(4 * sizeof(short))));
-using my_float4 = float __attribute__((__vector_size__(4 * sizeof(float))));
+using s16x4 = short __attribute__((__vector_size__(4 * sizeof(short))));
+using fp32x4 = float __attribute__((__vector_size__(4 * sizeof(float))));
 
 constexpr int WARP_SIZE = 64;
 
