@@ -40,7 +40,7 @@ void rmem_to_smem(T *dst, const T *src, int tid) {
   }
 }
 
-template<int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N>
+template<int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, bool WIDE_SMEM_LOAD>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE)
 __global__
 void matmul_v3_kernel(
@@ -90,24 +90,46 @@ void matmul_v3_kernel(
 
   auto mma = [&]() {
     // smem->rmem
-    // TODO: use wider load?
-    // NOTE: for some reasons, factoring out swizzle out of the main loop is a bit slower.
-    for (int mma_id_m = 0; mma_id_m < WARP_M / MMA_M; mma_id_m++)
-      for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k++) {
-        const int row = (warp_id_m * WARP_M) + (mma_id_m * MMA_M) + (lane_id % 16);
-        const int col = (mma_id_k * MMA_K) + (lane_id / 16) * 4;
-        const int swizzled_col = swizzle<BLOCK_K>(row, col);
-        __hip_bfloat16 *addr = A_smem + (row * BLOCK_K + swizzled_col);
-        A_rmem[mma_id_m][mma_id_k] = reinterpret_cast<s16x4 *>(addr)[0];
-      }
-    for (int mma_id_n = 0; mma_id_n < WARP_N / MMA_N; mma_id_n++)
-      for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k++) {
-        const int row = (warp_id_n * WARP_N) + (mma_id_n * MMA_N) + (lane_id % 16);
-        const int col = (mma_id_k * MMA_K) + (lane_id / 16) * 4;
-        const int swizzled_col = swizzle<BLOCK_K>(row, col);
-        __hip_bfloat16 *addr = B_smem + (row * BLOCK_K + swizzled_col);
-        B_rmem[mma_id_n][mma_id_k] = reinterpret_cast<s16x4 *>(addr)[0];
-      }
+    if constexpr (WIDE_SMEM_LOAD) {
+      // each thread does 16-byte load. this still works because of mfma input layout
+      // -> we reorder how we consume K within a warp tile.
+      // TODO: try factoring out swizzling again?
+      for (int mma_id_m = 0; mma_id_m < WARP_M / MMA_M; mma_id_m++)
+        for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k += 2) {  // increment by 2 instead of 1
+          const int row = (warp_id_m * WARP_M) + (mma_id_m * MMA_M) + (lane_id % 16);
+          const int col = (mma_id_k * MMA_K) + (lane_id / 16) * 8;  // times 8 instead of 4
+          const int swizzled_col = swizzle<BLOCK_K>(row, col);
+          __hip_bfloat16 *addr = A_smem + (row * BLOCK_K + swizzled_col);
+          reinterpret_cast<s16x8 *>(&A_rmem[mma_id_m][mma_id_k])[0] = reinterpret_cast<s16x8 *>(addr)[0];
+        }
+      for (int mma_id_n = 0; mma_id_n < WARP_N / MMA_N; mma_id_n++)
+        for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k += 2) {
+          const int row = (warp_id_n * WARP_N) + (mma_id_n * MMA_N) + (lane_id % 16);
+          const int col = (mma_id_k * MMA_K) + (lane_id / 16) * 8;
+          const int swizzled_col = swizzle<BLOCK_K>(row, col);
+          __hip_bfloat16 *addr = B_smem + (row * BLOCK_K + swizzled_col);
+          reinterpret_cast<s16x8 *>(&B_rmem[mma_id_n][mma_id_k])[0] = reinterpret_cast<s16x8 *>(addr)[0];
+        }
+    }
+    else {
+      // each thread does 8-byte load, aligning with mfma input layout
+      for (int mma_id_m = 0; mma_id_m < WARP_M / MMA_M; mma_id_m++)
+        for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k++) {
+          const int row = (warp_id_m * WARP_M) + (mma_id_m * MMA_M) + (lane_id % 16);
+          const int col = (mma_id_k * MMA_K) + (lane_id / 16) * 4;
+          const int swizzled_col = swizzle<BLOCK_K>(row, col);
+          __hip_bfloat16 *addr = A_smem + (row * BLOCK_K + swizzled_col);
+          A_rmem[mma_id_m][mma_id_k] = reinterpret_cast<s16x4 *>(addr)[0];
+        }
+      for (int mma_id_n = 0; mma_id_n < WARP_N / MMA_N; mma_id_n++)
+        for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k++) {
+          const int row = (warp_id_n * WARP_N) + (mma_id_n * MMA_N) + (lane_id % 16);
+          const int col = (mma_id_k * MMA_K) + (lane_id / 16) * 4;
+          const int swizzled_col = swizzle<BLOCK_K>(row, col);
+          __hip_bfloat16 *addr = B_smem + (row * BLOCK_K + swizzled_col);
+          B_rmem[mma_id_n][mma_id_k] = reinterpret_cast<s16x4 *>(addr)[0];
+        }
+    }
 
     // mma
     // https://github.com/ROCm/composable_kernel/blob/rocm-7.0.1/include/ck/utility/amd_xdlops.hpp
@@ -173,7 +195,7 @@ void matmul_v3_kernel(
     }
 }
 
-void matmul_v3(
+void matmul_v3a(
   const __hip_bfloat16 *A,
   const __hip_bfloat16 *B,
         __hip_bfloat16 *C,
@@ -186,6 +208,7 @@ void matmul_v3(
 
   constexpr int NUM_WARP_M = 2;
   constexpr int NUM_WARP_N = 2;
+  constexpr int WIDE_SMEM_LOAD = false;
 
   const int grid_m = cdiv(M, BLOCK_M);
   const int grid_n = cdiv(N, BLOCK_N);
@@ -194,6 +217,32 @@ void matmul_v3(
   const int tb_size = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(__hip_bfloat16);
 
-  matmul_v3_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N>
+  matmul_v3_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, WIDE_SMEM_LOAD>
+    <<<grid_size, tb_size, smem_size, stream>>>(A, B, C, M, N, K);
+}
+
+void matmul_v3b(
+  const __hip_bfloat16 *A,
+  const __hip_bfloat16 *B,
+        __hip_bfloat16 *C,
+  int M, int N, int K,
+  hipStream_t stream
+) {
+  constexpr int BLOCK_M = 128;
+  constexpr int BLOCK_N = 128;
+  constexpr int BLOCK_K = 64;
+
+  constexpr int NUM_WARP_M = 2;
+  constexpr int NUM_WARP_N = 2;
+  constexpr int WIDE_SMEM_LOAD = true;
+
+  const int grid_m = cdiv(M, BLOCK_M);
+  const int grid_n = cdiv(N, BLOCK_N);
+  const int grid_size = grid_m * grid_n;
+
+  const int tb_size = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
+  const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(__hip_bfloat16);
+
+  matmul_v3_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, WIDE_SMEM_LOAD>
     <<<grid_size, tb_size, smem_size, stream>>>(A, B, C, M, N, K);
 }
