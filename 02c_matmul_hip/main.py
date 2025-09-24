@@ -52,6 +52,7 @@ def main(args):
     bench("v1a", ops.matmul_v1a)
     bench("v1b", ops.matmul_v1b)
     bench("v2", ops.matmul_v2)
+    bench("v3", ops.matmul_v3)
 
 
 if __name__ == "__main__":

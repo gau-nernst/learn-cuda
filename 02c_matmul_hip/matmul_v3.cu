@@ -1,9 +1,10 @@
 #include "common.h"
 #include <hip/hip_bf16.h>
 
+// similar to gmem_to_smem without swizzling
 template <int HEIGHT, int WIDTH, int TB_SIZE, typename T>
 __device__
-void gmem_to_smem(T *dst, const T *src, int src_stride, int tid) {
+void gmem_to_rmem(T *dst, const T *src, int src_stride, int tid) {
   using load_type = float4;
   constexpr int multiplier = sizeof(load_type) / sizeof(T);
   static_assert((HEIGHT * WIDTH) % (TB_SIZE * multiplier) == 0);
@@ -14,8 +15,26 @@ void gmem_to_smem(T *dst, const T *src, int src_stride, int tid) {
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
 
-    const load_type data = reinterpret_cast<const load_type *>(src + (row * src_stride + col))[0];
+    const load_type data = reinterpret_cast<const load_type *>(src + row * src_stride + col)[0];
+    reinterpret_cast<load_type *>(dst + i * multiplier)[0] = data;  // DIFF
+  }
+}
 
+// similar gmem_to_smem with swizzling
+template <int HEIGHT, int WIDTH, int TB_SIZE, typename T>
+__device__
+void rmem_to_smem(T *dst, const T *src, int tid) {
+  using load_type = float4;
+  constexpr int multiplier = sizeof(load_type) / sizeof(T);
+  static_assert((HEIGHT * WIDTH) % (TB_SIZE * multiplier) == 0);
+  constexpr int num_iters = (HEIGHT * WIDTH) / (TB_SIZE * multiplier);
+
+  for (int i = 0; i < num_iters; i++) {
+    const load_type data = reinterpret_cast<const load_type *>(src + i * multiplier)[0];  // DIFF
+
+    const int idx = (i * TB_SIZE + tid) * multiplier;
+    const int row = idx / WIDTH;
+    const int col = idx % WIDTH;
     const int swizzled_col = swizzle<WIDTH>(row, col);
     reinterpret_cast<load_type *>(dst + (row * WIDTH + swizzled_col))[0] = data;
   }
@@ -24,7 +43,7 @@ void gmem_to_smem(T *dst, const T *src, int src_stride, int tid) {
 template<int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE)
 __global__
-void matmul_v2_kernel(
+void matmul_v3_kernel(
   const __hip_bfloat16 *A_gmem,
   const __hip_bfloat16 *B_gmem,
         __hip_bfloat16 *C_gmem,
@@ -65,19 +84,14 @@ void matmul_v2_kernel(
   s16x4 B_rmem[WARP_N / MMA_N][BLOCK_K / MMA_K];
   fp32x4 C_rmem[WARP_M / MMA_M][WARP_N / MMA_N] = {};
 
-  const int num_k_iters = cdiv(K, BLOCK_K);
-  for (int iter_k = 0; iter_k < num_k_iters; iter_k++) {
-    // gmem->smem
-    __syncthreads();
-    gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem, A_gmem, K, tid);
-    gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem, B_gmem, K, tid);
-    A_gmem += BLOCK_K;
-    B_gmem += BLOCK_K;
+  // pipeline buffer
+  __hip_bfloat16 A_rmem_buf[BLOCK_M * BLOCK_K / TB_SIZE];
+  __hip_bfloat16 B_rmem_buf[BLOCK_N * BLOCK_K / TB_SIZE];
 
+  auto mma = [&]() {
     // smem->rmem
     // TODO: use wider load?
     // NOTE: for some reasons, factoring out swizzle out of the main loop is a bit slower.
-    __syncthreads();
     for (int mma_id_m = 0; mma_id_m < WARP_M / MMA_M; mma_id_m++)
       for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k++) {
         const int row = (warp_id_m * WARP_M) + (mma_id_m * MMA_M) + (lane_id % 16);
@@ -106,7 +120,44 @@ void matmul_v2_kernel(
                                                                                  B_rmem[mma_id_n][mma_id_k],
                                                                                  C_rmem[mma_id_m][mma_id_n],
                                                                                  0, 0, 0);
+  };
+
+  // prefetch
+  gmem_to_rmem<BLOCK_M, BLOCK_K, TB_SIZE>(A_rmem_buf, A_gmem, K, tid);
+  gmem_to_rmem<BLOCK_N, BLOCK_K, TB_SIZE>(B_rmem_buf, B_gmem, K, tid);
+  A_gmem += BLOCK_K;
+  B_gmem += BLOCK_K;
+  rmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem, A_rmem_buf, tid);
+  rmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem, B_rmem_buf, tid);
+
+  const int num_k_iters = cdiv(K, BLOCK_K);
+  for (int iter_k = 0; iter_k < num_k_iters - 1; iter_k++) {
+    // wait for current rmem->smem to finish.
+    // this is required for mma() since we are reading from smem.
+    // we are placing synchronization here so that we can launch gmem->rmem
+    // without waiting for gmem->rmem to finish.
+    __syncthreads();
+
+    // prefetch next tile gmem->rmem
+    gmem_to_rmem<BLOCK_M, BLOCK_K, TB_SIZE>(A_rmem_buf, A_gmem, K, tid);
+    gmem_to_rmem<BLOCK_N, BLOCK_K, TB_SIZE>(B_rmem_buf, B_gmem, K, tid);
+    A_gmem += BLOCK_K;
+    B_gmem += BLOCK_K;
+
+    // current tile: smem->rmem then mfma
+    mma();
+
+    // rmem->smem for the next iteration
+    // must wait for smem->rmem (+mfma) for current iteration to finish.
+    __syncthreads();
+    rmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem, A_rmem_buf, tid);
+    rmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem, B_rmem_buf, tid);
   }
+
+  // manually unroll the last tile to avoid `if` in main loop.
+  // this boosts 380 TFLOPS -> 420 TFLOPS
+  __syncthreads();
+  mma();
 
   __syncthreads();
   for (int mma_id_m = 0; mma_id_m < WARP_M / MMA_M; mma_id_m++)
@@ -122,7 +173,7 @@ void matmul_v2_kernel(
     }
 }
 
-void matmul_v2(
+void matmul_v3(
   const __hip_bfloat16 *A,
   const __hip_bfloat16 *B,
         __hip_bfloat16 *C,
@@ -143,6 +194,6 @@ void matmul_v2(
   const int tb_size = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(__hip_bfloat16);
 
-  matmul_v2_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N>
+  matmul_v3_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N>
     <<<grid_size, tb_size, smem_size, stream>>>(A, B, C, M, N, K);
 }

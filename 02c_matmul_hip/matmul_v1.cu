@@ -13,12 +13,12 @@ void gmem_to_smem(T *dst, const T *src, int src_stride, int tid) {
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
 
-    const float4 data = reinterpret_cast<const float4 *>(src + row * src_stride + col)[0];
-    reinterpret_cast<float4 *>(dst + row * SMEM_STRIDE + col)[0] = data;
+    const float4 data = reinterpret_cast<const float4 *>(src + (row * src_stride + col))[0];
+    reinterpret_cast<float4 *>(dst + (row * SMEM_STRIDE + col))[0] = data;
   }
 }
 
-template<int BLOCK_M, int BLOCK_N, int BLOCK_K, int SMEM_STRIDE, int GROUP_M, int NUM_WARP_M, int NUM_WARP_N>
+template<int BLOCK_M, int BLOCK_N, int BLOCK_K, int SMEM_STRIDE, int NUM_WARP_M, int NUM_WARP_N>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE)
 __global__
 void matmul_v1_kernel(
@@ -42,20 +42,8 @@ void matmul_v1_kernel(
   const int grid_m = cdiv(M, BLOCK_M);
   const int grid_n = cdiv(N, BLOCK_N);
 
-  int bid_m, bid_n;
-  if constexpr (GROUP_M == 1) {
-    bid_m = bid / grid_n;
-    bid_n = bid % grid_n;
-  } else {
-    // threadblock swizzling, from triton
-    // improve L2 reuse when M is large.
-    const int group_size = GROUP_M * grid_n;
-    const int group_id = bid / group_size;
-    const int first_bid_m = group_id * GROUP_M;
-    const int group_size_m = min(grid_m - first_bid_m, GROUP_M);
-    bid_m = first_bid_m + ((bid % group_size) % group_size_m);
-    bid_n = (bid % group_size) / group_size_m;
-  }
+  int bid_m = bid / grid_n;
+  int bid_n = bid % grid_n;
 
   const int offset_m = bid_m * BLOCK_M;
   const int offset_n = bid_n * BLOCK_N;
@@ -161,7 +149,6 @@ void matmul_v1a(
   constexpr int BLOCK_N = 128;
   constexpr int BLOCK_K = 64;
   constexpr int SMEM_STRIDE = BLOCK_K;
-  constexpr int GROUP_M = 1;
 
   constexpr int NUM_WARP_M = 2;
   constexpr int NUM_WARP_N = 2;
@@ -173,7 +160,7 @@ void matmul_v1a(
   const int tb_size = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(__hip_bfloat16);
 
-  matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, SMEM_STRIDE, GROUP_M, NUM_WARP_M, NUM_WARP_N>
+  matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, SMEM_STRIDE, NUM_WARP_M, NUM_WARP_N>
     <<<grid_size, tb_size, smem_size, stream>>>(A, B, C, M, N, K);
 }
 
@@ -188,7 +175,6 @@ void matmul_v1b(
   constexpr int BLOCK_N = 128;
   constexpr int BLOCK_K = 64;
   constexpr int SMEM_STRIDE = BLOCK_K + 8;
-  constexpr int GROUP_M = 1;
 
   constexpr int NUM_WARP_M = 2;
   constexpr int NUM_WARP_N = 2;
@@ -200,6 +186,6 @@ void matmul_v1b(
   const int tb_size = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int smem_size = (BLOCK_M + BLOCK_N) * SMEM_STRIDE * sizeof(__hip_bfloat16);
 
-  matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, SMEM_STRIDE, GROUP_M, NUM_WARP_M, NUM_WARP_N>
+  matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, SMEM_STRIDE, NUM_WARP_M, NUM_WARP_N>
     <<<grid_size, tb_size, smem_size, stream>>>(A, B, C, M, N, K);
 }
