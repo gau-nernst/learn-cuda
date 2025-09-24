@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 from pathlib import Path
 
 os.environ["PYTORCH_ROCM_ARCH"] = "gfx942"
@@ -42,6 +43,7 @@ def main(args):
         # torch.testing.assert_close(out, ref)
         diff = (out - ref).abs().mean().item()
 
+        time.sleep(0.5)
         latency_ms = do_bench(lambda: f(A, B), warmup=100, rep=500)
         tflops = 2 * M * N * K / (latency_ms * 1e-3) * 1e-12
         print(f"{name}: {tflops:.2f} TFLOPS, {diff}")
@@ -49,6 +51,7 @@ def main(args):
     bench("PyTorch", torch.mm)
     bench("v1a", ops.matmul_v1a)
     bench("v1b", ops.matmul_v1b)
+    bench("v2", ops.matmul_v2)
 
 
 if __name__ == "__main__":

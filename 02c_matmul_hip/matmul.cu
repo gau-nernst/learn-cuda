@@ -9,6 +9,7 @@ using MatmulFunc = void(const __hip_bfloat16 *, const __hip_bfloat16 *, __hip_bf
 
 MatmulFunc matmul_v1a;
 MatmulFunc matmul_v1b;
+MatmulFunc matmul_v2;
 
 template <MatmulFunc matmul_raw>
 at::Tensor matmul(const at::Tensor& A, const at::Tensor& B) {
@@ -36,7 +37,9 @@ at::Tensor matmul(const at::Tensor& A, const at::Tensor& B) {
 TORCH_LIBRARY(hip_matmul, m) {
   m.def("matmul_v1a(Tensor A, Tensor B) -> Tensor");
   m.def("matmul_v1b(Tensor A, Tensor B) -> Tensor");
+  m.def("matmul_v2(Tensor A, Tensor B) -> Tensor");
 
   m.impl("matmul_v1a", at::kCUDA, &matmul<matmul_v1a>);
   m.impl("matmul_v1b", at::kCUDA, &matmul<matmul_v1b>);
+  m.impl("matmul_v2", at::kCUDA, &matmul<matmul_v2>);
 }

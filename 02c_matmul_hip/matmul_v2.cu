@@ -1,10 +1,11 @@
 #include "common.h"
 #include <hip/hip_bf16.h>
 
-template <int HEIGHT, int WIDTH, int SMEM_STRIDE, int TB_SIZE, typename T>
+template <int HEIGHT, int WIDTH, int TB_SIZE, typename T>
 __device__
 void gmem_to_smem(T *dst, const T *src, int src_stride, int tid) {
-  constexpr int multiplier = sizeof(float4) / sizeof(T);
+  using load_type = float4;
+  constexpr int multiplier = sizeof(load_type) / sizeof(T);
   static_assert((HEIGHT * WIDTH) % (TB_SIZE * multiplier) == 0);
   constexpr int num_iters = (HEIGHT * WIDTH) / (TB_SIZE * multiplier);
 
@@ -13,15 +14,17 @@ void gmem_to_smem(T *dst, const T *src, int src_stride, int tid) {
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
 
-    const float4 data = reinterpret_cast<const float4 *>(src + row * src_stride + col)[0];
-    reinterpret_cast<float4 *>(dst + row * SMEM_STRIDE + col)[0] = data;
+    const load_type data = reinterpret_cast<const load_type *>(src + row * src_stride + col)[0];
+
+    const int swizzled_col = swizzle<WIDTH>(row, col);
+    reinterpret_cast<load_type *>(dst + row * WIDTH + swizzled_col)[0] = data;
   }
 }
 
-template<int BLOCK_M, int BLOCK_N, int BLOCK_K, int SMEM_STRIDE, int GROUP_M, int NUM_WARP_M, int NUM_WARP_N>
+template<int BLOCK_M, int BLOCK_N, int BLOCK_K, int GROUP_M, int NUM_WARP_M, int NUM_WARP_N>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE)
 __global__
-void matmul_v1_kernel(
+void matmul_v2_kernel(
   const __hip_bfloat16 *A_gmem,
   const __hip_bfloat16 *B_gmem,
         __hip_bfloat16 *C_gmem,
@@ -66,20 +69,7 @@ void matmul_v1_kernel(
   // shared memory
   extern __shared__ __hip_bfloat16 smem[];
   __hip_bfloat16 *A_smem = smem;
-  __hip_bfloat16 *B_smem = A_smem + BLOCK_M * SMEM_STRIDE;
-
-  // pre-compute offset for smem->rmem
-  __hip_bfloat16 *A_smem_thread, *B_smem_thread;
-  {
-    const int row = (warp_id_m * WARP_M) + (lane_id % 16);
-    const int col = (lane_id / 16) * 4;
-    A_smem_thread = A_smem + row * SMEM_STRIDE + col;
-  }
-  {
-    const int row = (warp_id_n * WARP_N) + (lane_id % 16);
-    const int col = (lane_id / 16) * 4;
-    B_smem_thread = B_smem + row * SMEM_STRIDE + col;
-  }
+  __hip_bfloat16 *B_smem = A_smem + BLOCK_M * BLOCK_K;
 
   // register memory
   // do it this way to use mfma intrinsic
@@ -91,29 +81,29 @@ void matmul_v1_kernel(
   for (int iter_k = 0; iter_k < num_k_iters; iter_k++) {
     // gmem->smem
     __syncthreads();
-    gmem_to_smem<BLOCK_M, BLOCK_K, SMEM_STRIDE, TB_SIZE>(A_smem, A_gmem, K, tid);
-    gmem_to_smem<BLOCK_N, BLOCK_K, SMEM_STRIDE, TB_SIZE>(B_smem, B_gmem, K, tid);
+    gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem, A_gmem, K, tid);
+    gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem, B_gmem, K, tid);
     A_gmem += BLOCK_K;
     B_gmem += BLOCK_K;
 
     // smem->rmem
-    // K_L = 16 / (64 / (16 * 1)) = 16 / 4 = 4
-    // A: lane (k / 4) * M + i
-    // B: lane (k / 4) * N + j
     // TODO: use wider load?
+    // NOTE: for some reasons, factoring out swizzle out of the main loop is a bit slower.
     __syncthreads();
     for (int mma_id_m = 0; mma_id_m < WARP_M / MMA_M; mma_id_m++)
       for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k++) {
-        const int row = mma_id_m * MMA_M;
-        const int col = mma_id_k * MMA_K;
-        __hip_bfloat16 *addr = A_smem_thread + (row * SMEM_STRIDE + col);
+        const int row = (warp_id_m * WARP_M) + (mma_id_m * MMA_M) + (lane_id % 16);
+        const int col = (mma_id_k * MMA_K) + (lane_id / 16) * 4;
+        const int swizzled_col = swizzle<BLOCK_K>(row, col);
+        __hip_bfloat16 *addr = A_smem + (row * BLOCK_K + swizzled_col);
         A_rmem[mma_id_m][mma_id_k] = reinterpret_cast<s16x4 *>(addr)[0];
       }
     for (int mma_id_n = 0; mma_id_n < WARP_N / MMA_N; mma_id_n++)
       for (int mma_id_k = 0; mma_id_k < BLOCK_K / MMA_K; mma_id_k++) {
-        const int row = mma_id_n * MMA_N;
-        const int col = mma_id_k * MMA_K;
-        __hip_bfloat16 *addr = B_smem_thread + (row * SMEM_STRIDE + col);
+        const int row = (warp_id_n * WARP_N) + (mma_id_n * MMA_N) + (lane_id % 16);
+        const int col = (mma_id_k * MMA_K) + (lane_id / 16) * 4;
+        const int swizzled_col = swizzle<BLOCK_K>(row, col);
+        __hip_bfloat16 *addr = B_smem + (row * BLOCK_K + swizzled_col);
         B_rmem[mma_id_n][mma_id_k] = reinterpret_cast<s16x4 *>(addr)[0];
       }
 
@@ -130,12 +120,6 @@ void matmul_v1_kernel(
                                                                                  0, 0, 0);
   }
 
-  // H = 4
-  // B_I = ceil(64 / (N * M / H)) = ceil(64 / (16 * 16 / 4)) = 1
-  // M_I = (64 / B_I) / N = 4
-  // G = M / (H * M_I) = 1
-  // item: (i % 4)
-  // lane: (i / 4) * N + j
   __syncthreads();
   for (int mma_id_m = 0; mma_id_m < WARP_M / MMA_M; mma_id_m++)
     for (int mma_id_n = 0; mma_id_n < WARP_N / MMA_N; mma_id_n++) {
@@ -150,7 +134,7 @@ void matmul_v1_kernel(
     }
 }
 
-void matmul_v1a(
+void matmul_v2(
   const __hip_bfloat16 *A,
   const __hip_bfloat16 *B,
         __hip_bfloat16 *C,
@@ -160,7 +144,6 @@ void matmul_v1a(
   constexpr int BLOCK_M = 128;
   constexpr int BLOCK_N = 128;
   constexpr int BLOCK_K = 64;
-  constexpr int SMEM_STRIDE = BLOCK_K;
   constexpr int GROUP_M = 1;
 
   constexpr int NUM_WARP_M = 2;
@@ -173,33 +156,6 @@ void matmul_v1a(
   const int tb_size = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(__hip_bfloat16);
 
-  matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, SMEM_STRIDE, GROUP_M, NUM_WARP_M, NUM_WARP_N>
-    <<<grid_size, tb_size, smem_size, stream>>>(A, B, C, M, N, K);
-}
-
-void matmul_v1b(
-  const __hip_bfloat16 *A,
-  const __hip_bfloat16 *B,
-        __hip_bfloat16 *C,
-  int M, int N, int K,
-  hipStream_t stream
-) {
-  constexpr int BLOCK_M = 128;
-  constexpr int BLOCK_N = 128;
-  constexpr int BLOCK_K = 64;
-  constexpr int SMEM_STRIDE = BLOCK_K + 8;
-  constexpr int GROUP_M = 1;
-
-  constexpr int NUM_WARP_M = 2;
-  constexpr int NUM_WARP_N = 2;
-
-  const int grid_m = cdiv(M, BLOCK_M);
-  const int grid_n = cdiv(N, BLOCK_N);
-  const int grid_size = grid_m * grid_n;
-
-  const int tb_size = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
-  const int smem_size = (BLOCK_M + BLOCK_N) * SMEM_STRIDE * sizeof(__hip_bfloat16);
-
-  matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, SMEM_STRIDE, GROUP_M, NUM_WARP_M, NUM_WARP_N>
+  matmul_v2_kernel<BLOCK_M, BLOCK_N, BLOCK_K, GROUP_M, NUM_WARP_M, NUM_WARP_N>
     <<<grid_size, tb_size, smem_size, stream>>>(A, B, C, M, N, K);
 }

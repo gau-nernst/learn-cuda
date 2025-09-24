@@ -7,17 +7,16 @@ Resources:
 
 Kernel name               | TFLOPS 
 --------------------------|--------
-PyTorch (2.8.0+rocm6.4)   | 558.25
-v1a                       | 123.00
-v1b - Pad smem            | 241.86
+PyTorch (2.8.0+rocm6.4)   | 548.09
+v1a                       | 122.21
+v1b - Pad smem            | 244.72
+v2 - smem swizzling       | 369.57
 
 TODO:
 - Swap A and B in `mfma` to use `bf16x4` store for C
 - Pipelining via registers - separate gmem->smem to gmem->rmem and rmem->smem
 - kpack - What is it? Mix loop ordering to try different instruction ordering
 - Make sure loops are unrolled
-- Profiling tools: https://github.com/ROCm/rocm-systems
-- Smem swizzling
 
 To use ROCm Compute profiler
 
