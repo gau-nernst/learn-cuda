@@ -17,25 +17,22 @@ def py_min(a, b):
     return min(a, b)
 
 
+# all self's attributes are constexpr
 class Gemm(NamedTuple):
-    ab_dtype: type[cutlass.Numeric]
-    c_dtype: type[cutlass.Numeric]
-    acc_dtype: type[cutlass.Numeric]
-    atom_layout_mnk: tuple[int, int, int] = (2, 2, 1)  # warp tiling
-    cta_tile: tuple[int, int, int] = (128, 128, 32)
+    ab_dtype: type[cutlass.Numeric] = cutlass.BFloat16
+    c_dtype: type[cutlass.Numeric] = cutlass.BFloat16
+    warp_tile: tuple[int, int] = (2, 2)
+    cta_tile: tuple[int, int, int] = (128, 128, 64)
     num_stages: int = 3
 
     @cute.jit
     def __call__(
         self,
-        a_ptr: cute.Pointer,
-        b_ptr: cute.Pointer,
-        c_ptr: cute.Pointer,
+        a_ptr: cute.Pointer,  # (M, K, L)
+        b_ptr: cute.Pointer,  # (N, K, L)
+        c_ptr: cute.Pointer,  # (M, N, L)
         shape: tuple[int, int, int],
     ):
-        # A: (M, K, L)
-        # B: (N, K, L)
-        # C: (M, N, L)
         M, N, K = shape
         K = cute.assume(K, 8)  # 128-bit alignment
         N = cute.assume(N, 8)
@@ -45,7 +42,7 @@ class Gemm(NamedTuple):
 
         # TODO: understand how cutlass does swizzling
         BM, BN, BK = self.cta_tile
-        num_threads = math.prod(self.atom_layout_mnk) * WARP_SIZE
+        num_threads = math.prod(self.warp_tile) * WARP_SIZE
 
         major_size = py_min(BK, 64)  # built-in min() will make major_size a dynamic value under @cute.jit() decorator
         swizzle_bits = py_min(int(math.log2(major_size * 16 // 128)), 3)
@@ -89,13 +86,13 @@ class Gemm(NamedTuple):
         tiled_copy_C = cute.make_tiled_copy_tv(atom_cp, thread_layout, value_layout)
 
         # mma.m16n8k16
-        atom_m, atom_n, _ = self.atom_layout_mnk
-        op = warp.MmaF16BF16Op(self.ab_dtype, self.acc_dtype, (16, 8, 16))
-        tC = cute.make_layout(self.atom_layout_mnk)
+        atom_m, atom_n = self.warp_tile
+        op = warp.MmaF16BF16Op(self.ab_dtype, acc_dtype=cutlass.Float32, shape_mnk=(16, 8, 16))
+        tC = cute.make_layout((atom_m, atom_n, 1))
         permutation_mnk = (atom_m * 16, atom_n * 16, 16)
         tiled_mma = cute.make_tiled_mma(op, tC, permutation_mnk)
 
-        grid_dim = cute.ceil_div(mC.shape, (self.cta_tile[0], self.cta_tile[1], 1))
+        grid_dim = cute.ceil_div(mC.shape, (BM, BN, 1))
         raster_factor = 1
         grid_dim_n = cute.size(grid_dim[1])
         if grid_dim_n > 5:
@@ -146,19 +143,17 @@ class Gemm(NamedTuple):
         tiled_mma: cute.TiledMma,
         raster_factor: cutlass.Int32,
     ):
+        BM, BN, BK = self.cta_tile
         tid, _, _ = cute.arch.thread_idx()
         bidx, bidy, bidz = cute.arch.block_idx()
-        grid_dim = cute.ceil_div(mC.shape, (self.cta_tile[0], self.cta_tile[1], 1))
+        grid_dim = cute.ceil_div(mC.shape, (BM, BN, 1))
 
         # remap bid
         offset_tile_x = bidx // raster_factor
         offset_tile_y = (bidx % raster_factor) + bidy * raster_factor
 
         # does this happen?
-        if grid_dim[0] <= offset_tile_x or grid_dim[1] <= offset_tile_y:
-            pass
-
-        else:
+        if offset_tile_x < grid_dim[0] and offset_tile_y < grid_dim[1]:
             # select the output tile
             # TODO: understand this
             tile_coord = (offset_tile_x, offset_tile_y, None)
@@ -167,7 +162,7 @@ class Gemm(NamedTuple):
             gC = cute.local_tile(mC[None, None, bidz], tiler=self.cta_tile, coord=tile_coord, proj=(1, 1, None))
 
             # check for the remainder of K % BLOCK_K. handle this tile first
-            res_k = cute.size(mA, mode=[1]) - cutlass.Int32(self.cta_tile[2]) * cute.size(gA, mode=[2])
+            res_k = cute.size(mA, mode=[1]) - cutlass.Int32(BK) * cute.size(gA, mode=[2])
             gA = cute.domain_offset((0, res_k, 0), gA)
             gB = cute.domain_offset((0, res_k, 0), gB)
             gA = cute.make_tensor(gA.iterator.align(16), gA.layout)
@@ -344,14 +339,13 @@ class Gemm(NamedTuple):
                     )
 
                     # prefetch A gmem->smem
-                    if k_block == 0:
-                        if k_tile + num_stages - 1 < k_tile_count:
-                            cute.copy(
-                                tiled_copy_A,
-                                src=tAgA[None, None, None, k_tile_index],
-                                dst=tAsA[None, None, None, smem_pipe_write],
-                                pred=tApA,
-                            )
+                    if k_block == 0 and k_tile + num_stages - 1 < k_tile_count:
+                        cute.copy(
+                            tiled_copy_A,
+                            src=tAgA[None, None, None, k_tile_index],
+                            dst=tAsA[None, None, None, smem_pipe_write],
+                            pred=tApA,
+                        )
 
                     # MMA
                     cute.gemm(tiled_mma, tCrC, tCrA[None, None, k_block], tCrB[None, None, k_block], tCrC)
@@ -380,9 +374,8 @@ class Gemm(NamedTuple):
             tCrD[None] = tCrC.load().to(self.c_dtype)
             cute.autovec_copy(tCrD, tCsC)
 
-            bm, bn, _ = self.cta_tile
-            ceilM, ceilN, _ = cute.ceil_div(mC.shape, (bm, bn, 1))
-            mcC = cute.make_identity_tensor((cute.size(ceilM) * bm, cute.size(ceilN) * bn, 1))
+            ceilM, ceilN, _ = cute.ceil_div(mC.shape, (BM, BN, 1))
+            mcC = cute.make_identity_tensor((cute.size(ceilM) * BM, cute.size(ceilN) * BN, 1))
             cC = cute.local_tile(mcC[None, None, bidz], tiler=self.cta_tile, coord=tile_coord, proj=(1, 1, None))
             tCcC = thr_copy_C.partition_S(cC)
 
@@ -419,9 +412,8 @@ def _compile_kernel():
     A_ptr, B_ptr, C_ptr = [
         cute.runtime.make_ptr(cutlass.BFloat16, 0, cute.AddressSpace.gmem, assumed_align=16) for _ in range(3)
     ]
-    M, N, K = 1024, 1024, 1024
-    gemm = Gemm(ab_dtype=cutlass.BFloat16, c_dtype=cutlass.BFloat16, acc_dtype=cutlass.Float32)
-    return cute.compile(gemm, A_ptr, B_ptr, C_ptr, (M, N, K))
+    shape = (1024, 1024, 1024)
+    return cute.compile(Gemm(), A_ptr, B_ptr, C_ptr, shape)
 
 
 compiled_kernel = _compile_kernel()
