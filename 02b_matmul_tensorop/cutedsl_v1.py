@@ -40,11 +40,23 @@ class Gemm(NamedTuple):
         mB = cute.make_tensor(b_ptr, cute.make_layout((N, K, 1), stride=(K, 1, N * K)))
         mC = cute.make_tensor(c_ptr, cute.make_layout((M, N, 1), stride=(N, 1, M * N)))
 
-        # TODO: understand how cutlass does swizzling
         BM, BN, BK = self.cta_tile
         num_threads = math.prod(self.warp_tile) * WARP_SIZE
 
-        major_size = py_min(BK, 64)  # built-in min() will make major_size a dynamic value under @cute.jit() decorator
+        # how swizzling is done in cute
+        # https://veitner.bearblog.dev/understanding-cute-swizzling-the-math-behind-32b-64b-and-128b-patterns/
+        # Swizzle<B, M, S> is applied on element index
+        # - B bits will be XOR-ed with a mask
+        # - these B bits start at bit-M
+        # - the mask starts at bit-(M+S)
+
+        # built-in min() will make major_size a dynamic value under @cute.jit() decorator
+        # B = 0 if BK=8 (no bank conflict), 1 if BK=16, 2 if BK=32, 3 if BK>=64
+        # M = 3 because each ldmatrix row has 8 elements
+        # TODO: explain why S = 3
+        # NOTE: this scheme doesn't work when BK=16
+        # TODO: explain outer layout and composed layout
+        major_size = py_min(BK, 64)
         swizzle_bits = py_min(int(math.log2(major_size * 16 // 128)), 3)
         layout_atom = cute.make_composed_layout(
             cute.make_swizzle(swizzle_bits, 3, 3),
@@ -54,11 +66,12 @@ class Gemm(NamedTuple):
         sA_layout = cute.tile_to_shape(layout_atom, (BM, BK, self.num_stages), order=(0, 1, 2))
         sB_layout = cute.tile_to_shape(layout_atom, (BN, BK, self.num_stages), order=(0, 1, 2))
 
+        # TODO: why do we need swizzling for C?
         swizzle_bits = py_min(int(math.log2(BN * self.c_dtype.width // 128)), 3)
-        # TODO: what is this 3, 3 and 3, 4
-
         layout_atom = cute.make_composed_layout(
-            cute.make_swizzle(swizzle_bits, 3, 4), offset=0, outer=cute.make_layout((8, BN), stride=(BN, 1))
+            cute.make_swizzle(swizzle_bits, 3, 4),
+            offset=0,
+            outer=cute.make_layout((8, BN), stride=(BN, 1)),
         )
         sC_layout = cute.tile_to_shape(layout_atom, (BM, BN), order=(0, 1))
 
