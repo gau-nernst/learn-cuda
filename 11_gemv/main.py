@@ -3,6 +3,7 @@ import time
 
 import torch
 from triton.testing import do_bench
+from triton_v1 import triton_v1
 
 
 def main():
@@ -29,9 +30,12 @@ def main():
         pct_sol = achieved_bw / sol * 100
         print(f"{name}:\t{latency_ms:.4f} ms\t{achieved_bw:.2f} GB/s\t{pct_sol:.2f}% SOL")
 
-    output_ref = torch.mm(A, B)
+    out_ref = torch.mm(A.float(), B.float()).bfloat16()
     bench_and_print(torch.mm, "CuBLAS")
     bench_and_print(inductor_mm, "Inductor")
+
+    torch.testing.assert_close(triton_v1(A, B), out_ref)
+    bench_and_print(triton_v1, "triton_v1")
 
 
 if __name__ == "__main__":
