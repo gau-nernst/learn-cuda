@@ -4,6 +4,7 @@ from pathlib import Path
 
 import torch
 import torch.utils.cpp_extension
+from cutedsl_v1 import cutedsl_v1  # import this may break torch.compile on 1st run?
 from triton.testing import do_bench
 
 CURRENT_DIR = Path(__file__).parent
@@ -70,6 +71,8 @@ def main():
         output = fn(A, B)
         torch.testing.assert_close(output, output_ref)
         bench_and_print(fn, f"v{i + 1}")
+
+    bench_and_print(cutedsl_v1, "cutedsl_v1")
 
 
 if __name__ == "__main__":
