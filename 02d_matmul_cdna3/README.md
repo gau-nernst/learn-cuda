@@ -9,7 +9,7 @@ Resources:
 
 M=N=K=4096, BF16
 
-Kernel name                 | TFLOPS 
+Kernel name                 | TFLOPS
 ----------------------------|--------
 PyTorch (2.8.0+rocm6.4)     | 548.09
 v1a                         | 122.21

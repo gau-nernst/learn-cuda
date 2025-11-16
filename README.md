@@ -11,7 +11,9 @@ Name | Description
 -----|-------------
 01\. [Vector addition](01_vector_addition/) | Simple example to get everything working.
 02a\. [Matrix multiplication SIMT](02a_matmul_simt/) | Block tiling, thread tiling, warp tiling.
-02b\. [Matrix multiplication TensorOp](02b_matmul_tensorop/) | Inline PTX, `cvta`, `ldmatrix`, `mma`.
+02b\. [Matrix multiplication SM80](02b_matmul_sm80/) | Inline PTX, `cvta`, `ldmatrix`, `mma`.
+02c\. [Matrix multiplication SM120](02c_matmul_sm120/)
+02d\. [Matrix multiplication CDNA3](02d_matmul_cdna3/)
 03\. [Sum](03_sum/) | Reduction in general.  Prepare for softmax (max and sum).
 04\. [Softmax](04_softmax/) | Naive (safe) softmax, online softmax. `atomicCAS()`. Single-block and multi-block per row.
 05\. [FP6](05_fp6/) | FP6 primitives (FP32/FP16/BF16<->FP6).
