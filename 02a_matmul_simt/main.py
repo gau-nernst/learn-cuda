@@ -11,7 +11,11 @@ def benchmark(f, *args, **kwargs):
 module = torch.utils.cpp_extension.load(
     "module",
     sources=["matmul.cu", "matmul.cpp"],
-    extra_cuda_cflags=["-O3", "--use_fast_math", "--ptxas-options=-v"],
+    extra_cuda_cflags=[
+        "-O3",
+        "-lineinfo",
+        "-Xptxas=-v",
+    ],
     verbose=True,
 )
 

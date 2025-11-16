@@ -21,7 +21,7 @@ uint32_t tma_swizzle(uint32_t addr) {
 template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
-void matmul_v7_kernel(const __grid_constant__ CUtensorMap A_tensor_map,
+void matmul_v1_kernel(const __grid_constant__ CUtensorMap A_tensor_map,
                       const __grid_constant__ CUtensorMap B_tensor_map,
                       nv_bfloat16 *C,
                       int M, int N, int K) {
@@ -71,13 +71,15 @@ void matmul_v7_kernel(const __grid_constant__ CUtensorMap A_tensor_map,
   // also pre-compute swizzling
   const int A_offm = (warp_id_m * WARP_M) + (lane_id % 16);
   const int A_offk = (lane_id / 16) * 8;
-  uint32_t A_shm_thread = cvta_shared(A_smem) + (A_offm * BLOCK_K + A_offk) * sizeof(nv_bfloat16);
-  A_shm_thread = tma_swizzle<BLOCK_K * sizeof(nv_bfloat16)>(A_shm_thread);
+  uint32_t A_smem_thread = static_cast<uint32_t>(__cvta_generic_to_shared(A_smem));
+  A_smem_thread += (A_offm * BLOCK_K + A_offk) * sizeof(nv_bfloat16);
+  A_smem_thread = tma_swizzle<BLOCK_K * sizeof(nv_bfloat16)>(A_smem_thread);
 
   const int B_offn = (warp_id_n * WARP_N) + (lane_id % 8);
   const int B_offk = (lane_id / 8) * 8;
-  uint32_t B_shm_thread = cvta_shared(B_smem) + (B_offn * BLOCK_K + B_offk) * sizeof(nv_bfloat16);
-  B_shm_thread = tma_swizzle<BLOCK_K * sizeof(nv_bfloat16)>(B_shm_thread);
+  uint32_t B_smem_thread = static_cast<uint32_t>(__cvta_generic_to_shared(B_smem));
+  B_smem_thread += (B_offn * BLOCK_K + B_offk) * sizeof(nv_bfloat16);
+  B_smem_thread = tma_swizzle<BLOCK_K * sizeof(nv_bfloat16)>(B_smem_thread);
 
   // https://docs.nvidia.com/cuda/cuda-c-programming-guide/#asynchronous-data-copies-using-the-tensor-memory-accelerator-tma
   #pragma nv_diag_suppress static_var_with_dynamic_init
@@ -116,7 +118,7 @@ void matmul_v7_kernel(const __grid_constant__ CUtensorMap A_tensor_map,
     // A shared->regs
     for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
       for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++) {
-        uint32_t A_addr = A_shm_thread;
+        uint32_t A_addr = A_smem_thread;
         A_addr += mma_id_m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
         A_addr ^= mma_id_k * MMA_K * sizeof(nv_bfloat16);
         ldmatrix_x4(A_regs[mma_id_m][mma_id_k], A_addr);
@@ -125,7 +127,7 @@ void matmul_v7_kernel(const __grid_constant__ CUtensorMap A_tensor_map,
     // B shared->regs
     for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
       for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k += 2) {
-        uint32_t B_addr = B_shm_thread;
+        uint32_t B_addr = B_smem_thread;
         B_addr += mma_id_n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
         B_addr ^= mma_id_k * MMA_K * sizeof(nv_bfloat16);
         ldmatrix_x4(B_regs[mma_id_n][mma_id_k], B_addr);
@@ -154,7 +156,7 @@ void matmul_v7_kernel(const __grid_constant__ CUtensorMap A_tensor_map,
     }
 }
 
-void matmul_v7(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
   assert(is_power_of_two(M) && "M must be a power of 2");
   assert(is_power_of_two(N) && "N must be a power of 2");
   assert(is_power_of_two(K) && "K must be a power of 2");
@@ -163,11 +165,11 @@ void matmul_v7(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
 
-  auto kernel = matmul_v7_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N>;
+  auto kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
-  const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
+  const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
 
   // https://docs.nvidia.com/cuda/cuda-c-programming-guide/#using-tma-to-transfer-multi-dimensional-arrays
   auto init_tensor_map = [&](CUtensorMap *tensor_map, const nv_bfloat16 *gmem_ptr,
@@ -220,5 +222,5 @@ void matmul_v7(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   init_tensor_map(&A_tensor_map, A, K, M, BLOCK_K, BLOCK_M);
   init_tensor_map(&B_tensor_map, B, K, N, BLOCK_K, BLOCK_N);
 
-  launch_kernel(kernel, grid_size, TB_SIZE, shm_size, A_tensor_map, B_tensor_map, C, M, N, K);
+  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A_tensor_map, B_tensor_map, C, M, N, K);
 }

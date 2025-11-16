@@ -14,6 +14,9 @@ load(
     "hip_matmul",
     [str(x) for x in CURRENT_DIR.glob("*.cu")],
     extra_include_paths=[str(CURRENT_DIR)],
+    extra_cuda_cflags=[
+        "-O3",
+    ],
     is_python_module=False,
     verbose=True,
 )
