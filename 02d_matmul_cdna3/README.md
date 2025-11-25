@@ -32,7 +32,7 @@ rocprof-compute analyze -p workloads/mm_v1a/MI300
 ```
 
 Worklog
-- v1a: Basic matmul structure. gmem->smem via registers. No pipelining. Understand mfma layout.  
+- v1a: Basic matmul structure. gmem->smem via registers. No pipelining. Understand mfma layout.
 - Tried `rocprof-compute`, but I didn't know where to look for bottlenecks, like Nsight Compute's warp stall analysis does.
 - v1b: Reduce smem bank conflicts with padded smem or swizzling.
 - Most errors don't segfault / error immediately e.g. reading out of bounds for smem. This makes it hard to identify bugs.
