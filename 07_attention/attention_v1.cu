@@ -23,6 +23,10 @@ void attention_v1_kernel(
   const int tid = threadIdx.x;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
+  if (bid == 0 && tid == 0){
+    printf("Attention v1 kernel launched: BLOCK_Q=%d, BLOCK_KV=%d, DIM=%d, NUM_WARPS=%d\n",
+           BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS);
+  }
 
   // each threadblock handles 1 BLOCK_Q
   const int num_q_blocks = cdiv(len_q, BLOCK_Q);
@@ -75,6 +79,21 @@ void attention_v1_kernel(
   asm volatile("cp.async.commit_group;");
   asm volatile("cp.async.wait_all;");
   __syncthreads();
+  
+  if(isthread0()){
+    // Debug: print first 8 elements of Q_smem
+    printf("Q_smem first 8 elements:\n");
+    for(int q_row=0; q_row < BLOCK_Q; q_row+=1){
+      printf("Row %d: ", q_row);
+      for(int i=0; i < 8; i++){
+        nv_bfloat16 val = smem[q_row * DIM + i];
+        float fval = __bfloat162float(val); 
+        // print with 2 decimal places
+        printf("%.2f ", fval);
+      }
+      printf("\n");
+    }
+  }
 
   // shared -> registers
   for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)

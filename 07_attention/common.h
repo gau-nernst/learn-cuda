@@ -32,12 +32,25 @@ uint32_t swizzle(uint32_t index) {
   return index ^ (bits_to_xor << 4);
 }
 
+
+__device__ inline
+bool isthread0(){
+  return threadIdx.x  == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y  == 0 && blockIdx.z  == 0;
+}
+
+
+
 template <int HEIGHT, int WIDTH, int TB_SIZE>
 __device__ inline
 void global_to_shared(uint32_t dst, const nv_bfloat16 *src, int src_stride, int tid) {
   constexpr int num_elems = 16 / sizeof(nv_bfloat16);
   constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
-
+  
+  if (isthread0()) {
+    printf("global_to_shared: HEIGHT=%d, WIDTH=%d, TB_SIZE=%d, num_iters=%d, num_elemts=%d\n",
+           HEIGHT, WIDTH, TB_SIZE, num_iters, num_elems);
+  }
+  
   for (int iter = 0; iter < num_iters; iter++) {
     const int idx = (iter * TB_SIZE + tid) * num_elems;
     const int row = idx / WIDTH;
