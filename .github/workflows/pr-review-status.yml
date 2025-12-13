@@ -97,12 +97,12 @@ jobs:
         uses: peter-evans/find-comment@v3
         id: fc
         with:
-          issue-number: 1
+          issue-number: 3
           body-includes: 
       - name: Create or Update Comment
         uses: peter-evans/create-or-update-comment@v4
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
-          issue-number: 1
+          issue-number: 3
           body: ${{ env.BODY_CONTENT }}
           edit-mode: replace
