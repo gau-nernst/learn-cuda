@@ -247,10 +247,13 @@ def attn_thread_block_ref(
         for warp_id in range(NUM_WARPS):
             cur_warp_first_mma_q_reg = cur_tb_first_mma_q_reg[warp_id]
             cur_warp_s_regmem_per_tb = cur_tb_first_mma_s_frag[warp_id]
-            for mma_m_id in range(query_rows_per_warp // MMAConfig.M):
-                for mma_n_id in range(BLOCK_KV // MMAConfig.N):
+            first_mma_num_m = query_rows_per_warp // MMAConfig.M
+            first_mma_num_n = BLOCK_KV // MMAConfig.N
+            first_mma_num_k = DIM // MMAConfig.K
+            for mma_m_id in range(first_mma_num_m):
+                for mma_n_id in range(first_mma_num_n):
                     cur_s_reg_frag = cur_warp_s_regmem_per_tb[mma_m_id][mma_n_id]
-                    for mma_k_id in range(DIM // MMAConfig.K):
+                    for mma_k_id in range(first_mma_num_k):
                         cur_mma_q = cur_warp_first_mma_q_reg[mma_m_id][mma_k_id]
                         cur_mma_k = cur_tb_first_mma_k_reg[mma_n_id][mma_k_id]
                         mma_m16n8k16_(frag_A=cur_mma_q, frag_B=cur_mma_k, frag_D=cur_s_reg_frag)
@@ -258,7 +261,6 @@ def attn_thread_block_ref(
         # apply softmax scale sqrt(dk)
         for warp_id in range(NUM_WARPS):
             cur_warp_first_mma_s_frag = cur_tb_first_mma_s_frag[warp_id]
-            cur_warp_rowmax = cur_tb_rowmax[warp_id]
             for mma_m_id in range(query_rows_per_warp // MMAConfig.M):
                 for mma_n_id in range(BLOCK_KV // MMAConfig.N):
                     cur_s_frag = cur_warp_first_mma_s_frag[mma_m_id][mma_n_id]
