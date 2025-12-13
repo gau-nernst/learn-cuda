@@ -1,0 +1,108 @@
+name: Update Review Dashboard
+
+on:
+  schedule:
+    - cron: '0 */2 * * *' # Every 2 hours
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  update-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Dashboard Content
+        id: dashboard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # 1. Fetch Data using GraphQL + Pagination
+          OWNER=${REPO%/*}
+          NAME=${REPO#*/}
+          
+          # FETCH AND SAVE DATA
+          # shellcheck disable=SC2016
+          gh api graphql --paginate \
+            -F owner="$OWNER" -F name="$NAME" \
+            -f query='
+              query($owner: String!, $name: String!, $endCursor: String) {
+                repository(owner: $owner, name: $name) {
+                  pullRequests(first: 50, states: OPEN, after: $endCursor, orderBy: {field: CREATED_AT, direction: DESC}) {
+                    nodes {
+                      number
+                      title
+                      url
+                      createdAt
+                      reviewDecision
+                      isDraft
+                      author { login }
+                      assignees(first: 10) { nodes { login } }
+                      statusCheckRollup { state }
+                    }
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                  }
+                }
+              }
+            ' \
+            --jq '.data.repository.pullRequests.nodes[] | {number, title, url, createdAt, reviewDecision, isDraft, author, statusCheckRollup, assignees: .assignees.nodes}' \
+            | jq -s '.[0:100]' > pr_data.json
+
+          # 2. Generate the Body File
+          {
+            echo "# 🚦 Live Review Dashboard"
+            echo "_Last updated: $(date)_"
+            echo "_Note: Draft PRs are hidden._"
+            echo ""
+
+            # --- Unassigned Section ---
+            echo "### ⚠️ Unassigned PRs"
+            echo "| PR | Age | Status | Title | Author |"
+            echo "| :--- | :--- | :--- | :--- | :--- |"
+            
+            jq -r '.[] | select(.isDraft == false) | select(.assignees | length == 0) | 
+              "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "FAILURE" then "❌ CI Failed" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
+            
+            echo ""
+
+            # --- Assigned Section ---
+            jq -r '.[] | select(.isDraft == false) | .assignees[].login' pr_data.json | sort | uniq | while read -r USER; do
+              echo "### 👤 Assigned to: @$USER"
+              echo "| PR | Age | Status | Title | Author |"
+              echo "| :--- | :--- | :--- | :--- | :--- |"
+              
+              jq -r --arg USER "$USER" '.[] | select(.isDraft == false) | select(.assignees[].login == $USER) | 
+                "| <a href=\"\(.url)\">#\(.number)</a> | \((now - (.createdAt | fromdate)) / 86400 | floor) days | \(if .reviewDecision == "APPROVED" then "✅ Approved" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "FAILURE" then "❌ CI Failed" elif (.statusCheckRollup.state? // .statusCheckRollup[0]?.state?) == "SUCCESS" then "💚 CI Passed" else "🟡 Pending" end) | \(.title) | @\(.author.login) |"' pr_data.json
+              
+              echo ""
+            done
+            
+            echo ""
+
+          } > body.md
+
+          # 3. Save to Env
+          {
+            echo "BODY_CONTENT<<EOF"
+            cat body.md
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Find Previous Comment
+        uses: peter-evans/find-comment@v3
+        id: fc
+        with:
+          issue-number: 701
+          body-includes: 
+      - name: Create or Update Comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          issue-number: 701
+          body: ${{ env.BODY_CONTENT }}
+          edit-mode: replace
