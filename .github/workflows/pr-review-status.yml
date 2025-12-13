@@ -103,6 +103,6 @@ jobs:
         uses: peter-evans/create-or-update-comment@v4
         with:
           comment-id: ${{ steps.fc.outputs.comment-id }}
-          issue-number: 701
+          issue-number: 1
           body: ${{ env.BODY_CONTENT }}
           edit-mode: replace
