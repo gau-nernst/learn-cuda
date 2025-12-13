@@ -181,10 +181,10 @@ def attn_thread_block_ref(
     cur_tb_second_mma_prob_reg = [copy.deepcopy(cur_warp_second_mma_prob_reg) for warp_id in range(NUM_WARPS)]
     # Init O frag
     mma_o_frag = torch.zeros((MMAConfig.M, MMAConfig.N), device=device, dtype=torch.float32)
-    cur_warp_second_mma_o_reg = [
+    cur_warp_second_mma_out_reg = [
         [mma_o_frag.clone() for n_id in range(DIM // MMAConfig.N)] for m_id in range(query_rows_per_warp // MMAConfig.M)
     ]
-    cur_tb_second_mma_out_reg = [copy.deepcopy(cur_warp_second_mma_o_reg) for warp_id in range(NUM_WARPS)]
+    cur_tb_second_mma_out_reg = [copy.deepcopy(cur_warp_second_mma_out_reg) for warp_id in range(NUM_WARPS)]
 
     # Init rowmax [BLOCK_Q]
     init_cur_warp_rowmax = torch.zeros((query_rows_per_warp), device=device, dtype=torch.float32)
@@ -246,27 +246,27 @@ def attn_thread_block_ref(
         # All Q and K are in the register, we can do mma
         for warp_id in range(NUM_WARPS):
             cur_warp_first_mma_q_reg = cur_tb_first_mma_q_reg[warp_id]
-            cur_warp_s_regmem_per_tb = cur_tb_first_mma_s_frag[warp_id]
+            cur_warp_first_mma_s_frag = cur_tb_first_mma_s_frag[warp_id]
             first_mma_num_m = query_rows_per_warp // MMAConfig.M
             first_mma_num_n = BLOCK_KV // MMAConfig.N
             first_mma_num_k = DIM // MMAConfig.K
             for mma_m_id in range(first_mma_num_m):
                 for mma_n_id in range(first_mma_num_n):
-                    cur_s_reg_frag = cur_warp_s_regmem_per_tb[mma_m_id][mma_n_id]
+                    cur_s_reg = cur_warp_first_mma_s_frag[mma_m_id][mma_n_id]
                     for mma_k_id in range(first_mma_num_k):
-                        cur_mma_q = cur_warp_first_mma_q_reg[mma_m_id][mma_k_id]
-                        cur_mma_k = cur_tb_first_mma_k_reg[mma_n_id][mma_k_id]
-                        mma_m16n8k16_(frag_A=cur_mma_q, frag_B=cur_mma_k, frag_D=cur_s_reg_frag)
+                        cur_mma_query = cur_warp_first_mma_q_reg[mma_m_id][mma_k_id]
+                        cur_mma_key = cur_tb_first_mma_k_reg[mma_n_id][mma_k_id]
+                        mma_m16n8k16_(frag_A=cur_mma_query, frag_B=cur_mma_key, frag_D=cur_s_reg)
 
-        # apply softmax scale sqrt(dk)
+        # apply softmax scale: sqrt(dk)
         for warp_id in range(NUM_WARPS):
             cur_warp_first_mma_s_frag = cur_tb_first_mma_s_frag[warp_id]
             for mma_m_id in range(query_rows_per_warp // MMAConfig.M):
                 for mma_n_id in range(BLOCK_KV // MMAConfig.N):
-                    cur_s_frag = cur_warp_first_mma_s_frag[mma_m_id][mma_n_id]
-                    cur_s_frag.mul_(softmax_scale)
+                    cur_s_reg = cur_warp_first_mma_s_frag[mma_m_id][mma_n_id]
+                    cur_s_reg.mul_(softmax_scale)
 
-        # this row max
+        # init this KV iter row max
         cur_warp_this_iter_rowmax = torch.zeros((query_rows_per_warp), device=device, dtype=torch.float32)
         cur_warp_this_iter_rowmax.fill_(-torch.inf)
         cur_tb_this_iter_rowmax = [cur_warp_this_iter_rowmax.clone() for _ in range(NUM_WARPS)]
@@ -282,8 +282,8 @@ def attn_thread_block_ref(
             for mma_m_id in range(query_rows_per_warp // MMAConfig.M):
                 start_row = mma_m_id * MMAConfig.M
                 for mma_n_id in range(BLOCK_KV // MMAConfig.N):
-                    cur_s_reg_frag = cur_warp_first_mma_s_frag[mma_m_id][mma_n_id]
-                    cur_s_rowmax, _ = cur_s_reg_frag.max(dim=1, keepdim=False)
+                    cur_s_reg = cur_warp_first_mma_s_frag[mma_m_id][mma_n_id]
+                    cur_s_rowmax, _ = cur_s_reg.max(dim=1, keepdim=False)
                     cur_warp_this_iter_rowmax[start_row : start_row + MMAConfig.M] = torch.max(
                         cur_warp_this_iter_rowmax[start_row : start_row + MMAConfig.M], cur_s_rowmax
                     )
@@ -297,14 +297,14 @@ def attn_thread_block_ref(
             cur_warp_rescale.copy_(torch.exp(rowmax_diff))
 
             # Apply rescale factor on previou O
-            cur_warp_second_mma_o_reg = cur_tb_second_mma_out_reg[warp_id]
+            cur_warp_second_mma_out_reg = cur_tb_second_mma_out_reg[warp_id]
             for mma_m_id in range(query_rows_per_warp // MMAConfig.M):
                 start_row = mma_m_id * MMAConfig.M
                 for mma_n_id in range(DIM // MMAConfig.N):
-                    cur_o_reg = cur_warp_second_mma_o_reg[mma_m_id][mma_n_id]
+                    cur_out_reg = cur_warp_second_mma_out_reg[mma_m_id][mma_n_id]
                     cur_rescale = cur_warp_rescale[start_row : start_row + MMAConfig.M]
-                    cur_o_reg.copy_(cur_o_reg * cur_rescale.unsqueeze(-1))
-            # Update the rowmax
+                    cur_out_reg.copy_(cur_out_reg * cur_rescale.unsqueeze(-1))
+            # Update the rowmax after apply rescale on previous output
             cur_warp_rowmax.copy_(cur_warp_this_iter_rowmax)
 
         # Next, we repack the 2xS_rmem to P_rmem, 2xm16n8 -> m16k16
