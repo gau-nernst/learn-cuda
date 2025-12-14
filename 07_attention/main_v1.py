@@ -329,7 +329,7 @@ def attn_thread_block_ref(
                             frag_B=cur_mma_key,
                             frag_D=cur_s_reg,
                         )
-                        if (kv_iter == 0 and warp_id == 0 and mma_m_id == 0 and mma_n_id == 0 and mma_k_id==0):
+                        if (kv_iter == num_kv_iters-1 and warp_id == 0 and mma_m_id == 0 and mma_n_id == 0 and mma_k_id==0):
                             show_tensor(cur_mma_query, "cur_mma_query")
                             show_tensor(cur_mma_key, "cur_mma_key")
                             show_tensor(
