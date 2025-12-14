@@ -346,6 +346,7 @@ def attn_thread_block_ref(
         cur_tb_this_iter_rowmax = [cur_warp_this_iter_rowmax.clone() for _ in range(NUM_WARPS)]
 
         # **init rescale factor for EACH kv iter
+        # [BLOCK_Q]
         cur_warp_rescale = torch.zeros(
             (query_rows_per_warp), device=device, dtype=torch.float32
         )
