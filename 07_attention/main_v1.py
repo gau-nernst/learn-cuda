@@ -126,12 +126,12 @@ def attn_thread_block_ref(
 ):
     # Share memory: Q/K/V
     # Reg mem:
-    #  query_rmem warp bf16 [query_rows_per_warp // MMAConfig.M][DIM // MMAConfig.K     ][MMAConfig.M, MMAConfig.K]
-    #  key_rmem   tb   bf16 [BLOCK_KV // MMAConfig.N           ][DIM // MMAConfig.K     ][MMAConfig.N, MMAConfig.K]
+    #  query_rmem warp bf16 [query_rows_per_warp // MMAConfig.M][DIM      // MMAConfig.K][MMAConfig.M, MMAConfig.K]
+    #  key_rmem   tb   bf16 [BLOCK_KV            // MMAConfig.N][DIM      // MMAConfig.K][MMAConfig.N, MMAConfig.K]
     #  s_rmem     warp fp32 [query_rows_per_warp // MMAConfig.M][BLOCK_KV // MMAConfig.N][MMAConfig.M, MMAConfig.N]
     #  prob_rmem  warp bf16 [query_rows_per_warp // MMAConfig.M][BLOCK_KV // MMAConfig.K][MMAConfig.M, MMAConfig.K]
-    #  value_rmem tb   bf16 [BLOCK_KV // MMAConfig.K           ][DIM // MMAConfig.N     ][MMAConfig.K, MMAConfig.N]
-    #  out_rmem   warp fp32 [query_rows_per_warp // MMAConfig.M][DIM // MMAConfig.N     ][MMAConfig.M, MMAConfig.N]
+    #  value_rmem tb   bf16 [BLOCK_KV            // MMAConfig.K][DIM      // MMAConfig.N][MMAConfig.K, MMAConfig.N]
+    #  out_rmem   warp fp32 [query_rows_per_warp // MMAConfig.M][DIM      // MMAConfig.N][MMAConfig.M, MMAConfig.N]
     #  rowmax     warp fp32 [BLOCK_Q]
     #  rowsumexp  warp fp32 [BLOCK_Q]
     softmax_scale = 1.0 / (DIM**0.5)
