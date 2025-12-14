@@ -511,33 +511,3 @@ void attention_v1(
 //   CUDA_CHECK(cudaGetLastError());
 // }
 
-__global__ void attention_v6_kernel(const nv_bfloat16 *Q, const int TB_SIZE, const int DIM, const int BLOCK_Q) {}
-
-void attention_v6(const nv_bfloat16 *Q, // [bs, len_q, DIM]
-                  const nv_bfloat16 *K, // [bs, len_kv, DIM]
-                  const nv_bfloat16 *V, // [bs, len_kv, DIM]
-                  nv_bfloat16 *O,       // [bs, len_q, DIM]
-                  int bs, int len_q, int len_kv, int dim) {
-
-  if (dim != 128) {
-    std::cerr << "Unsupported dim=" << dim << std::endl;
-    exit(1);
-  }
-
-  const int BLOCK_Q = 128;
-  const int BLOCK_KV = 64;
-  const int DIM = 128;
-  const int NUM_WARPS = 4;
-
-  const int num_blocks = bs * cdiv(len_q, BLOCK_Q);
-  const int TB_SIZE = NUM_WARPS * WARP_SIZE;
-  const int smem_size = max(BLOCK_Q, BLOCK_KV * 2) * DIM * sizeof(nv_bfloat16);
-
-  //   auto kernel = attention_v1_kernel<BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS>;
-
-  dim3 grid(num_blocks);
-  dim3 block(TB_SIZE);
-  attention_v6_kernel<<<grid, block, smem_size>>>(Q, TB_SIZE, DIM, BLOCK_Q);
-
-  //   launch_kernel(kernel, num_blocks, TB_SIZE, smem_size, Q, K, V, O, bs, len_q, len_kv);
-}

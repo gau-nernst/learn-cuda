@@ -16,6 +16,7 @@ AttentionFn attention_v1;
 // AttentionFn attention_v3;
 // AttentionFn attention_v4;
 // AttentionFn attention_v5;
+AttentionFn attention_v6;
 
 template<AttentionFn attention>
 at::Tensor sdpa(
@@ -46,4 +47,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 //   m.def("sdpa_v3", &sdpa<attention_v3>);
 //   m.def("sdpa_v4", &sdpa<attention_v4>);
 //   m.def("sdpa_v5", &sdpa<attention_v5>);
+  m.def("sdpa_v6", &sdpa<attention_v6>);
 }
