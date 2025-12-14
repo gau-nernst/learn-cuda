@@ -12,10 +12,10 @@ using AttentionFn = void(
   int dim);
 
 AttentionFn attention_v1;
-AttentionFn attention_v2;
-AttentionFn attention_v3;
-AttentionFn attention_v4;
-AttentionFn attention_v5;
+// AttentionFn attention_v2;
+// AttentionFn attention_v3;
+// AttentionFn attention_v4;
+// AttentionFn attention_v5;
 
 template<AttentionFn attention>
 at::Tensor sdpa(
@@ -42,8 +42,8 @@ at::Tensor sdpa(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("sdpa_v1", &sdpa<attention_v1>);
-  m.def("sdpa_v2", &sdpa<attention_v2>);
-  m.def("sdpa_v3", &sdpa<attention_v3>);
-  m.def("sdpa_v4", &sdpa<attention_v4>);
-  m.def("sdpa_v5", &sdpa<attention_v5>);
+//   m.def("sdpa_v2", &sdpa<attention_v2>);
+//   m.def("sdpa_v3", &sdpa<attention_v3>);
+//   m.def("sdpa_v4", &sdpa<attention_v4>);
+//   m.def("sdpa_v5", &sdpa<attention_v5>);
 }

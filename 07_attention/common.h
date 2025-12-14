@@ -32,19 +32,44 @@ uint32_t swizzle(uint32_t index) {
   return index ^ (bits_to_xor << 4);
 }
 
+
+__device__ inline
+bool isthread0(){
+  return threadIdx.x  == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y  == 0 && blockIdx.z  == 0;
+}
+
+
+
 template <int HEIGHT, int WIDTH, int TB_SIZE>
 __device__ inline
-void global_to_shared(uint32_t dst, const nv_bfloat16 *src, int src_stride, int tid) {
-  constexpr int num_elems = 16 / sizeof(nv_bfloat16);
-  constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
-
+void global_to_shared(uint32_t dst, const nv_bfloat16 *src, int src_stride, int tid, bool is_debug = false) {
+  constexpr int num_bytes_per_thread_per_instruction = 16;
+  constexpr int num_bytes_per_bf16 = 2;
+  constexpr int num_elems_per_instruct = num_bytes_per_thread_per_instruction / num_bytes_per_bf16; // 8
+  // constexpr int num_elems = 16 / sizeof(nv_bfloat16);
+  constexpr int num_elems_per_block = HEIGHT * WIDTH;
+  constexpr int num_iters = num_elems_per_block / (TB_SIZE * num_elems_per_instruct);
+  // constexpr int num_iters = HEIGHT * WIDTH / (TB_SIZE * num_elems);
+  // For Q:
+  // BLOCK_Q, DIM,   TB_SIZE
+  // HEIGHT , WIDTH, TB_SIZE
+  
+  if (isthread0() && is_debug) {
+    printf("global_to_shared: HEIGHT=%d, WIDTH=%d, TB_SIZE=%d, num_iters=%d, num_elems_per_instruct=%d, src_stride=%d, \n",
+           HEIGHT, WIDTH, TB_SIZE, num_iters, num_elems_per_instruct, src_stride);
+  }
   for (int iter = 0; iter < num_iters; iter++) {
-    const int idx = (iter * TB_SIZE + tid) * num_elems;
+    const int idx = (iter * TB_SIZE + tid) * num_elems_per_instruct;
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
 
     const uint32_t dst_addr = dst + (row * WIDTH + col) * sizeof(nv_bfloat16);
     const nv_bfloat16 *src_addr = src + (row * src_stride + col);
+    auto first_val = *src_addr;
+    float first_val_in_float = __bfloat162float(first_val);
+    if ( iter == 0 && is_debug){
+        printf("tid, %d, load row, %d, col, %d, %.2f \n", tid, row, col, first_val_in_float);
+    }
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(dst_addr), "l"(src_addr));
   }
 }
@@ -116,6 +141,7 @@ void launch_kernel(
   Args... args) {
   if (smem_size > 48'000)
     CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
+    printf("Launch kenrel with num_blocks: %d, block_size: %d \n", num_blocks, block_size);
   kernel<<<num_blocks, block_size, smem_size>>>(args...);
   CUDA_CHECK(cudaGetLastError());
 }

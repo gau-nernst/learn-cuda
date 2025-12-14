@@ -326,6 +326,7 @@ def attn_thread_block_ref(
         for warp_id in range(NUM_WARPS):
             cur_warp_rowmax = rowmax_per_tb[warp_id]
             cur_warp_S_Regmem = S_frag_per_tb[warp_id]
+            cur_warp_this_rowsum_exp = this_iter_rowsum_exp_per_tb[warp_id]
             cur_warp_rescale = rescale_per_tb[warp_id]
             cur_warp_P_Regmem = P_Regmem_per_tb[warp_id]
             cur_warp_tile_p_sum = torch.zeros((Q_rows_per_warp), device=device, dtype=torch.float32)
