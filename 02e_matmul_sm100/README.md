@@ -21,6 +21,8 @@ v4 (warp specialization)             | 1208.83
 v5 (2-SM MMA)                        | 1302.29
 v6 (persistent w/ static scheduling) | 1475.93
 
+Go to https://gau-nernst.github.io/tcgen05 for the write-up.
+
 ```bash
 uv pip install modal
 modal setup
