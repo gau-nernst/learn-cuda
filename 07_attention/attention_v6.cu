@@ -577,47 +577,38 @@ __launch_bounds__(NUM_WARPS *WARP_SIZE) __global__
   // * write back
   for (int second_mma_m_id = 0; second_mma_m_id < second_mma_num_m; second_mma_m_id++) {
     for (int second_mma_n_id = 0; second_mma_n_id < second_mma_num_n; second_mma_n_id++) {
-        auto cur_out_reg = output_regs[second_mma_m_id][second_mma_n_id];
-        int warp_start_row = warp_id * num_query_rows_per_warp;
-        int frag_row = second_mma_m_id * MMA_M + warp_start_row;
-        int frag_col = second_mma_n_id * MMA_N;
-        // https://docs.nvidia.com/cuda/parallel-thread-execution/#mma-16816-c
-        /*
-                   | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
-                   -----------------------------------
-           | row 0 |  t0   |   t1  |   t2  |  t3   |
-           | row 1 |  t4   |   t5  |   t6  |  t7   |
-           ...
-           | row 7 |  t28  |  t29  |  t30  |  t31  |
-           -------------------------------------------
-           | row 8 |  t0   |   t1  |   t2  |  t3   |
-           | row 9 |  t4   |   t5  |   t6  |  t7   |
-           ...
-           | row 15|  t28  |  t29  |  t30  |  t31  |
-        */
-        int lane_relative_row =  lane_id / 4;
-        int lane_relative_col = (lane_id % 4) * 2;
-        int lane_row = frag_row + lane_relative_row;
-        int lane_col = frag_col + lane_relative_col;
-        // float 2 bf16
-        cur_out_reg[0] /= rowsumexp_regs[second_mma_m_id][0];
-        cur_out_reg[1] /= rowsumexp_regs[second_mma_m_id][0];
-        cur_out_reg[2] /= rowsumexp_regs[second_mma_m_id][1];
-        cur_out_reg[3] /= rowsumexp_regs[second_mma_m_id][1];
+      auto cur_out_reg = output_regs[second_mma_m_id][second_mma_n_id];
+      int warp_start_row = warp_id * num_query_rows_per_warp;
+      int frag_row = second_mma_m_id * MMA_M + warp_start_row;
+      int frag_col = second_mma_n_id * MMA_N;
+      // https://docs.nvidia.com/cuda/parallel-thread-execution/#mma-16816-c
+      /*
+                 | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+                 -----------------------------------
+         | row 0 |  t0   |   t1  |   t2  |  t3   |
+         | row 1 |  t4   |   t5  |   t6  |  t7   |
+         ...
+         | row 7 |  t28  |  t29  |  t30  |  t31  |
+         -------------------------------------------
+         | row 8 |  t0   |   t1  |   t2  |  t3   |
+         | row 9 |  t4   |   t5  |   t6  |  t7   |
+         ...
+         | row 15|  t28  |  t29  |  t30  |  t31  |
+      */
+      int lane_relative_row = lane_id / 4;
+      int lane_relative_col = (lane_id % 4) * 2;
+      int lane_row = frag_row + lane_relative_row;
+      int lane_col = frag_col + lane_relative_col;
+      // float 2 bf16
+      cur_out_reg[0] /= rowsumexp_regs[second_mma_m_id][0];
+      cur_out_reg[1] /= rowsumexp_regs[second_mma_m_id][0];
+      cur_out_reg[2] /= rowsumexp_regs[second_mma_m_id][1];
+      cur_out_reg[3] /= rowsumexp_regs[second_mma_m_id][1];
 
-      reinterpret_cast<nv_bfloat162 *>(O + (lane_row + 0) * DIM + lane_col)[0] = __float22bfloat162_rn({cur_out_reg[0], cur_out_reg[1]});
-      reinterpret_cast<nv_bfloat162 *>(O + (lane_row + 8) * DIM + lane_col)[0] = __float22bfloat162_rn({cur_out_reg[2], cur_out_reg[3]});
-        
-        // nv_bfloat16 res0 = __float2bfloat16_rn(cur_out_reg[0]);
-        // nv_bfloat16 res1 = __float2bfloat16_rn(cur_out_reg[1]);
-        // nv_bfloat16 res2 = __float2bfloat16_rn(cur_out_reg[2]);
-        // nv_bfloat16 res3 = __float2bfloat16_rn(cur_out_reg[3]);
-        // // const uint32_t out_gmem_addr0 = O + (lane_row * DIM + lane_col) * sizeof(nv_bfloat16);
-        // nv_bfloat162 out_data0 = __float22bfloat162_rn({cur_out_reg[0], cur_out_reg[1]});
-        // nv_bfloat162 out_data1 = __float22bfloat162_rn({cur_out_reg[2], cur_out_reg[3]});
-        // reinterpret_cast<nv_bfloat162 *>(O + (lane_row * DIM + lane_col))[0] = out_data0;
-        // // const uint32_t out_gmem_addr1 = O + ((lane_row + 8) * DIM + lane_col) * sizeof(nv_bfloat16);
-        // reinterpret_cast<nv_bfloat162 *>(O + ((lane_row + 8)* DIM + lane_col))[0] = out_data1;
+      reinterpret_cast<nv_bfloat162 *>(O + (lane_row + 0) * DIM + lane_col)[0] =
+          __float22bfloat162_rn({cur_out_reg[0], cur_out_reg[1]});
+      reinterpret_cast<nv_bfloat162 *>(O + (lane_row + 8) * DIM + lane_col)[0] =
+          __float22bfloat162_rn({cur_out_reg[2], cur_out_reg[3]});
     }
   } // end of write back
 }
