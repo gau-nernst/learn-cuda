@@ -527,7 +527,7 @@ def main():
     # add a small offset so that output does not have a mean of zero,
     # which will result in large relative error
     def generate_input(*shape):
-        # return torch.randn(shape).add(0.5).bfloat16().cuda()
+        return torch.randn(shape).add(0.5).bfloat16().cuda()
         init = torch.arange(torch.prod(torch.tensor(shape)), dtype=torch.float32).reshape(shape)
         return init.bfloat16().cuda()
 
@@ -622,7 +622,8 @@ def main():
         f = getattr(module, f"sdpa_v{i + 1}")
         out = f(Q, K, V)
         # show_tensor(out[0][0], f"out_v{i + 1}")
-        # torch.testing.assert_close(out[0][0], torch_ref)
+        # if i  == 0:
+        torch.testing.assert_close(out[0][0], torch_ref)
         # breakpoint()
         print(f"v{i + 1} passed correctness test")
         # bench_and_print(f, f"v{i + 1}", Q, K, V)
