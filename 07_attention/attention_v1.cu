@@ -43,7 +43,6 @@ void attention_v1_kernel(
   const uint32_t Q_smem = __cvta_generic_to_shared(smem);
   const uint32_t K_smem = Q_smem;
   const uint32_t V_smem = K_smem + BLOCK_KV * DIM * sizeof(nv_bfloat16);
-
   // FA2: shard BLOCK_Q among all warps
   // replicate K and V on all warps
   constexpr int WARP_Q = BLOCK_Q / NUM_WARPS;
@@ -166,6 +165,7 @@ void attention_v1_kernel(
   }
   
   for (int off_kv = 0; off_kv < len_kv; off_kv += BLOCK_KV) {
+    int kv_iter = off_kv / BLOCK_KV;
     if (isthread0()){
         printf("Processing K/V block offset: %d \n", off_kv);
     }
@@ -193,7 +193,7 @@ void attention_v1_kernel(
         }
     }
     __syncthreads();
-
+    int first_mma_num_n = BLOCK_KV / MMA_N;
     // shared -> registers
     for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++)
       for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++) {
@@ -201,7 +201,7 @@ void attention_v1_kernel(
         const int col = mma_id_d * MMA_K + (lane_id / 8 * 8);
         const uint32_t addr = K_smem + (row * DIM + col) * sizeof(nv_bfloat16);
         ldmatrix_x2(K_rmem[mma_id_kv][mma_id_d], addr);
-        if (mma_id_kv == 0 && mma_id_d == 0 && off_kv == 0) {
+        if (mma_id_kv == first_mma_num_n-1 && mma_id_d == 0 && off_kv == 0) {
           auto cur_k_reg = K_rmem[mma_id_kv][mma_id_d];
           uint32_t _k0 = cur_k_reg[0];
           uint32_t _k1 = cur_k_reg[1];
@@ -215,19 +215,22 @@ void attention_v1_kernel(
           float2 fq0 = __bfloat1622float2(all_k[0]);
           float2 fq1 = __bfloat1622float2(all_k[1]);
 
-          printf("tid, %d, land_id, %d, all_k bf16 values, %0.2f %0.2f | %0.2f %0.2f \n", tid, lane_id,
+          printf("v000000000000000000 tid, %d, land_id, %d, row %d, col %d, all_k bf16 values, %0.2f %0.2f | %0.2f %0.2f \n", tid, lane_id,
+                    row, col,
+           
                  __bfloat162float(all_k[0].x), __bfloat162float(all_k[0].y), __bfloat162float(all_k[1].x),
                  __bfloat162float(all_k[1].y));
         }
       }
   
 
+
     // MMA S = Q @ K.T [BLOCK_Q, BLOCK_KV]
     for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++) {
       for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
         for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++) {
           mma_m16n8k16(Q_rmem[mma_id_q][mma_id_d], K_rmem[mma_id_kv][mma_id_d], S_rmem[mma_id_q][mma_id_kv]);
-          if (mma_id_q == 0 && mma_id_kv == 0 && mma_id_d == 0 && off_kv == 0) {
+          if (mma_id_q == 0 && mma_id_kv == first_mma_num_n-1 && mma_id_d == 0 && off_kv == 0) {
             nv_bfloat162 cur_q[4];
             nv_bfloat162 cur_k[2];
             cur_q[0] = *reinterpret_cast<nv_bfloat162 *>(&Q_rmem[mma_id_q][mma_id_d][0]);
@@ -246,9 +249,10 @@ void attention_v1_kernel(
                    tid, lane_id, __bfloat162float(cur_q[0].x), __bfloat162float(cur_q[0].y),
                    __bfloat162float(cur_q[1].x), __bfloat162float(cur_q[1].y), __bfloat162float(cur_q[2].x),
                    __bfloat162float(cur_q[2].y), __bfloat162float(cur_q[3].x), __bfloat162float(cur_q[3].y));
-            printf("tid, %d, land_id, %d, cur_k bf16 values, %0.4f %0.4f | %0.4f %0.4f\n", tid, lane_id, 
-                   __bfloat162float(cur_k[0].x), __bfloat162float(cur_k[0].y), __bfloat162float(cur_k[1].x),
-                   __bfloat162float(cur_k[1].y));
+            printf("v111  tid, %d, land_id, %d, cur_k bf16 values, %0.4f %0.4f | %0.4f %0.4f\n", tid, lane_id, 
+                   fk0.x, fk0.y, fk1.x, fk1.y
+                   
+                   );
             
             
             
@@ -272,12 +276,29 @@ void attention_v1_kernel(
         for (int reg_id = 0; reg_id < 4; reg_id++)
           S_rmem[mma_id_q][mma_id_kv][reg_id] *= softmax_scale;
 
+    if(isthread0() && off_kv == 0){
+        // s_regs[mma_m_id][mma_n_id][0]
+        printf("tid: %d, soft_scale: %f Before first kv block, s_regs[0][0]: %f, %f, %f, %f \n", tid,
+        softmax_scale,
+        S_rmem[0][first_mma_num_n-1][0],
+        S_rmem[0][first_mma_num_n-1][1],
+        S_rmem[0][first_mma_num_n-1][2],
+        S_rmem[0][first_mma_num_n-1][3]
+        );
+    }
+
       // rowmax
       float this_rowmax[2] = {-FLT_MAX, -FLT_MAX};
       for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_N; mma_id_kv++) {
         float *regs = S_rmem[mma_id_q][mma_id_kv];
         this_rowmax[0] = max(this_rowmax[0], max(regs[0], regs[1]));  // c0 and c1
         this_rowmax[1] = max(this_rowmax[1], max(regs[2], regs[3]));  // c2 and c3
+      }
+      if(isthread0() && off_kv == 0 && mma_id_q ==0){
+        printf("tid: %d, After first kv block, this_rowmax[%d]: %f, %f | %f, %f \n", tid, off_kv, this_rowmax[0], this_rowmax[1],
+        
+        rowmax[mma_id_q][0], rowmax[mma_id_q][1]
+        );
       }
 
       // butterfly reduction within 4 threads
@@ -343,11 +364,14 @@ void attention_v1_kernel(
         printf("tid: %d, mma_id_q: %d, rowsumexp: %f, %f | this_rowsumexp: %f, %f \n", tid, mma_id_q,
                rowsumexp[mma_id_q][0], rowsumexp[mma_id_q][1], this_rowsumexp[0], this_rowsumexp[1]);
         // rescale
-        printf("tid: %d, mma_id_q: %d, rescale: %f, %f \n", tid, mma_id_q,
-               rescale[0], rescale[1]);
+        printf("tid: %d, mma_id_q: %d, !!! rescale: %f, %f | this_rowmaxthis_rowmax %f, %f\n", tid, mma_id_q,
+               rescale[0], rescale[1],
+               this_rowmax[0], this_rowmax[1]
+               
+               );
       }
       
-    }
+
     
     // show tile p for debug
     // if ()
@@ -362,8 +386,14 @@ void attention_v1_kernel(
     // print rowsumexp
     if (off_kv == 32){
         for(int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++){
-            printf("tid: %d, After last K block, rowsumexp[%d]: %f, %f | \n", tid, mma_id_q, rowsumexp[mma_id_q][0], rowsumexp[mma_id_q][1]);
+            printf("tid: %d, After last K block, rowsumexp[%d]: %f, %f |  resacles %f, %f this_rowmax[0] %f, %f |   \n", tid, mma_id_q, rowsumexp[mma_id_q][0], rowsumexp[mma_id_q][1],
+            
+            rescale[0], rescale[1],
+            this_rowmax[0], this_rowmax[1]
+            
+            );
         }
+    }
     }
     // load V [BLOCK_KV, DIM]
     // NOTE: we can schedule to load V global->shared earlier
@@ -371,7 +401,7 @@ void attention_v1_kernel(
     asm volatile("cp.async.commit_group;");
     asm volatile("cp.async.wait_all;");
     __syncthreads();
-
+    // ** start A@V
     // shared -> registers
     for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K; mma_id_kv++)
       for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
@@ -397,43 +427,73 @@ void attention_v1_kernel(
         }
       }
     __syncthreads();
+    
+    
+    if(off_kv == 0){
+        nv_bfloat162 temp_prob_regs[4];
+        auto cur_prob_reg = P_rmem[0][0];
+        temp_prob_regs[0] = *reinterpret_cast<nv_bfloat162 *>(&cur_prob_reg[0]);
+        temp_prob_regs[1] = *reinterpret_cast<nv_bfloat162 *>(&cur_prob_reg[1]);
+        temp_prob_regs[2] = *reinterpret_cast<nv_bfloat162 *>(&cur_prob_reg[2]);
+        temp_prob_regs[3] = *reinterpret_cast<nv_bfloat162 *>(&cur_prob_reg[3]);
+        float2 f_temp[4];
+        f_temp[0] = __bfloat1622float2(temp_prob_regs[0]);
+        f_temp[1] = __bfloat1622float2(temp_prob_regs[1]);
+        f_temp[2] = __bfloat1622float2(temp_prob_regs[2]);
+        f_temp[3] = __bfloat1622float2(temp_prob_regs[3]);
+        printf("v111111 kv_iter: %d, tid: %d, prob_regs: %0.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f\n", kv_iter, tid,
+               f_temp[0].x, f_temp[0].y, f_temp[1].x, f_temp[1].y, f_temp[2].x, f_temp[2].y, f_temp[3].x,
+               f_temp[3].y);
+    }
+    if (isthread0()){
+        printf("strat A@V, m: %d, n: %d, k: %d", WARP_Q / MMA_M, DIM / MMA_N, BLOCK_KV / MMA_K);
+    }
     // MMA O += P @ V [BLOCK_Q, DIM]
     for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++) {
       for (int mma_id_d = 0; mma_id_d < DIM / MMA_N; mma_id_d++) {
         for (int mma_id_kv = 0; mma_id_kv < BLOCK_KV / MMA_K; mma_id_kv++) {
 
+
+          __syncthreads();
           mma_m16n8k16(P_rmem[mma_id_q][mma_id_kv], V_rmem[mma_id_kv][mma_id_d], O_rmem[mma_id_q][mma_id_d]);
-          if (off_kv == BLOCK_KV && mma_id_q == 0 && mma_id_d == 0 && mma_id_kv == 0) {
+          __syncthreads();
+
+
+          if (
+            //  isthread0() &&  
+          
+          
+            kv_iter == 1 && mma_id_q == 0 && mma_id_d == DIM / MMA_N - 1 && mma_id_kv == BLOCK_KV / MMA_K-1) {
             auto res = O_rmem[mma_id_q][mma_id_d];
             // float all_res[4];
             // all_res[0] = res[0];
-            printf("tid, %d, land_id, %d, O_rmem bf16 values after first MMA, %0.4f %0.4f %0.4f %0.4f \n", tid, lane_id,
+            printf("tid, %d, land_id, %d, output_regs: %0.6f, %.6f, %.6f, %.6f \n", tid, lane_id,
                    res[0], res[1], res[2], res[3]);
             // show p
-            auto p_res = P_rmem[mma_id_q][mma_id_kv];
-            nv_bfloat162 all_p[4];
-            all_p[0] = *reinterpret_cast<nv_bfloat162 *>(&p_res[0]);
-            all_p[1] = *reinterpret_cast<nv_bfloat162 *>(&p_res[1]);
-            all_p[2] = *reinterpret_cast<nv_bfloat162 *>(&p_res[2]);
-            all_p[3] = *reinterpret_cast<nv_bfloat162 *>(&p_res[3]);
-            float2 fp0 = __bfloat1622float2(all_p[0]);
-            float2 fp1 = __bfloat1622float2(all_p[1]);
-            float2 fp2 = __bfloat1622float2(all_p[2]);
-            float2 fp3 = __bfloat1622float2(all_p[3]);
-            printf("tid, %d, land_id, %d, P_rmem bf16 values after first MMA, %0.4f %0.4f | %0.4f %0.4f | %0.4f %0.4f "
-                   "| %0.4f %0.4f \n",
-                   tid, lane_id, fp0.x, fp0.y, fp1.x, fp1.y, fp2.x, fp2.y, fp3.x, fp3.y);
+            auto cur_a_frag = P_rmem[mma_id_q][mma_id_kv];
+            nv_bfloat162 temp_a_regs[4];
+            temp_a_regs[0] = *reinterpret_cast<nv_bfloat162 *>(&cur_a_frag[0]);
+            temp_a_regs[1] = *reinterpret_cast<nv_bfloat162 *>(&cur_a_frag[1]);
+            temp_a_regs[2] = *reinterpret_cast<nv_bfloat162 *>(&cur_a_frag[2]);
+            temp_a_regs[3] = *reinterpret_cast<nv_bfloat162 *>(&cur_a_frag[3]);
+            float2 f_temp_a[4];
+            f_temp_a[0] = __bfloat1622float2(temp_a_regs[0]);
+            f_temp_a[1] = __bfloat1622float2(temp_a_regs[1]);
+            f_temp_a[2] = __bfloat1622float2(temp_a_regs[2]);
+            f_temp_a[3] = __bfloat1622float2(temp_a_regs[3]);
+            auto cur_b_frag = V_rmem[mma_id_kv][mma_id_d];
+            nv_bfloat162 temp_b_regs[2];
+            temp_b_regs[0] = *reinterpret_cast<nv_bfloat162 *>(&cur_b_frag[0]);
+            temp_b_regs[1] = *reinterpret_cast<nv_bfloat162 *>(&cur_b_frag[1]);
+            float2 f_temp_b[2];
+            f_temp_b[0] = __bfloat1622float2(temp_b_regs[0]);
+            f_temp_b[1] = __bfloat1622float2(temp_b_regs[1]);
 
-            // show v
-            auto v_res = V_rmem[mma_id_kv][mma_id_d];
-            nv_bfloat162 all_v[2];
-            all_v[0] = *reinterpret_cast<nv_bfloat162 *>(&v_res[0]);
-            all_v[1] = *reinterpret_cast<nv_bfloat162 *>(&v_res[1]);
-            float2 fv0 = __bfloat1622float2(all_v[0]);
-            float2 fv1 = __bfloat1622float2(all_v[1]);
-            printf("tid, %d, land_id, %d, V_rmem bf16 values after first MMA, %0.4f %0.4f | %0.4f %0.4f \n", tid,
-                   lane_id, __bfloat162float(all_v[0].x), __bfloat162float(all_v[0].y), __bfloat162float(all_v[1].x),
-                   __bfloat162float(all_v[1].y));
+            printf("v111 kv_iter: %d, tid: %d, a_regs: %0.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f | b_regs: "
+                   "%0.4f, %.4f, %.4f, %.4f \n",
+                   kv_iter, tid, f_temp_a[0].x, f_temp_a[0].y, f_temp_a[1].x, f_temp_a[1].y, f_temp_a[2].x,
+                   f_temp_a[2].y, f_temp_a[3].x, f_temp_a[3].y, f_temp_b[0].x, f_temp_b[0].y, f_temp_b[1].x,
+                   f_temp_b[1].y);
           }
         }
       }
@@ -511,33 +571,3 @@ void attention_v1(
 //   CUDA_CHECK(cudaGetLastError());
 // }
 
-__global__ void attention_v6_kernel(const nv_bfloat16 *Q, const int TB_SIZE, const int DIM, const int BLOCK_Q) {}
-
-void attention_v6(const nv_bfloat16 *Q, // [bs, len_q, DIM]
-                  const nv_bfloat16 *K, // [bs, len_kv, DIM]
-                  const nv_bfloat16 *V, // [bs, len_kv, DIM]
-                  nv_bfloat16 *O,       // [bs, len_q, DIM]
-                  int bs, int len_q, int len_kv, int dim) {
-
-  if (dim != 128) {
-    std::cerr << "Unsupported dim=" << dim << std::endl;
-    exit(1);
-  }
-
-  const int BLOCK_Q = 128;
-  const int BLOCK_KV = 64;
-  const int DIM = 128;
-  const int NUM_WARPS = 4;
-
-  const int num_blocks = bs * cdiv(len_q, BLOCK_Q);
-  const int TB_SIZE = NUM_WARPS * WARP_SIZE;
-  const int smem_size = max(BLOCK_Q, BLOCK_KV * 2) * DIM * sizeof(nv_bfloat16);
-
-  //   auto kernel = attention_v1_kernel<BLOCK_Q, BLOCK_KV, DIM, NUM_WARPS>;
-
-  dim3 grid(num_blocks);
-  dim3 block(TB_SIZE);
-  attention_v6_kernel<<<grid, block, smem_size>>>(Q, TB_SIZE, DIM, BLOCK_Q);
-
-  //   launch_kernel(kernel, num_blocks, TB_SIZE, smem_size, Q, K, V, O, bs, len_q, len_kv);
-}
