@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 import copy
 
-# import pandas as pd
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -22,10 +22,28 @@ except ImportError:
 
 CURRENT_DIR = Path(__file__).parent
 
+
+# CURRENT_DIR = Path(__file__).parent
+# Only load cuda-related source files
+sources = (
+    [str(p) for p in CURRENT_DIR.glob("attention*.cu")]
+    + [str(p) for p in CURRENT_DIR.glob("attention*.cpp")]
+    + [str(p) for p in CURRENT_DIR.glob("attention*.cc")]
+    + [str(p) for p in CURRENT_DIR.glob("attention*.c")]
+)
+
+
 module = load(
     "my_ext",
-    sources=list(CURRENT_DIR.glob("attention*")),
-    extra_cuda_cflags=["-lineinfo", "--ptxas-options=-v"],
+    # sources=list(CURRENT_DIR.glob("attention*")),
+    sources=sources,
+    extra_cuda_cflags=[
+        "-lineinfo",
+        "--ptxas-options=-v",
+        "-arch=compute_80",
+        "-code=sm_80,compute_80",
+        "--generate-line-info",
+    ],
     verbose=True,
 )
 
@@ -507,6 +525,7 @@ def compare_2d_tensor(tensor1, tensor2):
     print(
         f"max_diff: {max_diff},max_rel_diff: {max_rel_diff}, max_diff_record: {max_diff_record}"
     )
+
 
 
 def main():

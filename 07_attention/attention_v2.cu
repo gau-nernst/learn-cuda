@@ -101,6 +101,12 @@ void attention_v2_kernel(
   for (int mma_id_q = 0; mma_id_q < WARP_Q / MMA_M; mma_id_q++)
     for (int mma_id_d = 0; mma_id_d < DIM / MMA_K; mma_id_d++) {
       uint32_t addr = Q_smem_thread;
+      /*
+        const int row_off = warp_id * WARP_Q + (lane_id % 16);
+        const int col_off = lane_id / 16 * 8;
+        Q_smem_thread = swizzle<DIM * sizeof(nv_bfloat16)>(Q_smem + (row_off * DIM + col_off) * sizeof(nv_bfloat16));
+      */
+
       addr += mma_id_q * MMA_M * DIM * sizeof(nv_bfloat16);  // row
       addr ^= mma_id_d * MMA_K * sizeof(nv_bfloat16);  // col
       ldmatrix_x4(Q_rmem[mma_id_q][mma_id_d], addr);

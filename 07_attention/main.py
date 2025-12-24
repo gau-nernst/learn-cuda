@@ -25,7 +25,7 @@ CURRENT_DIR = Path(__file__).parent
 module = load(
     "my_ext",
     sources=list(CURRENT_DIR.glob("attention*")),
-    extra_cuda_cflags=["-lineinfo", "--ptxas-options=-v"],
+    extra_cuda_cflags=["-lineinfo", "--ptxas-options=-v","-arch=compute_80", "-code=sm_80,compute_80"],
     verbose=True,
 )
 
