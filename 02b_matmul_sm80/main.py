@@ -4,7 +4,6 @@ from pathlib import Path
 
 import torch
 import torch.utils.cpp_extension
-from cutedsl_v1 import cutedsl_v1  # import this may break torch.compile on 1st run?
 from triton.testing import do_bench
 
 CURRENT_DIR = Path(__file__).parent
@@ -37,6 +36,10 @@ def main():
     A = torch.randn(M, K).bfloat16().cuda()
     B = torch.randn(N, K).bfloat16().cuda().T
     inductor_mm = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
+    inductor_mm(A, B)
+
+    # import cutedsl will break inductor. hence, we import cutedsl AFTER doing 1 pass with inductor.
+    from cutedsl_v1 import cutedsl_v1
 
     if args.profile is not None:
         if args.profile == "cublas":
@@ -69,7 +72,7 @@ def main():
     bench_and_print(torch.matmul, "CuBLAS")
     bench_and_print(inductor_mm, "Inductor Triton")
 
-    for i in range(7):
+    for i in range(6):
         fn = getattr(module, f"matmul_v{i + 1}")
         output = fn(A, B)
         torch.testing.assert_close(output, output_ref)
