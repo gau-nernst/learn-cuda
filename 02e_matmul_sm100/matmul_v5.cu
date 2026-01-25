@@ -77,8 +77,7 @@ void matmul_v5_kernel(
   else if (warp_id == 1) {
     // allocate tmem for output (issued by both CTAs)
     const int addr = static_cast<int>(__cvta_generic_to_shared(tmem_addr));
-    asm volatile("tcgen05.alloc.cta_group::%2.sync.aligned.shared::cta.b32 [%0], %1;"
-                :: "r"(addr), "r"(BLOCK_N), "n"(CTA_GROUP));
+    tcgen05_alloc<CTA_GROUP>(addr, BLOCK_N);
   }
 
   if constexpr (CTA_GROUP > 1) {
@@ -128,8 +127,7 @@ void matmul_v5_kernel(
     tma_3d_gmem2smem<CTA_GROUP>(B_smem, &B_tmap, 0, off_n + cta_rank * (BLOCK_N / CTA_GROUP), off_k / 64, mbar_addr);
 
     // NOTE: we are using .shared::cluster here
-    asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
-                :: "r"(mbar_addr), "r"(A_size + B_size) : "memory");
+    mbarrier_arrive_expect_tx(mbar_addr, A_size + B_size);
     if constexpr (DO_PROFILE) profiler.stop();
   };
 
@@ -178,8 +176,7 @@ void matmul_v5_kernel(
       }
     // this signals to mbar on BOTH CTAs (thanks to .multicast::cluster)
     constexpr int16_t cta_mask = (1 << CTA_GROUP) - 1;
-    asm volatile("tcgen05.commit.cta_group::%2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%0], %1;"
-                :: "r"(mma_mbar_addr + stage_id * 8), "h"(cta_mask), "n"(CTA_GROUP) : "memory");
+    tcgen05_commit_mcast<CTA_GROUP>(mma_mbar_addr + stage_id * 8, cta_mask);
     if constexpr (DO_PROFILE) profiler.stop();
   };
 
@@ -196,8 +193,7 @@ void matmul_v5_kernel(
 
     // signal when tcgen05 finishes with the main loop to both CTAs
     constexpr int16_t cta_mask = (1 << CTA_GROUP) - 1;
-    asm volatile("tcgen05.commit.cta_group::%2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%0], %1;"
-                :: "r"(mainloop_mbar_addr), "h"(cta_mask), "n"(CTA_GROUP) : "memory");
+    tcgen05_commit_mcast<CTA_GROUP>(mainloop_mbar_addr, cta_mask);
   }
   if constexpr (DO_PROFILE) if (elect_sync()) profiler.start(ProfilerTag::WaitMainloop);
   __syncthreads();  // wait for all warps to reach here
@@ -232,7 +228,7 @@ void matmul_v5_kernel(
   }
   __syncthreads();  // all threads finish reading data from tmem
   if (warp_id == 0)  // deallocate tmem (issued by both CTAs)
-    asm volatile("tcgen05.dealloc.cta_group::%2.sync.aligned.b32 %0, %1;" :: "r"(taddr), "r"(BLOCK_N), "n"(CTA_GROUP));
+    tcgen05_dealloc<CTA_GROUP>(taddr, BLOCK_N);
   if constexpr (DO_PROFILE) if (elect_sync()) {
     profiler.stop();
     profiler.flush();

@@ -25,7 +25,8 @@ Name | Description
 
 ```bash
 # profile a CUDA kernel
-ncu --set full python main.py
+# remember to compile with -lineinfo
+ncu --set full --import-source on -o profile python main.py
 
 # debug illegal memory access
 compute-sanitizer python main.py

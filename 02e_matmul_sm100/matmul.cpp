@@ -13,6 +13,7 @@ MatmulFn matmul_v3;
 MatmulFn matmul_v4;
 MatmulFn matmul_v5;
 MatmulFn matmul_v6;
+MatmulFn matmul_v7;
 
 template <MatmulFn matmul_fn>
 at::Tensor matmul(const at::Tensor& A, const at::Tensor& B) {
@@ -41,6 +42,7 @@ typedef void ProfileMatmulFn(
 
 ProfileMatmulFn profile_matmul_v5;
 ProfileMatmulFn profile_matmul_v6;
+ProfileMatmulFn profile_matmul_v7;
 
 template <ProfileMatmulFn profile_matmul_fn>
 at::Tensor profile_matmul(
@@ -75,7 +77,9 @@ TORCH_LIBRARY(my_matmul, m) {
   m.def("matmul_v4(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v4", &matmul<matmul_v4>);
   m.def("matmul_v5(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v5", &matmul<matmul_v5>);
   m.def("matmul_v6(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v6", &matmul<matmul_v6>);
+  m.def("matmul_v7(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v7", &matmul<matmul_v7>);
 
   m.def("profile_matmul_v5(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor"); m.impl("profile_matmul_v5", &profile_matmul<profile_matmul_v5>);
   m.def("profile_matmul_v6(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor"); m.impl("profile_matmul_v6", &profile_matmul<profile_matmul_v6>);
+  m.def("profile_matmul_v7(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor"); m.impl("profile_matmul_v7", &profile_matmul<profile_matmul_v7>);
 }

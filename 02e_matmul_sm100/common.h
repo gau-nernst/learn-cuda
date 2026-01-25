@@ -7,6 +7,10 @@ constexpr int WARP_SIZE = 32;
 __host__ __device__ inline
 constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
 
+template <typename T>
+__device__ inline
+T warp_uniform(T x) { return __shfl_sync(0xFFFF'FFFF, x, 0); }
+
 // https://github.com/NVIDIA/cutlass/blob/v4.2.1/include/cute/arch/cluster_sm90.hpp#L180
 __device__ inline
 uint32_t elect_sync() {
@@ -46,6 +50,17 @@ void mbarrier_wait(int mbar_addr, int phase) {
 }
 
 __device__ inline
+void mbarrier_arrive_expect_tx(int mbar_addr, int size) {
+  asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
+              :: "r"(mbar_addr), "r"(size) : "memory");
+}
+
+__device__ inline
+void mbarrier_arrive(int mbar_addr) {
+  asm volatile("mbarrier.arrive.release.cta.shared::cluster.b64 _, [%0];" :: "r"(mbar_addr) : "memory");
+}
+
+__device__ inline
 void tma_2d_gmem2smem(int dst, const void *tmap_ptr, int x, int y, int mbar_addr) {
   asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
               :: "r"(dst), "l"(tmap_ptr), "r"(x), "r"(y), "r"(mbar_addr) : "memory");
@@ -63,6 +78,20 @@ void tma_3d_gmem2smem(int dst, const void *tmap_ptr, int x, int y, int z, int mb
               : "memory");
 }
 
+template <int CTA_GROUP = 1>
+__device__ inline
+void tcgen05_alloc(int smem_addr, int size) {
+  asm volatile("tcgen05.alloc.cta_group::%2.sync.aligned.shared::cta.b32 [%0], %1;"
+              :: "r"(smem_addr), "r"(size), "n"(CTA_GROUP));
+}
+
+template <int CTA_GROUP = 1>
+__device__ inline
+void tcgen05_dealloc(int taddr, int size) {
+  asm volatile("tcgen05.dealloc.cta_group::%2.sync.aligned.b32 %0, %1;"
+              :: "r"(taddr), "r"(size), "n"(CTA_GROUP));
+}
+
 // https://github.com/NVIDIA/cutlass/blob/v4.3.1/include/cute/arch/mma_sm100_umma.hpp#L86
 template <int CTA_GROUP = 1>
 __device__ inline
@@ -75,6 +104,20 @@ void tcgen05_mma_f16(int taddr, uint64_t a_desc, uint64_t b_desc, uint32_t i_des
     "}"
     :: "r"(taddr), "l"(a_desc), "l"(b_desc), "r"(i_desc), "r"(enable_input_d), "n"(CTA_GROUP)
   );
+}
+
+template <int CTA_GROUP = 1>
+__device__ inline
+void tcgen05_commit(int mbar_addr) {
+  asm volatile("tcgen05.commit.cta_group::%2.mbarrier::arrive::one.shared::cluster.b64 [%0], %1;"
+              :: "r"(mbar_addr), "n"(CTA_GROUP) : "memory");
+}
+
+template <int CTA_GROUP = 1>
+__device__ inline
+void tcgen05_commit_mcast(int mbar_addr, int16_t cta_mask) {
+  asm volatile("tcgen05.commit.cta_group::%2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%0], %1;"
+              :: "r"(mbar_addr), "h"(cta_mask), "n"(CTA_GROUP) : "memory");
 }
 
 __device__ inline
