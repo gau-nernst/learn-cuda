@@ -54,6 +54,11 @@ void mbarrier_init(int addr, int count) {
 }
 
 __device__ inline
+void mbarrier_arrive(int addr) {
+  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" :: "r"(addr) : "memory");
+}
+
+__device__ inline
 void mbarrier_arrive_expect_tx(int addr, int size) {
   asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;" :: "r"(addr), "r"(size) : "memory");
 }

@@ -142,9 +142,6 @@ void matmul_v0_kernel(
     compute(iter_k % NUM_STAGES);
   }
 
-  // wait for the last MMA to finish
-  __syncthreads();
-
   for (int m = 0; m < WARP_M / MMA_M; m++)
     for (int n = 0; n < WARP_N / MMA_N; n++) {
       const int row = m * MMA_M + (lane_id / 4);

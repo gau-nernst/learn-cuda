@@ -135,9 +135,6 @@ void matmul_v1_kernel(
       phase ^= 1;
   }
 
-  // wait for the last MMA to finish
-  __syncthreads();
-
   C += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
   for (int m = 0; m < WARP_M / MMA_M; m++)
     for (int n = 0; n < WARP_N / MMA_N; n++) {
@@ -150,7 +147,7 @@ void matmul_v1_kernel(
     }
 }
 
-void init_tensor_map(
+static void init_tensor_map(
   CUtensorMap *tmap_ptr,
   const nv_bfloat16 *gmem_ptr,
   uint64_t gmem_height, uint64_t gmem_width,
