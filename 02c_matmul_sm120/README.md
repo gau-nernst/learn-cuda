@@ -3,15 +3,15 @@ Resources:
 - https://cudaforfun.substack.com/p/outperforming-cublas-on-h100-a-worklog - TMA
 - https://docs.nvidia.com/cuda/cuda-c-programming-guide/#asynchronous-data-copies-using-the-tensor-memory-accelerator-tma
 
-For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 13.0.
-- Theoretical limit: 209.5 TFLOPS
+For M = N = K = 4096, BF16 A row-major x B column-major, compile with CUDA 13.0.
+- Theoretical limit: 209.5 TFLOPS for 5090, 503.8 for PRO 6000.
 
-Kernel name                    | TFLOPS | % of SOL
--------------------------------|--------|----------
-CuBLAS 13.0 (via PyTorch 2.10) | 160.54 |   76.63%
-Inductor Triton (PyTorch 2.10) | 173.04 |   82.60%
-v0 (`cp.async`)                | 175.30 |   83.68%
-v1 (TMA)                       | 180.40 |   86.11%
+Kernel name                    | 5090 @ 400W                | PRO 6000 @ 600W
+-------------------------------|----------------------------|---------------------------
+CuBLAS 13.0 (via PyTorch 2.10) | 160.54 TFLOPS (76.63% SOL) | 348.62 TFLOPS (69.20% SOL)
+Inductor Triton (PyTorch 2.10) | 173.04 TFLOPS (82.60% SOL) | 327.36 TFLOPS (64.98% SOL)
+v0 (`cp.async`)                | 175.30 TFLOPS (83.68% SOL) | 326.56 TFLOPS (64.82% SOL)
+v1 (TMA)                       | 180.40 TFLOPS (86.11% SOL) | 339.79 TFLOPS (67.45% SOL)
 
 TODO:
 - Warp specialization

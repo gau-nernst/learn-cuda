@@ -161,10 +161,15 @@ void matmul_v0(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   assert(is_power_of_two(N) && "N must be a power of 2");
   assert(is_power_of_two(K) && "K must be a power of 2");
 
-  // 4 warps
+  // tuned for 5090
   const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
+
+  // tuned for PRO 6000
+  // const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
+  // const int NUM_WARP_M = 2, NUM_WARP_N = 2;
+  // const int NUM_STAGES = 3;
 
   auto kernel = matmul_v0_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
 
