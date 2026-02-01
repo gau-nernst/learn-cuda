@@ -3,10 +3,18 @@ Resources:
 - https://cudaforfun.substack.com/p/outperforming-cublas-on-h100-a-worklog - TMA
 - https://docs.nvidia.com/cuda/cuda-c-programming-guide/#asynchronous-data-copies-using-the-tensor-memory-accelerator-tma
 
+For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 13.0.
+- Theoretical limit: 209.5 TFLOPS
+
+Kernel name                    | TFLOPS | % of SOL
+-------------------------------|--------|----------
+CuBLAS 13.0 (via PyTorch 2.10) | 160.54 |   76.63%
+Inductor Triton (PyTorch 2.10) | 173.04 |   82.60%
+v0 (`cp.async`)                | 175.30 |   83.68%
+v1 (TMA)                       | 180.40 |   86.11%
+
 TODO:
-- TMA replacing `cp.async`
-- TMA + warp-specialized cooperative kernel
-- TMA + warp-specialized ping-pong persistent kernel
+- Warp specialization
 
 Learnings
 - TMA / `cp.async.bulk.tensor`
