@@ -3,9 +3,7 @@
 #include <cuda_bf16.h>
 #include <cudaTypedefs.h>
 
-constexpr int BLOCK_K = 64;  // 128-byte
-
-template <int BLOCK_M, int BLOCK_N, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
 void matmul_v1_kernel(
@@ -70,8 +68,9 @@ void matmul_v1_kernel(
   auto load_AB = [&](int iter_k, int stage_id) {
     if (tid == 0) {
       const int this_mbar_addr = mbar_addr + stage_id * 8;
-      tma_3d_g2s(A_smem + stage_id * AB_size, &A_tmap, 0, off_m, iter_k, this_mbar_addr);
-      tma_3d_g2s(B_smem + stage_id * AB_size, &B_tmap, 0, off_n, iter_k, this_mbar_addr);
+      const int off_k = iter_k * BLOCK_K;
+      tma_2d_g2s(A_smem + stage_id * AB_size, &A_tmap, off_k, off_m, this_mbar_addr);
+      tma_2d_g2s(B_smem + stage_id * AB_size, &B_tmap, off_k, off_n, this_mbar_addr);
       mbarrier_arrive_expect_tx(this_mbar_addr, AB_size);
     }
   };
@@ -158,11 +157,19 @@ void init_tensor_map(
   uint64_t gmem_height, uint64_t gmem_width,
   uint32_t smem_height, uint32_t smem_width
 ) {
-  constexpr uint32_t rank = 3;
-  uint64_t size[rank]        = {64, gmem_height, gmem_width / 64};
-  uint64_t stride[rank - 1]  = {gmem_width * sizeof(nv_bfloat16), 128};  // in bytes
-  uint32_t box_size[rank]    = {64, smem_height, smem_width / 64};
-  uint32_t elem_stride[rank] = {1, 1, 1};
+  constexpr uint32_t rank = 2;
+  uint64_t size[rank]        = {gmem_width, gmem_height};
+  uint64_t stride[rank - 1]  = {gmem_width * sizeof(nv_bfloat16)};  // in bytes
+  uint32_t box_size[rank]    = {smem_width, smem_height};
+  uint32_t elem_stride[rank] = {1, 1};
+
+  CUtensorMapSwizzle swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE;
+  if (smem_width == 16)
+    swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_32B;
+  else if (smem_width == 32)
+    swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B;
+  else if (smem_width == 64)
+    swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B;
 
   auto res = cuTensorMapEncodeTiled(
     tmap_ptr,
@@ -174,7 +181,7 @@ void init_tensor_map(
     box_size,
     elem_stride,
     CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-    CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
+    swizzle,
     CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
     CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
   );
@@ -192,11 +199,11 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   assert(is_power_of_two(K) && "K must be a power of 2");
 
   // 4 warps
-  const int BLOCK_M = 128, BLOCK_N = 64;
+  const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
 
-  auto kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
+  auto kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);

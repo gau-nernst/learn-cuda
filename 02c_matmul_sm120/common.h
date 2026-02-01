@@ -74,6 +74,14 @@ void mbarrier_wait(int mbar_addr, int phase) {
 }
 
 __device__ inline
+void tma_2d_g2s(int dst, const void *tmap_ptr, int x, int y, int mbar_addr) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+              "[%0], [%1, {%2, %3}], [%4];"
+              :: "r"(dst), "l"(tmap_ptr), "r"(x), "r"(y), "r"(mbar_addr)
+              : "memory");
+}
+
+__device__ inline
 void tma_3d_g2s(int dst, const void *tmap_ptr, int x, int y, int z, int mbar_addr) {
   asm volatile("cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes "
               "[%0], [%1, {%2, %3, %4}], [%5];"
