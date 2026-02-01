@@ -14,7 +14,7 @@ template <int BLOCK_N, int CTA_GROUP, int NUM_STAGES, bool DO_PROFILE>
 __global__
 __cluster_dims__(CTA_GROUP, 1, 1)
 __launch_bounds__(TB_SIZE)
-void matmul_v7_kernel(
+void matmul_v7_kernel_cutlass(
   const __grid_constant__ CUtensorMap A_tmap,
   const __grid_constant__ CUtensorMap B_tmap,
   nv_bfloat16 *C_ptr,
@@ -101,6 +101,10 @@ void matmul_v7_kernel(
       int tma_stage = 0;
       int mma_phase = 1;  // the initial MMA phase is 0, and it is available. so we initialize it with 1.
 
+      // both CTA ranks update tx-count of CTA0's mbar
+      // https://github.com/NVIDIA/cutlass/blob/v4.3.1/include/cute/arch/copy_sm100_tma.hpp#L113-L115
+      const int tma_mbar_addr_ = tma_mbar_addr & 0xFEFFFFFF;
+
       for (int this_bid = bid; this_bid < num_tiles; this_bid += num_bids) {
         auto [bid_m, bid_n] = compute_bid(this_bid);
         const int off_m = bid_m * BLOCK_M;
@@ -108,9 +112,7 @@ void matmul_v7_kernel(
 
         for (int iter_k = 0; iter_k < num_iters; iter_k++) {
           // do address calculations before mbarrier_wait()
-          // both CTA ranks update tx-count of CTA0's mbar
-          // https://github.com/NVIDIA/cutlass/blob/v4.3.1/include/cute/arch/copy_sm100_tma.hpp#L113-L115
-          const int mbar_addr = (tma_mbar_addr + tma_stage * 8) & 0xFEFFFFFF;  // this is on CTA0
+          const int mbar_addr = tma_mbar_addr_ + tma_stage * 8;
           const int A_smem = smem + tma_stage * (A_size + B_size);
           const int B_smem = A_smem + A_size;
 
@@ -236,29 +238,39 @@ void matmul_v7_kernel(
       if constexpr (DO_PROFILE) if (elect_sync()) profiler.stop();
 
       if constexpr (DO_PROFILE) if (elect_sync()) profiler.start(ProfilerTag::Epilogue);
-      // load 8 columns from tmem at a time -> store 16 bytes per thread to smem
+      // load 16 columns from tmem at a time -> store 32 bytes per thread to smem
       // (still strided though)
-      for (int n = 0; n < BLOCK_N / 8; n++) {
+      constexpr int WIDTH = 16;
+      for (int n = 0; n < BLOCK_N / WIDTH; n++) {
         // https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-data-path-layout-a
         // Layout A
-        float tmp[8];
         // select tmem buffer
-        const int row = cta_rank * 128 + warp_id * 32;
-        const int col = mainloop_stage * BLOCK_N + n * 8;
-        const int addr = (row << 16) + col;
-        asm volatile("tcgen05.ld.sync.aligned.32x32b.x8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                    : "=f"(tmp[0]), "=f"(tmp[1]), "=f"(tmp[2]), "=f"(tmp[3]),
-                      "=f"(tmp[4]), "=f"(tmp[5]), "=f"(tmp[6]), "=f"(tmp[7])
-                    : "r"(addr));
-        asm volatile("tcgen05.wait::ld.sync.aligned;");
+        const int t_row = cta_rank * 128 + warp_id * 32;
+        const int t_col = mainloop_stage * BLOCK_N + n * WIDTH;
+        const int t_addr = (t_row << 16) + t_col;
 
-        nv_bfloat162 out[4];
-        for (int i = 0; i < 4; i++)
-          out[i] = __float22bfloat162_rn({tmp[i * 2], tmp[i * 2 + 1]});
+        const int g_row = bid_m * BLOCK_M + tid;
+        const int g_col = bid_n * BLOCK_N + n * WIDTH;
 
-        // uncoalesced writes weeee
-        nv_bfloat16 *out_ptr = C_ptr + (bid_m * BLOCK_M + tid) * N + (bid_n * BLOCK_N + n * 8);
-        reinterpret_cast<int4 *>(out_ptr)[0] = reinterpret_cast<int4 *>(out)[0];
+        asm volatile(
+          "{\n"
+          ".reg .f32 f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15;\n"
+          ".reg .b32 b0, b1, b2, b3, b4, b5, b6, b7;\n"
+          "tcgen05.ld.sync.aligned.32x32b.x16.b32\n"
+          "  {f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15}, [%1];\n"
+          "tcgen05.wait::ld.sync.aligned;\n"
+          "cvt.rn.bf16x2.f32 b0, f1, f0;\n"
+          "cvt.rn.bf16x2.f32 b1, f3, f2;\n"
+          "cvt.rn.bf16x2.f32 b2, f5, f4;\n"
+          "cvt.rn.bf16x2.f32 b3, f7, f6;\n"
+          "cvt.rn.bf16x2.f32 b4, f9, f8;\n"
+          "cvt.rn.bf16x2.f32 b5, f11, f10;\n"
+          "cvt.rn.bf16x2.f32 b6, f13, f12;\n"
+          "cvt.rn.bf16x2.f32 b7, f15, f14;\n"
+          "st.global.v8.b32 [%0], {b0, b1, b2, b3, b4, b5, b6, b7};\n"
+          "}"
+          :: "l"(C_ptr + g_row * N + g_col), "r"(t_addr)
+        );
       }
       if constexpr (DO_PROFILE) if (elect_sync()) profiler.stop();
 
@@ -337,11 +349,11 @@ void matmul_v7_launch(
   constexpr int dynamic_size = AB_size + 2 * 8;  // TMA+MMA mbar for each stage
   constexpr int static_size = 4 * 8 + 4;  // 2 mainloop+epilogue mbar, and tmem address
 
-  constexpr int sm100_size = 227'000;
+  constexpr int sm100_size = 227 * 1024;
   constexpr int NUM_STAGES = (sm100_size - static_size) / dynamic_size;
   constexpr int smem_size = NUM_STAGES * dynamic_size + static_size;
 
-  auto this_kernel = matmul_v7_kernel<BLOCK_N, CTA_GROUP, NUM_STAGES, DO_PROFILE>;
+  auto this_kernel = matmul_v7_kernel_cutlass<BLOCK_N, CTA_GROUP, NUM_STAGES, DO_PROFILE>;
   cudaFuncSetAttribute(this_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
   this_kernel<<<grid, TB_SIZE, smem_size>>>(A_tmap, B_tmap, C_ptr, M, N, K, profiler_ptr, num_entries);
