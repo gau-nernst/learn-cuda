@@ -14,7 +14,6 @@ void matmul_v1_kernel(
 ) {
   constexpr int WARP_M = BLOCK_M / NUM_WARP_M;
   constexpr int WARP_N = BLOCK_N / NUM_WARP_N;
-  constexpr int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
 
   static_assert(BLOCK_M % NUM_WARP_M == 0);
   static_assert(BLOCK_N % NUM_WARP_N == 0);
@@ -27,9 +26,9 @@ void matmul_v1_kernel(
   const int lane_id = tid % WARP_SIZE;
 
   // TODO: threadblock swizzling to improve L2 cache hit rate
-  const int num_blocks_n = cdiv(N, BLOCK_N);
-  const int bid_m = bid / num_blocks_n;
-  const int bid_n = bid % num_blocks_n;
+  const int grid_n = cdiv(N, BLOCK_N);
+  const int bid_m = bid / grid_n;
+  const int bid_n = bid % grid_n;
   const int off_m = bid_m * BLOCK_M;
   const int off_n = bid_n * BLOCK_N;
 
