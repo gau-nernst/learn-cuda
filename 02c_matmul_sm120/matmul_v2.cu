@@ -22,13 +22,13 @@ void matmul_v2_kernel(
 
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
-  const int warp_id = tid / WARP_SIZE;
+  const int warp_id = warp_uniform(tid / WARP_SIZE);
   const int lane_id = tid % WARP_SIZE;
 
   // TODO: threadblock swizzling to improve L2 cache hit rate
   const int grid_n = cdiv(N, BLOCK_N);
-  const int bid_m = bid / grid_n;
-  const int bid_n = bid % grid_n;
+  const int bid_m = warp_uniform(bid / grid_n);
+  const int bid_n = warp_uniform(bid % grid_n);
   const int off_m = bid_m * BLOCK_M;
   const int off_n = bid_n * BLOCK_N;
 
@@ -44,7 +44,7 @@ void matmul_v2_kernel(
   const int tma_mbar_addr = smem_addr + NUM_STAGES * AB_size;
   const int mma_mbar_addr = tma_mbar_addr + NUM_STAGES * 8;
 
-  if (tid == 0) {
+  if (warp_id == 0 && elect_sync()) {
     for (int i = 0; i < NUM_STAGES; i++) {
       mbarrier_init(tma_mbar_addr + i * 8, 1);
       mbarrier_init(mma_mbar_addr + i * 8, NUM_WARP_M * NUM_WARP_N * WARP_SIZE);
@@ -59,7 +59,7 @@ void matmul_v2_kernel(
 
   if (warp_id == NUM_WARP_M * NUM_WARP_N) {
     // TMA warp
-    if (lane_id == 0) {
+    if (elect_sync()) {
       int stage_id = 0;
       int phase = 1;
 
@@ -101,7 +101,9 @@ void matmul_v2_kernel(
 
     for (int iter_k = 0; iter_k < num_k_iters; iter_k++) {
       // wait TMA
-      mbarrier_wait(tma_mbar_addr + stage_id * 8, phase);
+      if (warp_id == 0)
+        mbarrier_wait(tma_mbar_addr + stage_id * 8, phase);
+      asm volatile("bar.sync %0, %1;" :: "n"(1), "n"(NUM_WARP_M * NUM_WARP_N * WARP_SIZE));
 
       // A smem->rmem
       for (int m = 0; m < WARP_M / MMA_M; m++)
@@ -198,11 +200,6 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
-
-  // tuned for PRO 6000
-  // const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
-  // const int NUM_WARP_M = 2, NUM_WARP_N = 2;
-  // const int NUM_STAGES = 3;
 
   auto kernel = matmul_v2_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
 

@@ -48,6 +48,25 @@ void mma_m16n8k16(const int A[4], const int B[2], float C[4]) {
                 "r"(B[0]), "r"(B[1]));
 }
 
+// https://github.com/NVIDIA/cutlass/blob/v4.2.1/include/cute/arch/cluster_sm90.hpp#L180
+__device__ inline
+int elect_sync() {
+  int pred = 0;
+  asm volatile(
+    "{\n"
+    ".reg .pred P;\n"
+    "elect.sync _|P, %1;\n"
+    "@P mov.s32 %0, 1;\n"
+    "}"
+    : "+r"(pred) : "r"(0xFFFF'FFFF)
+  );
+  return pred;
+}
+
+template <typename T>
+__device__ inline
+T warp_uniform(T x) { return __shfl_sync(0xFFFF'FFFF, x, 0); }
+
 __device__ inline
 void mbarrier_init(int addr, int count) {
   asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(addr), "r"(count));

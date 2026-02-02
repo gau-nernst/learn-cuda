@@ -22,13 +22,13 @@ void matmul_v1_kernel(
 
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
-  const int warp_id = tid / WARP_SIZE;
+  const int warp_id = warp_uniform(tid / WARP_SIZE);
   const int lane_id = tid % WARP_SIZE;
 
   // TODO: threadblock swizzling to improve L2 cache hit rate
   const int grid_n = cdiv(N, BLOCK_N);
-  const int bid_m = bid / grid_n;
-  const int bid_n = bid % grid_n;
+  const int bid_m = warp_uniform(bid / grid_n);
+  const int bid_n = warp_uniform(bid % grid_n);
   const int off_m = bid_m * BLOCK_M;
   const int off_n = bid_n * BLOCK_N;
 
@@ -46,7 +46,7 @@ void matmul_v1_kernel(
   const int B_smem = A_smem + A_size;
   const int mbar_addr = smem_addr + NUM_STAGES * AB_size;
 
-  if (tid == 0) {
+  if (warp_id == 0 && elect_sync()) {
     for (int i = 0; i < NUM_STAGES; i++)
       mbarrier_init(mbar_addr + i * 8, 1);
     asm volatile("fence.mbarrier_init.release.cluster;");  // visible to async proxy
@@ -65,7 +65,7 @@ void matmul_v1_kernel(
   const int B_smem_thread = B_smem + swizzle<BLOCK_K * sizeof(nv_bfloat16)>(warp_id_n * WARP_N + (lane_id % 8), lane_id / 8);
 
   auto load_AB = [&](int iter_k, int stage_id) {
-    if (tid == 0) {
+    if (warp_id == 0 && elect_sync()) {
       const int this_mbar_addr = mbar_addr + stage_id * 8;
       const int off_k = iter_k * BLOCK_K;
       tma_2d_g2s(A_smem + stage_id * AB_size, &A_tmap, off_k, off_m, this_mbar_addr);
@@ -116,7 +116,9 @@ void matmul_v1_kernel(
     load_AB(prefetch_iter_k, prefetch_iter_k % NUM_STAGES);
 
     // wait for TMA
-    mbarrier_wait(mbar_addr + stage * 8, phase);
+    if (warp_id == 0)
+      mbarrier_wait(mbar_addr + stage * 8, phase);
+    __syncthreads();
 
     // issue MMA
     compute(stage);
@@ -128,7 +130,10 @@ void matmul_v1_kernel(
   }
 
   for (int iter_k = num_k_iters - (NUM_STAGES - 1); iter_k < num_k_iters; iter_k++) {
-    mbarrier_wait(mbar_addr + stage * 8, phase);
+    if (warp_id == 0)
+      mbarrier_wait(mbar_addr + stage * 8, phase);
+    __syncthreads();
+
     compute(stage);
     stage = (stage + 1) % NUM_STAGES;
     if (stage == 0)
