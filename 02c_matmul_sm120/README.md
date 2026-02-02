@@ -8,10 +8,10 @@ For M = N = K = 4096, BF16 A row-major x B column-major, compile with CUDA 13.0.
 
 Kernel name                    | 5090 @ 400W                | PRO 6000 @ 600W
 -------------------------------|----------------------------|---------------------------
-CuBLAS 13.0 (via PyTorch 2.10) | 160.54 TFLOPS (76.63% SOL) | 348.62 TFLOPS (69.20% SOL)
-Inductor Triton (PyTorch 2.10) | 173.04 TFLOPS (82.60% SOL) | 327.36 TFLOPS (64.98% SOL)
-v0 (`cp.async`)                | 175.30 TFLOPS (83.68% SOL) | 326.56 TFLOPS (64.82% SOL)
-v1 (TMA)                       | 180.40 TFLOPS (86.11% SOL) | 339.79 TFLOPS (67.45% SOL)
+CuBLAS 13.0 (via PyTorch 2.10) | 160.54 TFLOPS (76.63% SOL) | 353.23 TFLOPS (70.11% SOL)
+Inductor Triton (PyTorch 2.10) | 173.04 TFLOPS (82.60% SOL) | 331.99 TFLOPS (65.90% SOL)
+v0 (`cp.async`)                | 175.30 TFLOPS (83.68% SOL) | 329.52 TFLOPS (65.41% SOL)
+v1 (TMA)                       | 180.40 TFLOPS (86.11% SOL) | 360.80 TFLOPS (71.62% SOL)
 
 TODO:
 - Warp specialization
