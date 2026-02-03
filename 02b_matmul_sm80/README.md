@@ -9,21 +9,37 @@ Resources:
 - https://github.com/NVIDIA/cutlass/blob/v3.9.2/include/cutlass/gemm/threadblock/mma_multistage.h
 - https://www.spatters.ca/mma-matmul
 
-For M = N = K = 4096, BF16 A row-major x B column-major, 5090 @ 400W, compile with CUDA 12.9
-- Theoretical limit: 209.5 TFLOPS
+BF16 A row-major x B column-major, compile with CUDA 13.0.
 
-Kernel name                                            | TFLOPS | % of SOL
--------------------------------------------------------|--------|----------
-CuBLAS 12.8 (via PyTorch)                              | 176.89 |   84.44%
-Inductor Triton (v3.3.1)                               | 203.81 |   97.29%
-v1 (block+warp tiling, vectorized load)                | 147.44 |   70.38%
-v2 (`cp.async`)                                        | 157.67 |   75.26%
-v3 (pad shared memory)                                 | 172.47 |   82.33%
-v4 (swizzle shared memory)                             | 192.68 |   91.97%
-v5 (`ldmatrix.x4` for B, optimize address computation) | 200.03 |   95.48%
-v6 (2-stage pipelining)                                | 202.05 |   96.44%
+**5090 @ 400W**: Fixed M=N=K=4096. Max 209.5 TFLOPS.
 
-TODO: run this on A100, benchmark across a few shapes
+Kernel name                                            | TFLOPS | %SOL
+-------------------------------------------------------|--------|-------
+CuBLAS 13.0 (via PyTorch 2.10)                         | 159.50 | 76.14%
+Inductor Triton (PyTorch 2.10)                         | 171.56 | 81.89%
+v1 (block+warp tiling, vectorized load)                | 128.07 | 61.13%
+v2 (`cp.async`)                                        | 139.59 | 66.63%
+v3 (pad shared memory)                                 | 152.18 | 72.64%
+v4 (swizzle shared memory)                             | 165.18 | 78.85%
+v5 (`ldmatrix.x4` for B, optimize address computation) | 170.76 | 81.51%
+v6 (2-stage pipelining)                                | 169.33 | 80.82%
+v7 (better swizzling logic, unroll prefetch stages)    | 174.54 | 83.31%
+
+**5090 @ 400W**: Varying problem shapes. Max 209.5 TFLOPS. Report `TFLOPS (%SOL)`
+
+Kernel name                    | 2048            | 4096            | 8192
+-------------------------------|-----------------|-----------------|----------------
+CuBLAS 13.0 (via PyTorch 2.10) | 140.10 (66.87%) | 159.50 (76.14%) | 200.32 (95.62%)
+Inductor Triton (PyTorch 2.10) | 137.13 (65.46%) | 171.56 (81.89%) | 200.47 (95.69%)
+v7                             | 133.15 (63.56%) | 174.54 (83.31%) | 162.81 (77.71%)
+
+**Modal A100 80GB PCIe**: Varying problem shapes. Max 312 TFLOPS. Report `TFLOPS (%SOL)`
+
+Kernel name                    | 2048            | 4096            | 8192
+-------------------------------|-----------------|-----------------|----------------
+CuBLAS 13.0 (via PyTorch 2.10) | 151.15 (48.44%) | 227.49 (72.91%) | 228.16 (73.13%)
+Inductor Triton (PyTorch 2.10) | 159.78 (51.21%) | 205.86 (65.98%) | 211.93 (67.93%)
+v7                             | 174.76 (56.01%) | 166.73 (53.44%) | 141.76 (45.44%)
 
 Lessons learned:
 - Inline PTX: instruction, outputs, inputs, constraints
@@ -62,3 +78,4 @@ Lessons learned:
   - Hence, how we do swizzling is dependent on the row stride. For stride >= 128 bytes, all 8 words of `ldmatrix` maps to the same bank, so we can simply use their **row indices** to swizzle / XOR the column indices. To get the "relative" row index, simply take modulo 8 (or 3 LSBs) -> `new_col = col ^ (row % 8)`.
   - For stride = 64 bytes, every 2 words of `ldmatrix` maps to the same bank. Hence, we use the relative row indices within each 4-word group for swizzling -> `new_col = col ^ ((row % 8) / 2)`.
 - Multi-stage pipeline.
+- Threadblock swizzling only matters for large problem shapes.
