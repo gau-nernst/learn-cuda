@@ -20,7 +20,7 @@ void global_to_shared_async(const nv_bfloat16 *in, int in_stride, uint32_t out, 
   }
 }
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES, int GROUP_M>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
 void matmul_v7_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
@@ -44,20 +44,39 @@ void matmul_v7_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
 
-  // TODO: threadblock swizzling to improve L2 cache hit rate
-  const int num_blocks_n = cdiv(N, BLOCK_N);
-  const int bid_m = bid / num_blocks_n;
-  const int bid_n = bid % num_blocks_n;
-  const int offset_m = bid_m * BLOCK_M;
-  const int offset_n = bid_n * BLOCK_N;
-
   const int warp_id_m = warp_id / NUM_WARP_N;
   const int warp_id_n = warp_id % NUM_WARP_N;
 
+  const int grid_m = cdiv(M, BLOCK_M);
+  const int grid_n = cdiv(N, BLOCK_N);
+  int bid_m, bid_n;
+
+  if constexpr (GROUP_M == 0) {
+    // no swizzling
+    bid_m = bid / grid_n;
+    bid_n = bid % grid_n;
+  }
+  else {
+    // threadblock swizzling to improve L2 cache hit rate
+    // https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
+    // each group is [GROUP_M, grid_n], tile from top (small M) to bottom (large M).
+    // the last group might be shorter than GROUP_M if grid_m % GROUP_M != 0.
+    const int group_size = GROUP_M * grid_n;
+    const int group_id = bid / group_size;
+    const int group_off_m = group_id * GROUP_M;
+    const int group_m = std::min(grid_m - group_off_m, GROUP_M);  // actual group height
+
+    bid_m = group_off_m + ((bid % group_size) % group_m);
+    bid_n = (bid % group_size) / group_m;
+  }
+
+  const int off_m = bid_m * BLOCK_M;
+  const int off_n = bid_n * BLOCK_N;
+
   // A is row-major, B is column-major, C is row-major
-  A += offset_m * K;
-  B += offset_n * K;
-  C += (offset_m + warp_id_m * WARP_M) * N + (offset_n + warp_id_n * WARP_N);
+  A += off_m * K;
+  B += off_n * K;
+  C += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
 
   constexpr int A_size = BLOCK_M * BLOCK_K * sizeof(nv_bfloat16);
   constexpr int B_size = BLOCK_N * BLOCK_K * sizeof(nv_bfloat16);
@@ -173,14 +192,47 @@ void matmul_v7(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   assert(is_power_of_two(K) && "K must be a power of 2");
 
   // 4 warps
+  // tuned for 5090
   const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
 
-  auto kernel = matmul_v7_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
+  // tuned for Modal A100
+  // const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
+  // const int NUM_WARP_M = 2, NUM_WARP_N = 2;
+  // const int NUM_STAGES = 2;
+
+  const int GROUP_M = 0;
+  auto kernel = matmul_v7_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, GROUP_M>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
-  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
+  const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16) * NUM_STAGES;
+
+  launch_kernel(kernel, grid_size, TB_SIZE, shm_size, A, B, C, M, N, K);
+}
+
+void matmul_v8(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+  assert(is_power_of_two(M) && "M must be a power of 2");
+  assert(is_power_of_two(N) && "N must be a power of 2");
+  assert(is_power_of_two(K) && "K must be a power of 2");
+
+  // 4 warps
+  // tuned for 5090
+  const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
+  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
+  const int NUM_STAGES = 2;
+
+  // tuned for Modal A100
+  // const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
+  // const int NUM_WARP_M = 2, NUM_WARP_N = 2;
+  // const int NUM_STAGES = 2;
+
+  const int GROUP_M = 8;
+  auto kernel = matmul_v7_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, GROUP_M>;
+
+  const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
+  const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16) * NUM_STAGES;
 
   launch_kernel(kernel, grid_size, TB_SIZE, shm_size, A, B, C, M, N, K);

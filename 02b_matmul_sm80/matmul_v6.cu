@@ -169,7 +169,7 @@ void matmul_v6(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   auto kernel = matmul_v6_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
-  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16) * NUM_STAGES;
 
   launch_kernel(kernel, grid_size, TB_SIZE, shm_size, A, B, C, M, N, K);

@@ -203,7 +203,7 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
       matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
-  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(nv_bfloat16);
 
   launch_kernel(kernel, grid_size, TB_SIZE, shm_size, A, B, C, M, N, K);
@@ -225,7 +225,7 @@ void matmul_v2(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
       matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
-  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(nv_bfloat16);
 
   launch_kernel(kernel, grid_size, TB_SIZE, shm_size, A, B, C, M, N, K);
@@ -247,7 +247,7 @@ void matmul_v3(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
       matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
-  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(nv_bfloat16);
 
   launch_kernel(kernel, grid_size, TB_SIZE, shm_size, A, B, C, M, N, K);
@@ -269,7 +269,7 @@ void matmul_v4(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
       matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, SHM_STRIDE, use_cp_async, use_swizzle>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
-  const int grid_size = cdiv(M * N, BLOCK_M * BLOCK_N);
+  const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int shm_size = (BLOCK_M + BLOCK_N) * SHM_STRIDE * sizeof(nv_bfloat16);
 
   launch_kernel(kernel, grid_size, TB_SIZE, shm_size, A, B, C, M, N, K);
