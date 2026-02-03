@@ -44,15 +44,27 @@ void matmul_v0_kernel(
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
 
-  // TODO: threadblock swizzling to improve L2 cache hit rate
-  const int grid_n = cdiv(N, BLOCK_N);
-  const int bid_m = bid / grid_n;
-  const int bid_n = bid % grid_n;
-  const int off_m = bid_m * BLOCK_M;
-  const int off_n = bid_n * BLOCK_N;
-
   const int warp_id_m = warp_id / NUM_WARP_N;
   const int warp_id_n = warp_id % NUM_WARP_N;
+
+  // threadblock swizzling to improve L2 cache hit rate
+  // https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
+  constexpr int GROUP_M = 8;
+  const int grid_m = cdiv(M, BLOCK_M);
+  const int grid_n = cdiv(N, BLOCK_N);
+
+  // each group is [GROUP_M, grid_n], tile from top (small M) to bottom (large M).
+  // the last group might be shorter than GROUP_M if grid_m % GROUP_M != 0.
+  const int group_size = GROUP_M * grid_n;
+  const int group_id = bid / group_size;
+  const int group_off_m = group_id * GROUP_M;
+  const int group_m = std::min(grid_m - group_off_m, GROUP_M);  // actual group height
+
+  const int bid_m = group_off_m + ((bid % group_size) % group_m);
+  const int bid_n = (bid % group_size) / group_m;
+
+  const int off_m = bid_m * BLOCK_M;
+  const int off_n = bid_n * BLOCK_N;
 
   // A is row-major, B is column-major, C is row-major
   A += off_m * K;
