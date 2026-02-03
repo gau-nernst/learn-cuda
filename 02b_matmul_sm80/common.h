@@ -78,33 +78,17 @@ uint32_t swizzle(uint32_t index) {
     return index;
 
   uint32_t row_idx = (index / STRIDE) % 8;
-  uint32_t bits_to_xor = row_idx / std::max(64 / STRIDE, 1);
+  uint32_t bits_to_xor = row_idx / std::max(128 / STRIDE, 1);
   return index ^ (bits_to_xor << 4);
 }
 
-// NOTE: stride in element T
-// row and col are also in the units of element size
-template <int STRIDE, typename T>
-__device__
-int swizzle2(int row, int col) {
-  // 16 is the minimum (ldmatrix loads rows of 16 byte each)
-  // when stride is 16, 8 consecutive rows already distribute evenly across 32 banks.
-  constexpr int STRIDE_BYTES = STRIDE * sizeof(T);
-  if constexpr (STRIDE_BYTES == 16)
-    return col;
-
-  // ldmatrix loads a row of 16 bytes. 8 for BF16
-  constexpr int group_width = 16 / sizeof(T);
-
-  // how many rows we must go down to repeat the same bank.
-  // 32 * 4 is 32 banks of 4-byte each.
-  constexpr int rows_same_bank = std::max((32 * 4) / STRIDE_BYTES, 1);
-
-  const int col_group = col / group_width;
-  const int xor_pattern = (row / rows_same_bank) % (8 / rows_same_bank);  // 8 here is 8 rows in ldmatrix
-
-  const int new_col_group = col_group ^ xor_pattern;
-  return new_col_group * group_width;
+// STRIDE in bytes, col in the units of 16-byte
+template <int STRIDE>
+__device__ static
+uint32_t swizzle_better(uint32_t row, uint32_t col) {
+  if constexpr (STRIDE >= 128)
+    col ^= (row % 8) / std::max(128 / STRIDE, 1);
+  return row * STRIDE + col * 16;
 }
 
 template <typename T, typename... Args>

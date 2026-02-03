@@ -3,15 +3,6 @@
 #include <cstdint>
 #include <cuda_bf16.h>
 
-// STRIDE in bytes, col in the units of 16-byte
-template <int STRIDE>
-__device__ static
-uint32_t swizzle_better(uint32_t row, uint32_t col) {
-  if constexpr (STRIDE >= 128)
-    col ^= (row % 8) / std::max(128 / STRIDE, 1);
-  return row * STRIDE + col * 16;
-}
-
 template <int TB_SIZE, int HEIGHT, int WIDTH>
 __device__ static
 void global_to_shared_async(const nv_bfloat16 *in, int in_stride, uint32_t out, int tid) {
