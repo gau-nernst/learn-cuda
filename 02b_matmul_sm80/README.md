@@ -23,6 +23,8 @@ v4 (swizzle shared memory)                             | 192.68 |   91.97%
 v5 (`ldmatrix.x4` for B, optimize address computation) | 200.03 |   95.48%
 v6 (2-stage pipelining)                                | 202.05 |   96.44%
 
+TODO: run this on A100, benchmark across a few shapes
+
 Lessons learned:
 - Inline PTX: instruction, outputs, inputs, constraints
 - `ldmatrix`: a warp loads 8x8 tiles of 16-bit words from shared memory to registers. Each thread holds 2 elements (there are 32 threads in a warp). Which thread holds which element is conveniently correct for `mma` instructions later. We can load 1x, 2x, or 4x of 8x8 16-bit tiles.
@@ -53,4 +55,10 @@ Lessons learned:
   - For `BLOCK_K=32` (stride = 64 bytes = 2^6), all row addresses have the same bit0-5 -> 16-way bank conflict.
   - We XOR bit4-5 with bit1-2 of row index. Note that we don't use bit0 of row index since that bit changes bit6 of row address.
   - Note that row index is also encoded in pre-permuted address: it starts at bit-log2(stride), and spans 3 bits.
+- Updated swizzling instruction. Key idea: permute (i.e. XOR) column indices with row indices
+  - Think in terms of 16-byte units. This only changes column indices, row indices are not affected.
+  - Instead of looking at `ldmatrix` as loading an 8x8 tile of 16-bit, think of it as loading 8 16-byte words. So the main problem is to distribute these 8 16-byte words to 32 different banks.
+  - Before any swizzling, row stride (`BLOCK_K * sizeof(nv_bfloat16)`) determines which banks the next row falls into. For example, with stride = 128 bytes = 32 banks, 8 16-byte words, each being 128 bytes apart, map to the same bank. For stride = 64 bytes = 16 banks, word0, 2, 4, 6 map to the same bank, word1, 3, 5, 7 map to the same bank.
+  - Hence, how we do swizzling is dependent on the row stride. For stride >= 128 bytes, all 8 words of `ldmatrix` maps to the same bank, so we can simply use their **row indices** to swizzle / XOR the column indices. To get the "relative" row index, simply take modulo 8 (or 3 LSBs) -> `new_col = col ^ (row % 8)`.
+  - For stride = 64 bytes, every 2 words of `ldmatrix` maps to the same bank. Hence, we use the relative row indices within each 4-word group for swizzling -> `new_col = col ^ ((row % 8) / 2)`.
 - Multi-stage pipeline.

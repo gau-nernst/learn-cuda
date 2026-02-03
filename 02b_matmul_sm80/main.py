@@ -72,7 +72,7 @@ def main():
     bench_and_print(torch.matmul, "CuBLAS")
     bench_and_print(inductor_mm, "Inductor Triton")
 
-    for i in range(6):
+    for i in range(7):
         fn = getattr(module, f"matmul_v{i + 1}")
         output = fn(A, B)
         torch.testing.assert_close(output, output_ref)
