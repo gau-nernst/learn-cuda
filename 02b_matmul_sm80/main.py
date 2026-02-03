@@ -1,4 +1,5 @@
 import argparse
+import math
 import multiprocessing as mp
 from pathlib import Path
 
@@ -66,14 +67,26 @@ def torch_bench(state: cuda.bench.State) -> None:
 
     stream = to_torch_stream(state.get_stream(), device)
     with torch.cuda.stream(stream):
-        A = torch.randn(M, K, dtype=torch.bfloat16, device=device)
-        B = torch.randn(N, K, dtype=torch.bfloat16, device=device).T
-        f(A, B)  # trigger torch.compile
+        scale = K**-0.5  # make sure output doesn't explode
+        A = torch.randn(M, K, device="cuda").mul(scale).bfloat16()
+        B = torch.randn(N, K, device="cuda").mul(scale).bfloat16().T
+
+        # compute in FP32 to avoid split-K
+        out_ref = torch.mm(A.float(), B.float()).bfloat16()
+        out = f(A, B)
+        torch.testing.assert_close(out, out_ref)
+
+        inputs_list = []
+        for _ in range(state.get_int64("num_inputs")):
+            A = torch.randn(M, K, device=device).mul(scale).bfloat16()
+            B = torch.randn(N, K, device=device).mul(scale).bfloat16().T
+            inputs_list.append((A, B))
 
     def launcher(launch: cuda.bench.Launch) -> None:
         stream = to_torch_stream(launch.get_stream(), device)
         with torch.cuda.stream(stream):
-            f(A, B)
+            for A, B in inputs_list:
+                f(A, B)
 
     state.exec(launcher, sync=True)
 
@@ -81,7 +94,12 @@ def torch_bench(state: cuda.bench.State) -> None:
 def run_nvbench(M: int, N: int, K: int, source_dir: str):
     kernels_list = []
     kernels_list += ["cublas", "inductor"]
-    kernels_list += [f"matmul_v{i}" for i in range(1, 9)]
+    kernels_list += [f"matmul_v{i}" for i in range(7, 9)]
+
+    # duplicate inputs to make sure each measurement is at least 10ms
+    SOL = get_sol()
+    min_latency_ms = 2 * M * N * K / (SOL * 1e12) * 1e3
+    num_inputs = math.ceil(10 / min_latency_ms)
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("source_dir", [source_dir])
@@ -89,14 +107,16 @@ def run_nvbench(M: int, N: int, K: int, source_dir: str):
     bench.add_int64_axis("M", [M])
     bench.add_int64_axis("N", [N])
     bench.add_int64_axis("K", [K])
+    bench.add_int64_axis("num_inputs", [num_inputs])
 
     result_path = "/tmp/result.csv"
     cuda.bench.run_all_benchmarks(["--csv", result_path])
 
     df = pd.read_csv(result_path)
+    df["GPU Time (sec)"] /= num_inputs
     df["latency (us)"] = df["GPU Time (sec)"] * 1e6
     df["TFLOPS"] = 2 * M * N * K / df["GPU Time (sec)"] * 1e-12
-    df["% SOL"] = df["TFLOPS"] / get_sol()
+    df["% SOL"] = df["TFLOPS"] / SOL
 
     # apply formatting
     df["latency (us)"] = df["latency (us)"].map("{:.2f}".format)
@@ -130,20 +150,6 @@ def main(args: argparse.Namespace):
     mp_context = mp.get_context("spawn")
 
     for M, N, K in shapes:
-        # correctness check
-        scale = K**-0.5  # make sure output doesn't explode
-        A = torch.randn(M, K, device="cuda").mul(scale).bfloat16()
-        B = torch.randn(N, K, device="cuda").mul(scale).bfloat16().T
-
-        # compute in FP32 to avoid split-K
-        out_ref = torch.mm(A.float(), B.float()).bfloat16()
-
-        module = get_module(source_dir)
-        for i in range(1, 9):
-            print(f"correctness check for matmul_v{i}")
-            out = getattr(module, f"matmul_v{i}")(A, B)
-            torch.testing.assert_close(out, out_ref)
-
         # nvbench can only be run once per process. hence, we spawn subprocess for each shape.
         proc = mp_context.Process(target=run_nvbench, args=(M, N, K, source_dir))
         proc.start()

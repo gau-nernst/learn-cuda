@@ -6,20 +6,28 @@ Resources:
 - https://research.colfax-intl.com/cutlass-tutorial-writing-gemm-kernels-using-tensor-memory-for-nvidia-blackwell-gpus/
 - https://cudaforfun.substack.com/p/outperforming-cublas-on-h100-a-worklog
 
-Modal B200, BF16 matmul, A/B K-major, M=N=K=4096
+Modal B200, BF16 matmul, A/B K-major, M=N=K=4096. PyTorch 2.10, CUDA 13.0.
 
 Kernel name                          | TFLOPS
 -------------------------------------|--------
-CuBLAS (PyTorch 2.9.1 + CUDA 13)     | 1506.74
-v0 (sm80)                            |  378.08
-v1a (basic tcgen05 + 2D 16B TMA)     |  254.62
-v1b (3D 16B TMA)                     |  252.81
-v2a (2D 128B TMA)                    |  681.20
-v2b (3D 128B TMA)                    |  695.43
-v3 (pipelining)                      |  939.61
-v4 (warp specialization)             | 1208.83
-v5 (2-SM MMA)                        | 1302.29
-v6 (persistent w/ static scheduling) | 1475.93
+CuBLAS                               | 1335.48
+v0 (sm80)                            |  383.26
+v1a (basic tcgen05 + 2D 16B TMA)     |  255.73
+v1b (3D 16B TMA)                     |  254.37
+v2a (2D 128B TMA)                    |  699.39
+v2b (3D 128B TMA)                    |  721.02
+v3 (pipelining)                      |  914.42
+v4 (warp specialization)             | 1053.61
+v5 (2-SM MMA)                        | 1169.65
+v6 (persistent w/ static scheduling) | 1263.76
+v7 (small details)                   | 1290.66
+
+Varying problem shapes. Report TFLOPS.
+
+Kernel name  | 2048    | 4096    | 8192
+-------------|---------|---------|--------
+CuBLAS       | 1110.08 | 1335.48 | 1378.67
+v7           |  933.28 | 1290.66 | 1267.65
 
 Go to https://gau-nernst.github.io/tcgen05 for the write-up.
 

@@ -30,20 +30,20 @@ v8 (threadblock swizzling)                             | 174.85 | 83.46%
 
 Kernel name                    | 2048            | 4096            | 8192
 -------------------------------|-----------------|-----------------|----------------
-CuBLAS 13.0 (via PyTorch 2.10) | 131.36 (62.70%) | 166.16 (79.31%) | 190.90 (91.12%)
-Inductor Triton (PyTorch 2.10) | 119.66 (57.12%) | 175.94 (83.98%) | 187.00 (89.26%)
-v7                             | 123.78 (59.08%) | 175.15 (83.61%) | 143.03 (68.27%)
-v8 (threadblock swizzling)     | 123.49 (58.95%) | 175.61 (83.82%) | 168.84 (80.59%)
+CuBLAS 13.0 (via PyTorch 2.10) | 162.42 (77.53%) | 173.85 (82.99%) | 187.15 (89.33%)
+Inductor Triton (PyTorch 2.10) | 160.67 (76.69%) | 173.75 (82.93%) | 184.28 (87.96%)
+v7                             | 150.98 (72.07%) | 173.25 (82.70%) | 139.11 (66.40%)
+v8 (threadblock swizzling)     | 150.69 (71.93%) | 171.81 (82.01%) | 164.47 (78.51%)
 
 **Modal A100 40GB SXM4**: Varying problem shapes. Max 312 TFLOPS. Report `TFLOPS (%SOL)`.
 - Note: A100-80GB on Modal comes in PCIe and SXM4 versions. They have different perf characteristics, and there is no way to select a particular version. Hence, I went with 40GB variant, which only has SXM4 version, for reliable benchmark result.
 
 Kernel name                    | 2048            | 4096            | 8192
 -------------------------------|-----------------|-----------------|----------------
-CuBLAS 13.0 (via PyTorch 2.10) | 107.73 (34.53%) | 221.10 (70.86%) | 259.17 (83.07%)
-Inductor Triton (PyTorch 2.10) |  95.03 (30.46%) | 205.21 (65.77%) | 236.87 (75.92%)
-v7                             | 116.90 (37.47%) | 214.37 (68.71%) | 219.69 (70.41%)
-v8 (threadblock swizzling)     | 116.84 (37.45%) | 214.84 (68.86%) | 238.56 (76.46%)
+CuBLAS 13.0 (via PyTorch 2.10) | 156.47 (50.15%) | 241.45 (77.39%) | 256.98 (82.37%)
+Inductor Triton (PyTorch 2.10) | 179.82 (57.63%) | 224.76 (72.04%) | 236.40 (75.77%)
+v7                             | 168.83 (54.11%) | 219.58 (70.38%) | 211.68 (67.85%)
+v8 (threadblock swizzling)     | 165.73 (53.12%) | 219.47 (70.34%) | 234.72 (75.23%)
 
 Lessons learned:
 - Inline PTX: instruction, outputs, inputs, constraints
