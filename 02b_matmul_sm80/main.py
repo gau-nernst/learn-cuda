@@ -36,6 +36,18 @@ def get_sol():
     return sol
 
 
+def get_kernel(name: str, source_dir: str):
+    if name == "cublas":
+        f = torch.mm
+    elif name == "inductor":
+        torch._inductor.config.max_autotune_gemm_backends = "TRITON"
+        f = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
+    else:
+        module = get_module(source_dir)
+        f = getattr(module, name)
+    return f
+
+
 def to_torch_stream(s: cuda.bench.CudaStream, device: int | None):
     return torch.cuda.ExternalStream(stream_ptr=s.addressof(), device=device)
 
@@ -44,18 +56,8 @@ def torch_bench(state: cuda.bench.State) -> None:
     # state.set_throttle_threshold(0.25)
     device = state.get_device()
 
-    # compile CUDA kernels
-    module = get_module(state.get_string("source_dir"))
-
     # select kernel
-    kernel_name = state.get_string("kernel")
-    if kernel_name == "cublas":
-        f = torch.mm
-    elif kernel_name == "inductor":
-        torch._inductor.config.max_autotune_gemm_backends = "TRITON"
-        f = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
-    else:
-        f = getattr(module, kernel_name)
+    f = get_kernel(state.get_string("kernel"), state.get_string("source_dir"))
 
     # problem shape
     M = state.get_int64("M")
@@ -79,7 +81,7 @@ def torch_bench(state: cuda.bench.State) -> None:
 def run_nvbench(M: int, N: int, K: int, source_dir: str):
     kernels_list = []
     kernels_list += ["cublas", "inductor"]
-    kernels_list += [f"matmul_v{i}" for i in range(7, 9)]
+    kernels_list += [f"matmul_v{i}" for i in range(1, 9)]
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("source_dir", [source_dir])
@@ -107,17 +109,42 @@ def run_nvbench(M: int, N: int, K: int, source_dir: str):
 
 
 def main(args: argparse.Namespace):
+    source_dir = str(REMOTE_DIR if args.modal else CURRENT_DIR)
+
+    if args.profile is not None:
+        M, N, K = args.shape
+        scale = K**-0.5  # make sure output doesn't explode
+        A = torch.randn(M, K, device="cuda").mul(scale).bfloat16()
+        B = torch.randn(N, K, device="cuda").mul(scale).bfloat16().T
+
+        f = get_kernel(args.profile, source_dir)
+        f(A, B)
+        return
+
     if args.sweep is not None:
         shapes = [(s, s, s) for s in args.sweep]
     else:
         assert len(args.shape) == 3
         shapes = [args.shape]
 
-    source_dir = str(REMOTE_DIR if args.modal else CURRENT_DIR)
-
-    # nvbench can only be run once per process. hence, we spawn subprocess for each shape.
     mp_context = mp.get_context("spawn")
+
     for M, N, K in shapes:
+        # correctness check
+        scale = K**-0.5  # make sure output doesn't explode
+        A = torch.randn(M, K, device="cuda").mul(scale).bfloat16()
+        B = torch.randn(N, K, device="cuda").mul(scale).bfloat16().T
+
+        # compute in FP32 to avoid split-K
+        out_ref = torch.mm(A.float(), B.float()).bfloat16()
+
+        module = get_module(source_dir)
+        for i in range(1, 9):
+            print(f"correctness check for matmul_v{i}")
+            out = getattr(module, f"matmul_v{i}")(A, B)
+            torch.testing.assert_close(out, out_ref)
+
+        # nvbench can only be run once per process. hence, we spawn subprocess for each shape.
         proc = mp_context.Process(target=run_nvbench, args=(M, N, K, source_dir))
         proc.start()
         proc.join()
