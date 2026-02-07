@@ -299,7 +299,7 @@ void matmul_v7_kernel_cutlass(
   if constexpr (DO_PROFILE) if (elect_sync()) profiler.flush();
 }
 
-template <int BLOCK_N, int CTA_GROUP, bool DO_PROFILE>
+template <int BLOCK_N, int CTA_GROUP, int NUM_BLOCKS, bool DO_PROFILE>
 void matmul_v7_launch(
   const nv_bfloat16 *A_ptr,
   const nv_bfloat16 *B_ptr,
@@ -343,7 +343,7 @@ void matmul_v7_launch(
   init_tmap_AB(&A_tmap, A_ptr, M, BLOCK_M);
   init_tmap_AB(&B_tmap, B_ptr, N, BLOCK_N / CTA_GROUP);
 
-  int grid = 148;
+  int grid = std::min(NUM_BLOCKS, (M / BLOCK_M) * (N / BLOCK_N));
 
   constexpr int AB_size = (BLOCK_M + BLOCK_N / CTA_GROUP) * BLOCK_K * sizeof(nv_bfloat16);
   constexpr int dynamic_size = AB_size + 2 * 8;  // TMA+MMA mbar for each stage
@@ -360,16 +360,25 @@ void matmul_v7_launch(
   check_cuda(cudaGetLastError());
 }
 
-void matmul_v7(
+void matmul_v7a(
   const nv_bfloat16 *A_ptr,
   const nv_bfloat16 *B_ptr,
         nv_bfloat16 *C_ptr,
   int M, int N, int K
 ) {
-  matmul_v7_launch<256, 2, false>(A_ptr, B_ptr, C_ptr, M, N, K, nullptr, 0);
+  matmul_v7_launch<256, 2, 148, false>(A_ptr, B_ptr, C_ptr, M, N, K, nullptr, 0);
 }
 
-void profile_matmul_v7(
+void matmul_v7b(
+  const nv_bfloat16 *A_ptr,
+  const nv_bfloat16 *B_ptr,
+        nv_bfloat16 *C_ptr,
+  int M, int N, int K
+) {
+  matmul_v7_launch<256, 2, 128, false>(A_ptr, B_ptr, C_ptr, M, N, K, nullptr, 0);
+}
+
+void profile_matmul_v7a(
   const nv_bfloat16 *A_ptr,
   const nv_bfloat16 *B_ptr,
         nv_bfloat16 *C_ptr,
@@ -377,5 +386,16 @@ void profile_matmul_v7(
   int64_t *profiler_ptr,
   int num_entries
 ) {
-  matmul_v7_launch<256, 2, true>(A_ptr, B_ptr, C_ptr, M, N, K, profiler_ptr, num_entries);
+  matmul_v7_launch<256, 2, 148, true>(A_ptr, B_ptr, C_ptr, M, N, K, profiler_ptr, num_entries);
+}
+
+void profile_matmul_v7b(
+  const nv_bfloat16 *A_ptr,
+  const nv_bfloat16 *B_ptr,
+        nv_bfloat16 *C_ptr,
+  int M, int N, int K,
+  int64_t *profiler_ptr,
+  int num_entries
+) {
+  matmul_v7_launch<256, 2, 128, true>(A_ptr, B_ptr, C_ptr, M, N, K, profiler_ptr, num_entries);
 }

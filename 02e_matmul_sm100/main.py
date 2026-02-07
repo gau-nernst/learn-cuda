@@ -3,12 +3,16 @@
 
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import cuda.bench
 import modal
 import pandas as pd
 import torch
 import torch.utils.cpp_extension
+
+if TYPE_CHECKING:
+    import cuda.bench
+
 
 CURRENT_DIR = Path(__file__).parent
 REMOTE_DIR = Path("/my_extension")
@@ -23,16 +27,17 @@ image = (
 app = modal.App("sm100-matmul", image=image)
 
 MY_KERNELS = [
-    "matmul_v0",
-    "matmul_v1a",
-    "matmul_v1b",
-    "matmul_v2a",
-    "matmul_v2b",
-    "matmul_v3",
-    "matmul_v4",
-    "matmul_v5",
-    "matmul_v6",
-    "matmul_v7",
+    # "matmul_v0",
+    # "matmul_v1a",
+    # "matmul_v1b",
+    # "matmul_v2a",
+    # "matmul_v2b",
+    # "matmul_v3",
+    # "matmul_v4",
+    # "matmul_v5",
+    # "matmul_v6",
+    "matmul_v7a",
+    "matmul_v7b",
 ]
 
 
@@ -61,11 +66,11 @@ def get_kernel(name: str):
     return f
 
 
-def to_torch_stream(s: cuda.bench.CudaStream, device: int | None):
+def to_torch_stream(s: "cuda.bench.CudaStream", device: int | None):
     return torch.cuda.ExternalStream(stream_ptr=s.addressof(), device=device)
 
 
-def torch_bench(state: cuda.bench.State) -> None:
+def torch_bench(state: "cuda.bench.State") -> None:
     # state.set_throttle_threshold(0.25)
     device = state.get_device()
 
@@ -95,7 +100,7 @@ def torch_bench(state: cuda.bench.State) -> None:
             B = torch.randn(N, K, device=device).mul(scale).bfloat16().T
             inputs_list.append((A, B))
 
-    def launcher(launch: cuda.bench.Launch) -> None:
+    def launcher(launch: "cuda.bench.Launch") -> None:
         stream = to_torch_stream(launch.get_stream(), device)
         with torch.cuda.stream(stream):
             for A, B in inputs_list:
@@ -106,6 +111,8 @@ def torch_bench(state: cuda.bench.State) -> None:
 
 @app.function(gpu="B200")
 def benchmark(shape: str):
+    import cuda.bench
+
     print(f"{torch.__version__=}")
     print(f"{torch.version.cuda=}")
 

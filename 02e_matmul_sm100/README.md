@@ -20,7 +20,8 @@ v3 (pipelining)                      |  914.42
 v4 (warp specialization)             | 1053.61
 v5 (2-SM MMA)                        | 1169.65
 v6 (persistent w/ static scheduling) | 1263.76
-v7 (small details)                   | 1290.66
+v7a (small details - 148 blocks)     | 1290.66
+v7b (128 blocks)                     | 1304.22
 
 Varying problem shapes. Report TFLOPS.
 
