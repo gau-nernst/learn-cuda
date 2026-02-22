@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 import torch
-import torch._inductor.config
 import torch.nn.functional as F
 from torch import Tensor
 
@@ -13,6 +12,7 @@ if TYPE_CHECKING:
     import cuda.bench
 
 
+# TODO: try combined w13 version
 def mlp_ref(x: Tensor, w1: Tensor, w3: Tensor, w2: Tensor):
     return (F.silu(x @ w1.T) * (x @ w3.T)) @ w2.T
 
@@ -36,7 +36,7 @@ def get_kernel(name: str):
         f = mlp_ref
     elif name == "inductor":
         # torch._inductor.config.max_autotune_gemm_backends = "TRITON"
-        f = torch.compile(mlp_ref, mode="max-autotune-no-cudagraphs", dynamic=False)
+        f = torch.compile(mlp_ref, mode="max-autotune-no-cudagraphs", dynamic=False, fullgraph=True)
     else:
         fullname = f"mlp_{name}"
         f = getattr(importlib.import_module(fullname), fullname)

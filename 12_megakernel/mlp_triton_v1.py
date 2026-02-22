@@ -17,7 +17,6 @@ def load_flag(ptr):
 
 
 # TODO:
-# - support bs not a multiple of BLOCK_M, especially bs=1
 # - autotune?
 # - add cache hints
 @triton.jit
@@ -42,7 +41,7 @@ def mlp_triton_v1_kernel(
     num_pids = tl.num_programs(0)
 
     # persistent kernel
-    grid_m = batch_size // BLOCK_M
+    grid_m = tl.cdiv(batch_size, BLOCK_M)
     grid_n0: tl.constexpr = mlp_dim // BLOCK_N
     num_tiles0 = grid_m * grid_n0
 
@@ -50,7 +49,7 @@ def mlp_triton_v1_kernel(
         pid_m = pid // grid_n0
         pid_n = pid % grid_n0
 
-        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_m = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % batch_size
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         offs_k = tl.arange(0, BLOCK_K)
 
@@ -78,7 +77,7 @@ def mlp_triton_v1_kernel(
         offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         tmp_ptrs = tmp_ptr + (offs_m[:, None] * mlp_dim + offs_n[None, :])
-        tl.store(tmp_ptrs, acc)  # [BLOCK_M, BLOCK_N]
+        tl.store(tmp_ptrs, acc, mask=offs_m[:, None] < batch_size)  # [BLOCK_M, BLOCK_N]
 
     # signal done
     tl.atomic_add(flag_ptr, 1, sem="release", scope="gpu")
@@ -96,7 +95,7 @@ def mlp_triton_v1_kernel(
         pid_m = pid // grid_n1
         pid_n = pid % grid_n1
 
-        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_m = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % batch_size
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         offs_k = tl.arange(0, BLOCK_K)
 
@@ -116,7 +115,7 @@ def mlp_triton_v1_kernel(
         offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         o_ptrs = o_ptr + (offs_m[:, None] * hidden_dim + offs_n[None, :])
-        tl.store(o_ptrs, acc)  # [BLOCK_M, BLOCK_N]
+        tl.store(o_ptrs, acc, mask=offs_m[:, None] < batch_size)  # [BLOCK_M, BLOCK_N]
 
     # signal done
     before = tl.atomic_add(flag_ptr + 1, 1, sem="release", scope="gpu")
@@ -145,6 +144,10 @@ def mlp_triton_v1(x: Tensor, w1: Tensor, w3: Tensor, w2: Tensor):
 
     # NOTE: may want to limit num SMs used
     num_sms = torch.cuda.get_device_properties(x.device).multi_processor_count
+
+    # heuristic. BLOCK_M needs to be at least 16 to activate MMA pipeline.
+    BLOCK_M = min(max(triton.next_power_of_2(batch_size), 16), 64)
+
     mlp_triton_v1_kernel[(num_sms,)](
         x,
         w1,
@@ -156,7 +159,7 @@ def mlp_triton_v1(x: Tensor, w1: Tensor, w3: Tensor, w2: Tensor):
         batch_size=batch_size,
         hidden_dim=hidden_dim,
         mlp_dim=mlp_dim,
-        BLOCK_M=64,
+        BLOCK_M=BLOCK_M,
         BLOCK_N=64,
         BLOCK_K=64,
         num_stages=4,
