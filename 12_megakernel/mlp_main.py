@@ -40,8 +40,8 @@ def get_kernel(name: str):
         # torch._inductor.config.max_autotune_gemm_backends = "TRITON"
         f = torch.compile(mlp_ref, mode="max-autotune-no-cudagraphs", dynamic=False, fullgraph=True)
     else:
-        fullname = f"mlp_{name}"
-        f = getattr(importlib.import_module(fullname), fullname)
+        m_name, f_name = name.split(".")
+        f = getattr(importlib.import_module(m_name), f_name)
     return f
 
 
@@ -110,7 +110,7 @@ def benchmark(shape: list[int]):
 
     kernels_list = []
     kernels_list += ["eager", "inductor"]
-    kernels_list += ["triton_v1"]
+    kernels_list += ["mlp_triton_v1.mlp_triton_v1", "mlp_triton_v1.mlp_triton_v1_2stage"]
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("kernel", kernels_list)
