@@ -6,6 +6,8 @@ from torch import Tensor
 
 @triton.jit
 def load_flag(ptr):
+    # we can also do the same thing natively with
+    # tl.atomic_add(flag_ptr, 0, sem="acquire", scope="gpu")
     return tl.inline_asm_elementwise(
         "ld.acquire.gpu.global.b32 $0, [$1];",
         constraints="=r,l",
@@ -108,6 +110,7 @@ def _stage2_mainloop(
 # TODO:
 # - autotune?
 # - add cache hints
+# - swap A/B when M is small?
 @triton.jit
 def mlp_triton_v1_kernel(
     x_ptr,  # (batch_size, hidden_dim)
@@ -226,6 +229,7 @@ def mlp_triton_v1(x: Tensor, w13: Tensor, w2: Tensor):
 
     # heuristic. BLOCK_M needs to be at least 16 to activate MMA pipeline.
     BLOCK_M = min(max(triton.next_power_of_2(batch_size), 16), 64)
+    BLOCK_M = 128 if batch_size > 256 else BLOCK_M
     BLOCK_N = 64
     BLOCK_K = 64
 
@@ -256,6 +260,7 @@ def mlp_triton_v1_2stage(x: Tensor, w13: Tensor, w2: Tensor):
 
     # heuristic. BLOCK_M needs to be at least 16 to activate MMA pipeline.
     BLOCK_M = min(max(triton.next_power_of_2(batch_size), 16), 64)
+    BLOCK_M = 128 if batch_size > 256 else BLOCK_M
     BLOCK_N = 64
     BLOCK_K = 64
 
