@@ -10,24 +10,24 @@ Plan
 
 Note: for memory bandwidth, we consider input (M * K), temporary buffer (read and write, 2 * M * N), and w1, w2, w3 weights (3 * N * K), and output (M * K).
 
-**M=1, N=1024, K=3072**
+**M=1, N=3072, K=1024**
 
 Modal H200
 
 Kernel              | Time (us) | TFLOPS | Memory BW (GB/s)
 --------------------|-----------|--------|-----------------
-Eager               | 40.3      | 0.47   | 468.74
-torch.compile       | 39.07     | 0.48   | 483.47
-Triton fused MLP    | 27.23     | 0.69   | 693.65
-Triton 2-kernel MLP | 36.12     | 0.52   | 523.06
+Eager               | 43.92     | 0.43   | 430.15
+torch.compile       | 41.08     | 0.46   | 459.83
+Triton fused MLP    | 25.76     | 0.73   | 733.25
+Triton 2-kernel MLP | 36.21     | 0.52   | 521.69
 
-**M=256, N=1024, K=3072**
+**M=256, N=3072, K=1024**
 
 Modal H200
 
 Kernel              | Time (us) | TFLOPS | Memory BW (GB/s)
 --------------------|-----------|--------|-----------------
-Eager               | 42.43     | 113.87 | 543.66
-torch.compile       | 66.19     |  73.00 | 348.52
-Triton fused MLP    | 28.34     | 170.50 | 814.02
-Triton 2-kernel MLP | 34.38     | 140.56 | 671.05
+Eager               | 41.31     | 116.97 | 558.45
+torch.compile       | 58.48     |  82.63 | 394.50
+Triton fused MLP    | 29.56     | 163.49 | 780.53
+Triton 2-kernel MLP | 38.56     | 125.31 | 598.27

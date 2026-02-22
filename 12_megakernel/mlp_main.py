@@ -63,10 +63,10 @@ def torch_bench(state: "cuda.bench.State") -> None:
 
     stream = to_torch_stream(state.get_stream(), device)
     with torch.cuda.stream(stream):
-        scale = K**-0.5  # make sure output doesn't explode
-        X = torch.randn(M, K, device=device).mul(scale).bfloat16()
-        W13 = torch.randn(N * 2, K, device=device).mul(scale).bfloat16()
-        W2 = torch.randn(K, N, device=device).mul(scale).bfloat16()
+        # apply scaling to make sure the output doesn't explode
+        X = torch.randn(M, K, device=device).mul(K ** -0.5).bfloat16()
+        W13 = torch.randn(N * 2, K, device=device).mul(K ** -0.5).bfloat16()
+        W2 = torch.randn(K, N, device=device).mul(N ** -0.5).bfloat16()
 
         # correctness check
         out_ref = mlp_ref(X, W13, W2)
@@ -75,9 +75,10 @@ def torch_bench(state: "cuda.bench.State") -> None:
 
         inputs_list = []
         for _ in range(state.get_int64("num_inputs")):
-            X = torch.randn(M, K, device=device).mul(scale).bfloat16()
-            W13 = torch.randn(N * 2, K, device=device).mul(scale).bfloat16()
-            W2 = torch.randn(K, N, device=device).mul(scale).bfloat16()
+            # apply scaling to make sure the output doesn't explode
+            X = torch.randn(M, K, device=device).mul(K ** -0.5).bfloat16()
+            W13 = torch.randn(N * 2, K, device=device).mul(K ** -0.5).bfloat16()
+            W2 = torch.randn(K, N, device=device).mul(N ** -0.5).bfloat16()
             inputs_list.append((X, W13, W2))
 
     def launcher(launch: "cuda.bench.Launch") -> None:
@@ -140,7 +141,7 @@ def benchmark(shape: list[int]):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--shape", type=int, nargs="+", default=[128, 1024, 3072])
+    parser.add_argument("--shape", type=int, nargs="+", default=[128, 3072, 1024])
     parser.add_argument("--modal")
     args = parser.parse_args()
 
