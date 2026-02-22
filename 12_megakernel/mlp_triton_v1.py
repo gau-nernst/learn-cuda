@@ -22,8 +22,7 @@ def load_flag(ptr):
 @triton.jit
 def mlp_triton_v1_kernel(
     x_ptr,  # (batch_size, hidden_dim)
-    w1_ptr,  # (mlp_dim, hidden_dim)
-    w3_ptr,  # (mlp_dim, hidden_dim)
+    w13_ptr,  # (mlp_dim * 2, hidden_dim)
     tmp_ptr,  # (batch_size, mlp_dim)
     w2_ptr,  # (hidden_dim, mlp_dim)
     o_ptr,  # (batch_size, hidden_dim)
@@ -40,10 +39,17 @@ def mlp_triton_v1_kernel(
     raw_pid = tl.program_id(0)
     num_pids = tl.num_programs(0)
 
+    # NOTE: typically mlp_dim is 2-5x hidden_dim
+    # hence, the 1st MMA has many output tiles, with short mainloop
+    # while the 2nd MMA has few output tiles, but long mainloop
+
     # persistent kernel
     grid_m = tl.cdiv(batch_size, BLOCK_M)
     grid_n0: tl.constexpr = mlp_dim // BLOCK_N
     num_tiles0 = grid_m * grid_n0
+
+    w1_ptr = w13_ptr
+    w3_ptr = w13_ptr + mlp_dim * hidden_dim
 
     for pid in range(raw_pid, num_tiles0, num_pids):
         pid_m = pid // grid_n0
@@ -63,9 +69,9 @@ def mlp_triton_v1_kernel(
         for _ in range(hidden_dim // BLOCK_K):
             X = tl.load(x_ptrs)  # [BLOCK_M, BLOCK_K]
             W1 = tl.load(w1_ptrs)  # [BLOCK_K, BLOCK_N2]
-            W3 = tl.load(w3_ptrs)  # [BLOCK_K, BLOCK_N2]
-
             acc1 = tl.dot(X, W1, acc=acc1)
+
+            W3 = tl.load(w3_ptrs)  # [BLOCK_K, BLOCK_N2]
             acc3 = tl.dot(X, W3, acc=acc3)
 
             x_ptrs += BLOCK_K
@@ -129,7 +135,7 @@ def mlp_triton_v1_kernel(
 _FLAG: Tensor | None = None
 
 
-def mlp_triton_v1(x: Tensor, w1: Tensor, w3: Tensor, w2: Tensor):
+def mlp_triton_v1(x: Tensor, w13: Tensor, w2: Tensor):
     # lazily init _FLAG
     # NOTE: since this flag is shared module-wide, this function is not thread-safe
     global _FLAG
@@ -137,7 +143,7 @@ def mlp_triton_v1(x: Tensor, w1: Tensor, w3: Tensor, w2: Tensor):
         _FLAG = torch.zeros(2, dtype=torch.int32, device=x.device)
 
     batch_size, hidden_dim = x.shape
-    mlp_dim, _ = w1.shape
+    _, mlp_dim = w2.shape
 
     out = torch.empty_like(x)
     tmp = x.new_empty(batch_size, mlp_dim)
@@ -150,8 +156,7 @@ def mlp_triton_v1(x: Tensor, w1: Tensor, w3: Tensor, w2: Tensor):
 
     mlp_triton_v1_kernel[(num_sms,)](
         x,
-        w1,
-        w3,
+        w13,
         tmp,
         w2,
         out,

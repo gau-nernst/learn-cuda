@@ -12,9 +12,11 @@ if TYPE_CHECKING:
     import cuda.bench
 
 
-# TODO: try combined w13 version
-def mlp_ref(x: Tensor, w1: Tensor, w3: Tensor, w2: Tensor):
-    return (F.silu(x @ w1.T) * (x @ w3.T)) @ w2.T
+# we use combined w13 to align with vLLM/SGLang impl.
+# this helps with the baseline significantly for small shapes.
+def mlp_ref(x: Tensor, w13: Tensor, w2: Tensor):
+    gate, up = (x @ w13.T).chunk(2, dim=1)
+    return (F.silu(gate) * up) @ w2.T
 
 
 # TFLOPS is from specsheet, membw is measured memcpy bw.
@@ -63,28 +65,26 @@ def torch_bench(state: "cuda.bench.State") -> None:
     with torch.cuda.stream(stream):
         scale = K**-0.5  # make sure output doesn't explode
         X = torch.randn(M, K, device=device).mul(scale).bfloat16()
-        W1 = torch.randn(N, K, device=device).mul(scale).bfloat16()
-        W3 = torch.randn(N, K, device=device).mul(scale).bfloat16()
+        W13 = torch.randn(N * 2, K, device=device).mul(scale).bfloat16()
         W2 = torch.randn(K, N, device=device).mul(scale).bfloat16()
 
         # correctness check
-        out_ref = mlp_ref(X, W1, W3, W2)
-        out = f(X, W1, W3, W2)
+        out_ref = mlp_ref(X, W13, W2)
+        out = f(X, W13, W2)
         torch.testing.assert_close(out, out_ref)
 
         inputs_list = []
         for _ in range(state.get_int64("num_inputs")):
             X = torch.randn(M, K, device=device).mul(scale).bfloat16()
-            W1 = torch.randn(N, K, device=device).mul(scale).bfloat16()
-            W3 = torch.randn(N, K, device=device).mul(scale).bfloat16()
+            W13 = torch.randn(N * 2, K, device=device).mul(scale).bfloat16()
             W2 = torch.randn(K, N, device=device).mul(scale).bfloat16()
-            inputs_list.append((X, W1, W3, W2))
+            inputs_list.append((X, W13, W2))
 
     def launcher(launch: "cuda.bench.Launch") -> None:
         stream = to_torch_stream(launch.get_stream(), device)
         with torch.cuda.stream(stream):
-            for X, W1, W3, W2 in inputs_list:
-                f(X, W1, W3, W2)
+            for X, W13, W2 in inputs_list:
+                f(X, W13, W2)
 
     state.exec(launcher, sync=True)
 
@@ -97,15 +97,16 @@ def benchmark(shape: list[int]):
 
     M, N, K = shape
 
+    # we also count writing and reading tmp buffer in total memory traffic
     num_flops = 3 * 2 * M * N * K
-    num_gb = 2 * (2 * M * K + 3 * N * K) * 1e-9
+    num_gb = 2 * (2 * M * K + 3 * N * K + 2 * M * N) * 1e-9
 
     # duplicate inputs to make sure each measurement is at least 10ms
     SOL_COMPUTE, SOL_MEMORY = get_sol()
     min_compute_latency_ms = num_flops / (SOL_COMPUTE * 1e12) * 1e3
     min_memory_latency_ms = num_gb / SOL_MEMORY * 1e3
     min_latency_ms = max(min_compute_latency_ms, min_memory_latency_ms)
-    num_inputs = max(math.ceil(10 / min_latency_ms), 1000)
+    num_inputs = min(math.ceil(10 / min_latency_ms), 1000)
 
     kernels_list = []
     kernels_list += ["eager", "inductor"]
