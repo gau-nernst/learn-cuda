@@ -199,12 +199,25 @@ _FLAG: Tensor | None = None
 
 
 def _heuristics(batch_size: int, hidden_dim: int, mlp_dim: int):
-    # BLOCK_M needs to be at least 16 to activate MMA pipeline.
-    BLOCK_M = min(max(triton.next_power_of_2(batch_size), 16), 64)
-    BLOCK_M = 128 if batch_size > 256 else BLOCK_M
+    if batch_size > 256:
+        BLOCK_M = 128
+    else:
+        # BLOCK_M needs to be at least 16 to activate MMA pipeline(?)
+        BLOCK_M = min(max(triton.next_power_of_2(batch_size), 16), 64)
+
     BLOCK_N = 64
-    BLOCK_K = 64
-    num_stages = 4
+
+    # tuned a bit for H200
+    # BLOCK_K = 64
+    # num_stages = 4
+
+    # tuned a bit for 5090
+    if BLOCK_M == 16:
+        BLOCK_K, num_stages = 32, 12
+    elif BLOCK_M == 32:
+        BLOCK_K, num_stages = 32, 10
+    else:
+        BLOCK_K, num_stages = 64, 4
 
     return BLOCK_M, BLOCK_N, BLOCK_K, num_stages
 
