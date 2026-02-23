@@ -5,20 +5,6 @@ from torch import Tensor
 
 
 @triton.jit
-def load_flag(ptr):
-    # we can also do the same thing natively with
-    # tl.atomic_add(flag_ptr, 0, sem="acquire", scope="gpu")
-    return tl.inline_asm_elementwise(
-        "ld.acquire.gpu.global.b32 $0, [$1];",
-        constraints="=r,l",
-        args=[ptr],
-        dtype=tl.int32,
-        is_pure=False,
-        pack=1,
-    )
-
-
-@triton.jit
 def _stage1_mainloop(
     x_ptr,  # (batch_size, hidden_dim)
     w1_ptr,  # (mlp_dim, hidden_dim)
@@ -154,8 +140,9 @@ def mlp_triton_v1_kernel(
     tl.atomic_add(flag_ptr, 1, sem="release", scope="gpu")
 
     # spin
+    # triton will rewrite atomic add 0 to ld.acquire
     # NOTE: we can prefetch W2 during this time
-    while load_flag(flag_ptr) != num_pids:
+    while tl.atomic_add(flag_ptr, 0, sem="acquire", scope="gpu") != num_pids:
         pass
 
     # persistent kernel
@@ -211,6 +198,17 @@ def mlp_triton_v1_stage2_kernel(
 _FLAG: Tensor | None = None
 
 
+def _heuristics(batch_size: int, hidden_dim: int, mlp_dim: int):
+    # BLOCK_M needs to be at least 16 to activate MMA pipeline.
+    BLOCK_M = min(max(triton.next_power_of_2(batch_size), 16), 64)
+    BLOCK_M = 128 if batch_size > 256 else BLOCK_M
+    BLOCK_N = 64
+    BLOCK_K = 64
+    num_stages = 4
+
+    return BLOCK_M, BLOCK_N, BLOCK_K, num_stages
+
+
 def mlp_triton_v1(x: Tensor, w13: Tensor, w2: Tensor):
     # lazily init _FLAG
     # NOTE: since this flag is shared module-wide, this function is not thread-safe
@@ -226,12 +224,7 @@ def mlp_triton_v1(x: Tensor, w13: Tensor, w2: Tensor):
 
     # NOTE: may want to limit num SMs used
     num_sms = torch.cuda.get_device_properties(x.device).multi_processor_count
-
-    # heuristic. BLOCK_M needs to be at least 16 to activate MMA pipeline.
-    BLOCK_M = min(max(triton.next_power_of_2(batch_size), 16), 64)
-    BLOCK_M = 128 if batch_size > 256 else BLOCK_M
-    BLOCK_N = 64
-    BLOCK_K = 64
+    BLOCK_M, BLOCK_N, BLOCK_K, num_stages = _heuristics(batch_size, hidden_dim, mlp_dim)
 
     mlp_triton_v1_kernel[(num_sms,)](
         x,
@@ -246,7 +239,7 @@ def mlp_triton_v1(x: Tensor, w13: Tensor, w2: Tensor):
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
-        num_stages=4,
+        num_stages=num_stages,
     )
     return out
 
@@ -258,12 +251,7 @@ def mlp_triton_v1_2stage(x: Tensor, w13: Tensor, w2: Tensor):
     out = torch.empty_like(x)
     tmp = x.new_empty(batch_size, mlp_dim)
 
-    # heuristic. BLOCK_M needs to be at least 16 to activate MMA pipeline.
-    BLOCK_M = min(max(triton.next_power_of_2(batch_size), 16), 64)
-    BLOCK_M = 128 if batch_size > 256 else BLOCK_M
-    BLOCK_N = 64
-    BLOCK_K = 64
-
+    BLOCK_M, BLOCK_N, BLOCK_K, num_stages = _heuristics(batch_size, hidden_dim, mlp_dim)
     grid_m = triton.cdiv(batch_size, BLOCK_M)
     mlp_triton_v1_stage1_kernel[(grid_m * (mlp_dim // BLOCK_N),)](
         x,
@@ -275,7 +263,7 @@ def mlp_triton_v1_2stage(x: Tensor, w13: Tensor, w2: Tensor):
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
-        num_stages=4,
+        num_stages=num_stages,
     )
     mlp_triton_v1_stage2_kernel[(grid_m * (hidden_dim // BLOCK_N),)](
         tmp,
@@ -287,6 +275,6 @@ def mlp_triton_v1_2stage(x: Tensor, w13: Tensor, w2: Tensor):
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
-        num_stages=4,
+        num_stages=num_stages,
     )
     return out
