@@ -10,7 +10,7 @@ constexpr int BLOCK_M = 128;
 constexpr int BLOCK_K = 64;  // 128-byte
 constexpr int MMA_K = 16;
 
-template <int BLOCK_N, int CTA_GROUP, int NUM_STAGES, bool DO_PROFILE>
+template <int BLOCK_N, int CTA_GROUP, int NUM_STAGES, bool EPILOGUE_CACHE_MOD, bool DO_PROFILE>
 __global__
 __cluster_dims__(CTA_GROUP, 1, 1)
 __launch_bounds__(TB_SIZE)
@@ -252,25 +252,46 @@ void matmul_v7_kernel_cutlass(
         const int g_row = bid_m * BLOCK_M + tid;
         const int g_col = bid_n * BLOCK_N + n * WIDTH;
 
-        asm volatile(
-          "{\n"
-          ".reg .f32 f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15;\n"
-          ".reg .b32 b0, b1, b2, b3, b4, b5, b6, b7;\n"
-          "tcgen05.ld.sync.aligned.32x32b.x16.b32\n"
-          "  {f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15}, [%1];\n"
-          "tcgen05.wait::ld.sync.aligned;\n"
-          "cvt.rn.bf16x2.f32 b0, f1, f0;\n"
-          "cvt.rn.bf16x2.f32 b1, f3, f2;\n"
-          "cvt.rn.bf16x2.f32 b2, f5, f4;\n"
-          "cvt.rn.bf16x2.f32 b3, f7, f6;\n"
-          "cvt.rn.bf16x2.f32 b4, f9, f8;\n"
-          "cvt.rn.bf16x2.f32 b5, f11, f10;\n"
-          "cvt.rn.bf16x2.f32 b6, f13, f12;\n"
-          "cvt.rn.bf16x2.f32 b7, f15, f14;\n"
-          "st.global.v8.b32 [%0], {b0, b1, b2, b3, b4, b5, b6, b7};\n"
-          "}"
-          :: "l"(C_ptr + g_row * N + g_col), "r"(t_addr)
-        );
+        if constexpr (EPILOGUE_CACHE_MOD)
+          asm volatile(
+            "{\n"
+            ".reg .f32 f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15;\n"
+            ".reg .b32 b0, b1, b2, b3, b4, b5, b6, b7;\n"
+            "tcgen05.ld.sync.aligned.32x32b.x16.b32\n"
+            "  {f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15}, [%1];\n"
+            "tcgen05.wait::ld.sync.aligned;\n"
+            "cvt.rn.bf16x2.f32 b0, f1, f0;\n"
+            "cvt.rn.bf16x2.f32 b1, f3, f2;\n"
+            "cvt.rn.bf16x2.f32 b2, f5, f4;\n"
+            "cvt.rn.bf16x2.f32 b3, f7, f6;\n"
+            "cvt.rn.bf16x2.f32 b4, f9, f8;\n"
+            "cvt.rn.bf16x2.f32 b5, f11, f10;\n"
+            "cvt.rn.bf16x2.f32 b6, f13, f12;\n"
+            "cvt.rn.bf16x2.f32 b7, f15, f14;\n"
+            "st.relaxed.cta.global.L1::no_allocate.v8.b32 [%0], {b0, b1, b2, b3, b4, b5, b6, b7};\n"
+            "}"
+            :: "l"(C_ptr + g_row * N + g_col), "r"(t_addr)
+          );
+        else
+          asm volatile(
+            "{\n"
+            ".reg .f32 f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15;\n"
+            ".reg .b32 b0, b1, b2, b3, b4, b5, b6, b7;\n"
+            "tcgen05.ld.sync.aligned.32x32b.x16.b32\n"
+            "  {f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15}, [%1];\n"
+            "tcgen05.wait::ld.sync.aligned;\n"
+            "cvt.rn.bf16x2.f32 b0, f1, f0;\n"
+            "cvt.rn.bf16x2.f32 b1, f3, f2;\n"
+            "cvt.rn.bf16x2.f32 b2, f5, f4;\n"
+            "cvt.rn.bf16x2.f32 b3, f7, f6;\n"
+            "cvt.rn.bf16x2.f32 b4, f9, f8;\n"
+            "cvt.rn.bf16x2.f32 b5, f11, f10;\n"
+            "cvt.rn.bf16x2.f32 b6, f13, f12;\n"
+            "cvt.rn.bf16x2.f32 b7, f15, f14;\n"
+            "st.global.v8.b32 [%0], {b0, b1, b2, b3, b4, b5, b6, b7};\n"
+            "}"
+            :: "l"(C_ptr + g_row * N + g_col), "r"(t_addr)
+          );
       }
       if constexpr (DO_PROFILE) if (elect_sync()) profiler.stop();
 
@@ -299,7 +320,7 @@ void matmul_v7_kernel_cutlass(
   if constexpr (DO_PROFILE) if (elect_sync()) profiler.flush();
 }
 
-template <int BLOCK_N, int CTA_GROUP, int NUM_BLOCKS, bool DO_PROFILE>
+template <int BLOCK_N, int CTA_GROUP, int NUM_BLOCKS, bool EPILOGUE_CACHE_MOD, bool DO_PROFILE>
 void matmul_v7_launch(
   const nv_bfloat16 *A_ptr,
   const nv_bfloat16 *B_ptr,
@@ -353,7 +374,7 @@ void matmul_v7_launch(
   constexpr int NUM_STAGES = (sm100_size - static_size) / dynamic_size;
   constexpr int smem_size = NUM_STAGES * dynamic_size + static_size;
 
-  auto this_kernel = matmul_v7_kernel_cutlass<BLOCK_N, CTA_GROUP, NUM_STAGES, DO_PROFILE>;
+  auto this_kernel = matmul_v7_kernel_cutlass<BLOCK_N, CTA_GROUP, NUM_STAGES, EPILOGUE_CACHE_MOD, DO_PROFILE>;
   cudaFuncSetAttribute(this_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
   this_kernel<<<grid, TB_SIZE, smem_size>>>(A_tmap, B_tmap, C_ptr, M, N, K, profiler_ptr, num_entries);
@@ -366,7 +387,7 @@ void matmul_v7a(
         nv_bfloat16 *C_ptr,
   int M, int N, int K
 ) {
-  matmul_v7_launch<256, 2, 148, false>(A_ptr, B_ptr, C_ptr, M, N, K, nullptr, 0);
+  matmul_v7_launch<256, 2, 148, false, false>(A_ptr, B_ptr, C_ptr, M, N, K, nullptr, 0);
 }
 
 void matmul_v7b(
@@ -375,7 +396,16 @@ void matmul_v7b(
         nv_bfloat16 *C_ptr,
   int M, int N, int K
 ) {
-  matmul_v7_launch<256, 2, 128, false>(A_ptr, B_ptr, C_ptr, M, N, K, nullptr, 0);
+  matmul_v7_launch<256, 2, 128, false, false>(A_ptr, B_ptr, C_ptr, M, N, K, nullptr, 0);
+}
+
+void matmul_v7c(
+  const nv_bfloat16 *A_ptr,
+  const nv_bfloat16 *B_ptr,
+        nv_bfloat16 *C_ptr,
+  int M, int N, int K
+) {
+  matmul_v7_launch<256, 2, 128, true, false>(A_ptr, B_ptr, C_ptr, M, N, K, nullptr, 0);
 }
 
 void profile_matmul_v7a(
@@ -386,7 +416,7 @@ void profile_matmul_v7a(
   int64_t *profiler_ptr,
   int num_entries
 ) {
-  matmul_v7_launch<256, 2, 148, true>(A_ptr, B_ptr, C_ptr, M, N, K, profiler_ptr, num_entries);
+  matmul_v7_launch<256, 2, 148, false, true>(A_ptr, B_ptr, C_ptr, M, N, K, profiler_ptr, num_entries);
 }
 
 void profile_matmul_v7b(
@@ -397,5 +427,5 @@ void profile_matmul_v7b(
   int64_t *profiler_ptr,
   int num_entries
 ) {
-  matmul_v7_launch<256, 2, 128, true>(A_ptr, B_ptr, C_ptr, M, N, K, profiler_ptr, num_entries);
+  matmul_v7_launch<256, 2, 128, false, true>(A_ptr, B_ptr, C_ptr, M, N, K, profiler_ptr, num_entries);
 }

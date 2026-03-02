@@ -10,7 +10,7 @@ Modal B200, BF16 matmul, A/B K-major, M=N=K=4096. PyTorch 2.10, CUDA 13.0.
 
 Kernel name                          | TFLOPS
 -------------------------------------|--------
-CuBLAS                               | 1335.48
+CuBLAS                               | 1358.69
 v0 (sm80)                            |  383.26
 v1a (basic tcgen05 + 2D 16B TMA)     |  255.73
 v1b (3D 16B TMA)                     |  254.37
@@ -19,16 +19,21 @@ v2b (3D 128B TMA)                    |  721.02
 v3 (pipelining)                      |  914.42
 v4 (warp specialization)             | 1053.61
 v5 (2-SM MMA)                        | 1169.65
-v6 (persistent w/ static scheduling) | 1263.76
-v7a (small details - 148 blocks)     | 1290.66
-v7b (128 blocks)                     | 1304.22
+v6 (persistent w/ static scheduling) | 1273.32
+v7a (small details - 148 blocks)     | 1293.38
+v7b (128 blocks)                     | 1316.16
+v7c (`.L1::no_allocate` epilogue)    | 1326.11
 
 Varying problem shapes. Report TFLOPS.
 
 Kernel name  | 2048    | 4096    | 8192
 -------------|---------|---------|--------
-CuBLAS       | 1110.08 | 1335.48 | 1378.67
-v7           |  933.28 | 1290.66 | 1267.65
+CuBLAS       | 1077.67 | 1358.69 | 1414.29
+v7a          |  930.34 | 1293.38 | 1283.26
+v7b          |  930.19 | 1316.16 | 1238.74
+v7c          |  955.32 | 1326.11 | 1246.06
+
+Note: the results vary quite a bit across Modal runs.
 
 Go to https://gau-nernst.github.io/tcgen05 for the write-up.
 

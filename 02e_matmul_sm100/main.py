@@ -38,6 +38,7 @@ MY_KERNELS = [
     # "matmul_v6",
     "matmul_v7a",
     "matmul_v7b",
+    "matmul_v7c",
 ]
 
 
