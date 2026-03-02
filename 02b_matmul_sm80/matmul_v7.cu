@@ -24,8 +24,6 @@ template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N,
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
 void matmul_v7_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
-  constexpr int MMA_M = 16;
-  constexpr int MMA_N = 8;
   constexpr int MMA_K = 16;
   static_assert(BLOCK_M % NUM_WARP_M == 0);
   static_assert(BLOCK_N % NUM_WARP_N == 0);
@@ -178,19 +176,14 @@ void matmul_v7_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
     for (int n = 0; n < NUM_MMA_N; n++) {
       const int row = m * MMA_M + (lane_id / 4);
       const int col = n * MMA_N + (lane_id % 4) * 2;
-      nv_bfloat16 *C_local = C + row * N + col;
 
       float *regs = acc[m][n];
-      reinterpret_cast<nv_bfloat162 *>(C_local)[0]         = __float22bfloat162_rn({regs[0], regs[1]});
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+      reinterpret_cast<nv_bfloat162 *>(C + ((row + 0) * N + col))[0] = __float22bfloat162_rn({regs[0], regs[1]});
+      reinterpret_cast<nv_bfloat162 *>(C + ((row + 8) * N + col))[0] = __float22bfloat162_rn({regs[2], regs[3]});
     }
 }
 
 void matmul_v7(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
-  assert(is_power_of_two(M) && "M must be a power of 2");
-  assert(is_power_of_two(N) && "N must be a power of 2");
-  assert(is_power_of_two(K) && "K must be a power of 2");
-
   // 4 warps
   // tuned for 5090
   const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
@@ -213,10 +206,6 @@ void matmul_v7(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
 }
 
 void matmul_v8(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
-  assert(is_power_of_two(M) && "M must be a power of 2");
-  assert(is_power_of_two(N) && "N must be a power of 2");
-  assert(is_power_of_two(K) && "K must be a power of 2");
-
   // 4 warps
   // tuned for 5090
   const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;

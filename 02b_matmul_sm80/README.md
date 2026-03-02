@@ -26,7 +26,7 @@ v6 (2-stage pipelining)                                | 170.17 | 81.23%
 v7 (better swizzling logic, unroll prefetch stages)    | 175.46 | 83.75%
 v8 (threadblock swizzling)                             | 174.85 | 83.46%
 
-**5090 @ 400W**: Varying problem shapes. Max 209.5 TFLOPS. Report `TFLOPS (%SOL)`
+**5090 @ 400W**: Varying problem shapes. Max 209.5 BF16 TFLOPS. Driver 580.126.20. Report `TFLOPS (%SOL)`
 
 Kernel name                    | 2048            | 4096            | 8192
 -------------------------------|-----------------|-----------------|----------------
@@ -35,7 +35,7 @@ Inductor Triton (PyTorch 2.10) | 160.67 (76.69%) | 173.75 (82.93%) | 184.28 (87.
 v7                             | 150.98 (72.07%) | 173.25 (82.70%) | 139.11 (66.40%)
 v8 (threadblock swizzling)     | 150.69 (71.93%) | 171.81 (82.01%) | 164.47 (78.51%)
 
-**Modal A100 40GB SXM4**: Varying problem shapes. Max 312 TFLOPS. Report `TFLOPS (%SOL)`.
+**Modal A100 40GB SXM4**: Varying problem shapes. Max 312 TFLOPS. Driver 580.95.05. Report `TFLOPS (%SOL)`.
 - Note: A100-80GB on Modal comes in PCIe and SXM4 versions. They have different perf characteristics, and there is no way to select a particular version. Hence, I went with 40GB variant, which only has SXM4 version, for reliable benchmark result.
 
 Kernel name                    | 2048            | 4096            | 8192

@@ -1,4 +1,5 @@
-#include <torch/extension.h>
+#include <torch/library.h>
+#include <ATen/ATen.h>
 #include <cuda_bf16.h>
 
 #define CHECK_CUDA(x) TORCH_CHECK(x.device().is_cuda(), #x " must be a CUDA tensor")
@@ -18,15 +19,17 @@ MatmulFn matmul_v6;
 MatmulFn matmul_v7;
 MatmulFn matmul_v8;
 
-template <MatmulFn matmul_fn> torch::Tensor matmul_pt(torch::Tensor A, torch::Tensor B) {
+template <MatmulFn matmul_fn>
+at::Tensor matmul_pt(const at::Tensor& A, const at::Tensor& B) {
   CHECK_INPUT(A);
   CHECK_INPUT(B.t());
   TORCH_CHECK(A.size(1) == B.size(0), "dim1 of input2 should be equal to dim2 of input1");
   int M = A.size(0);
   int K = A.size(1);
   int N = B.size(1);
-  torch::Tensor C = torch::empty({M, N}, A.options());
-  // torch::Tensor C = torch::zeros({M, N}, A.options());  // for correctness check, use this
+  auto options = A.options();
+  at::Tensor C = at::empty({M, N}, options);
+  // at::Tensor C = at::zeros({M, N}, options);  // for correctness check, use this
   matmul_fn(
     reinterpret_cast<nv_bfloat16 *>(A.data_ptr<at::BFloat16>()),
     reinterpret_cast<nv_bfloat16 *>(B.data_ptr<at::BFloat16>()),
@@ -35,13 +38,13 @@ template <MatmulFn matmul_fn> torch::Tensor matmul_pt(torch::Tensor A, torch::Te
   return C;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("matmul_v1", &matmul_pt<matmul_v1>, "Matrix multiplication v1");
-  m.def("matmul_v2", &matmul_pt<matmul_v2>, "Matrix multiplication v2");
-  m.def("matmul_v3", &matmul_pt<matmul_v3>, "Matrix multiplication v3");
-  m.def("matmul_v4", &matmul_pt<matmul_v4>, "Matrix multiplication v4");
-  m.def("matmul_v5", &matmul_pt<matmul_v5>, "Matrix multiplication v5");
-  m.def("matmul_v6", &matmul_pt<matmul_v6>, "Matrix multiplication v6");
-  m.def("matmul_v7", &matmul_pt<matmul_v7>, "Matrix multiplication v7");
-  m.def("matmul_v8", &matmul_pt<matmul_v8>, "Matrix multiplication v8");
+TORCH_LIBRARY(my_module, m) {
+  m.def("matmul_v1(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v1>);
+  m.def("matmul_v2(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v2>);
+  m.def("matmul_v3(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v3>);
+  m.def("matmul_v4(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v4>);
+  m.def("matmul_v5(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v5>);
+  m.def("matmul_v6(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v6>);
+  m.def("matmul_v7(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v7>);
+  m.def("matmul_v8(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v8>);
 }

@@ -14,8 +14,9 @@
 __host__ __device__ inline
 constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
 
-constexpr bool is_power_of_two(int x) { return x > 0 && (x & (x - 1)) == 0; } // https://stackoverflow.com/a/1804686
 constexpr int WARP_SIZE = 32;
+constexpr int MMA_M = 16;
+constexpr int MMA_N = 8;
 
 // convert generic address (C++ address, 64-bit) to shared state space address (32-bit)
 // all PTX instructions expect share memory address to be in shared state space (not 100%)

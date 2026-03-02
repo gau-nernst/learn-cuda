@@ -1,6 +1,7 @@
 import argparse
 import math
 import multiprocessing as mp
+import subprocess
 from pathlib import Path
 
 import cuda.bench
@@ -14,16 +15,18 @@ REMOTE_DIR = Path("/my_extension")  # for Modal only
 
 
 def get_module(path):
-    return torch.utils.cpp_extension.load(
-        "module",
+    torch.utils.cpp_extension.load(
+        "my_module",
         sources=list(Path(path).glob("matmul*")),
         extra_cuda_cflags=[
             "-O3",
             "-lineinfo",
             "-Xptxas=-v",
         ],
+        is_python_module=False,
         verbose=True,
     )
+    return torch.ops.my_module
 
 
 def get_sol():
@@ -130,6 +133,8 @@ def run_nvbench(M: int, N: int, K: int, source_dir: str):
 
 def main(args: argparse.Namespace):
     source_dir = str(REMOTE_DIR if args.modal else CURRENT_DIR)
+
+    subprocess.run(["nvidia-smi"], check=True)
 
     if args.profile is not None:
         M, N, K = args.shape
