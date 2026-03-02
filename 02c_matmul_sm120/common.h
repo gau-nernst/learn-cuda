@@ -1,4 +1,6 @@
 #include <iostream>
+#include <cuda_bf16.h>
+#include <cudaTypedefs.h>
 
 #define CUDA_CHECK(call)                                                                                               \
   do {                                                                                                                 \
@@ -11,7 +13,6 @@
 
 constexpr int MMA_M = 16;
 constexpr int MMA_N = 8;
-constexpr int MMA_K = 16;
 
 __host__ __device__ inline
 constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
@@ -36,16 +37,37 @@ void ldmatrix_x4(int reg[4], int addr) {
               : "r"(addr));
 }
 
+template <typename T> struct GetType;
+template<> struct GetType<nv_bfloat16> {
+  using acc = float;
+  static constexpr CUtensorMapDataType tmap_dtype = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
+};
+template<> struct GetType<int8_t> {
+  using acc = int;
+  static constexpr CUtensorMapDataType tmap_dtype = CU_TENSOR_MAP_DATA_TYPE_UINT8;
+};
+
+template<typename InType, typename AccType>
 __device__ inline
-void mma_m16n8k16(const int A[4], const int B[2], float C[4]) {
-  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-               "{%0, %1, %2, %3}, " // C
-               "{%4, %5, %6, %7}, " // A
-               "{%8, %9}, "         // B
-               "{%0, %1, %2, %3};"  // C
-              : "+f"(C[0]), "+f"(C[1]), "+f"(C[2]), "+f"(C[3])
-              : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]),
-                "r"(B[0]), "r"(B[1]));
+void mma(const int A[4], const int B[2], AccType C[4]) {
+  if constexpr (std::is_same_v<InType, nv_bfloat16>)
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+                "{%0, %1, %2, %3}, " // C
+                "{%4, %5, %6, %7}, " // A
+                "{%8, %9}, "         // B
+                "{%0, %1, %2, %3};"  // C
+                : "+f"(C[0]), "+f"(C[1]), "+f"(C[2]), "+f"(C[3])
+                : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]),
+                  "r"(B[0]), "r"(B[1]));
+  if constexpr (std::is_same_v<InType, int8_t>)
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                "{%0, %1, %2, %3}, " // C
+                "{%4, %5, %6, %7}, " // A
+                "{%8, %9}, "         // B
+                "{%0, %1, %2, %3};"  // C
+                : "+r"(C[0]), "+r"(C[1]), "+r"(C[2]), "+r"(C[3])
+                : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]),
+                  "r"(B[0]), "r"(B[1]));
 }
 
 // https://github.com/NVIDIA/cutlass/blob/v4.2.1/include/cute/arch/cluster_sm90.hpp#L180
@@ -87,11 +109,11 @@ __device__ inline
 void mbarrier_wait(int mbar_addr, int phase) {
   int ticks = 0x989680;  // this is optional
   asm volatile(
-    "{\n\t"
-    ".reg .pred P1;\n\t"
-    "LAB_WAIT:\n\t"
-    "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%0], %1, %2;\n\t"
-    "@!P1 bra.uni LAB_WAIT;\n\t"
+    "{\n"
+    ".reg .pred P1;\n"
+    "LAB_WAIT:\n"
+    "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%0], %1, %2;\n"
+    "@!P1 bra.uni LAB_WAIT;\n"
     "}"
     :: "r"(mbar_addr), "r"(phase), "r"(ticks)
   );

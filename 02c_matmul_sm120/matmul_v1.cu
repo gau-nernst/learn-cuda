@@ -3,17 +3,18 @@
 #include <cuda_bf16.h>
 #include <cudaTypedefs.h>
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES, typename InType, typename OutType>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
 void matmul_v1_kernel(
   const __grid_constant__ CUtensorMap A_tmap,
   const __grid_constant__ CUtensorMap B_tmap,
-  nv_bfloat16 *C,
+  OutType *C,
   int M, int N, int K
 ) {
   constexpr int WARP_M = BLOCK_M / NUM_WARP_M;
   constexpr int WARP_N = BLOCK_N / NUM_WARP_N;
+  constexpr int MMA_K = 32 / sizeof(InType);
 
   static_assert(BLOCK_M % NUM_WARP_M == 0);
   static_assert(BLOCK_N % NUM_WARP_N == 0);
@@ -47,8 +48,8 @@ void matmul_v1_kernel(
   const int off_m = bid_m * BLOCK_M;
   const int off_n = bid_n * BLOCK_N;
 
-  constexpr int A_size = BLOCK_M * BLOCK_K * sizeof(nv_bfloat16);
-  constexpr int B_size = BLOCK_N * BLOCK_K * sizeof(nv_bfloat16);
+  constexpr int A_size = BLOCK_M * BLOCK_K * sizeof(InType);
+  constexpr int B_size = BLOCK_N * BLOCK_K * sizeof(InType);
   constexpr int AB_size = A_size + B_size;
 
   // set up smem
@@ -67,14 +68,16 @@ void matmul_v1_kernel(
   // make mbarrier visible
   __syncthreads();
 
+  using AccType = typename GetType<InType>::acc;
+
   // set up rmem
   int A_rmem[WARP_M / MMA_M][BLOCK_K / MMA_K][4];
   int B_rmem[WARP_N / MMA_N][BLOCK_K / MMA_K][2];
-  float acc[WARP_M / MMA_M][WARP_N / MMA_N][4] = {};
+  AccType acc[WARP_M / MMA_M][WARP_N / MMA_N][4] = {};
 
   // pre-compute address and swizzling used for ldmatrix
-  const int A_smem_thread = A_smem + swizzle<BLOCK_K * sizeof(nv_bfloat16)>(warp_id_m * WARP_M + (lane_id % 16), lane_id / 16);
-  const int B_smem_thread = B_smem + swizzle<BLOCK_K * sizeof(nv_bfloat16)>(warp_id_n * WARP_N + (lane_id % 8), lane_id / 8);
+  const int A_smem_thread = A_smem + swizzle<BLOCK_K * sizeof(InType)>(warp_id_m * WARP_M + (lane_id % 16), lane_id / 16);
+  const int B_smem_thread = B_smem + swizzle<BLOCK_K * sizeof(InType)>(warp_id_n * WARP_N + (lane_id % 8), lane_id / 8);
 
   auto load_AB = [&](int iter_k, int stage_id) {
     if (warp_id == 0 && elect_sync()) {
@@ -91,7 +94,7 @@ void matmul_v1_kernel(
     for (int m = 0; m < WARP_M / MMA_M; m++)
       for (int k = 0; k < BLOCK_K / MMA_K; k++) {
         int addr = A_smem_thread + stage_id * AB_size;
-        addr += m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
+        addr += m * MMA_M * BLOCK_K * sizeof(InType);
         ldmatrix_x4(A_rmem[m][k], addr ^ (k * 32));
       }
 
@@ -99,7 +102,7 @@ void matmul_v1_kernel(
     for (int n = 0; n < WARP_N / MMA_N; n++)
       for (int k = 0; k < BLOCK_K / MMA_K; k += 2) {
         int addr = B_smem_thread + stage_id * AB_size;
-        addr += n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
+        addr += n * MMA_N * BLOCK_K * sizeof(InType);
         ldmatrix_x4(B_rmem[n][k], addr ^ (k * 32));
       }
 
@@ -107,7 +110,7 @@ void matmul_v1_kernel(
     for (int m = 0; m < WARP_M / MMA_M; m++)
       for (int n = 0; n < WARP_N / MMA_N; n++)
         for (int k = 0; k < BLOCK_K / MMA_K; k++)
-          mma_m16n8k16(A_rmem[m][k], B_rmem[n][k], acc[m][n]);
+          mma<InType>(A_rmem[m][k], B_rmem[n][k], acc[m][n]);
   };
 
   const int num_k_iters = cdiv(K, BLOCK_K);
@@ -158,45 +161,52 @@ void matmul_v1_kernel(
       const int row = m * MMA_M + (lane_id / 4);
       const int col = n * MMA_N + (lane_id % 4) * 2;
 
-      float *regs = acc[m][n];
-      reinterpret_cast<nv_bfloat162 *>(C + (row + 0) * N + col)[0] = __float22bfloat162_rn({regs[0], regs[1]});
-      reinterpret_cast<nv_bfloat162 *>(C + (row + 8) * N + col)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+      if constexpr (std::is_same_v<InType, nv_bfloat16>) {
+        static_assert(std::is_same_v<OutType, nv_bfloat16>);
+        float *regs = acc[m][n];
+        reinterpret_cast<nv_bfloat162 *>(C + (row + 0) * N + col)[0] = __float22bfloat162_rn({regs[0], regs[1]});
+        reinterpret_cast<nv_bfloat162 *>(C + (row + 8) * N + col)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+      }
+
+      if constexpr (std::is_same_v<InType, int8_t>) {
+        static_assert(std::is_same_v<OutType, int>);
+        int *regs = acc[m][n];
+        reinterpret_cast<int2 *>(C + (row + 0) * N + col)[0] = int2{regs[0], regs[1]};
+        reinterpret_cast<int2 *>(C + (row + 8) * N + col)[0] = int2{regs[2], regs[3]};
+      }
     }
 }
 
+template <typename InType>
 static void init_tensor_map(
   CUtensorMap *tmap_ptr,
-  const nv_bfloat16 *gmem_ptr,
+  const InType *gmem_ptr,
   uint64_t gmem_height, uint64_t gmem_width,
   uint32_t smem_height, uint32_t smem_width
 ) {
   constexpr uint32_t rank = 2;
   uint64_t size[rank]        = {gmem_width, gmem_height};
-  uint64_t stride[rank - 1]  = {gmem_width * sizeof(nv_bfloat16)};  // in bytes
+  uint64_t stride[rank - 1]  = {gmem_width * sizeof(InType)};  // in bytes
   uint32_t box_size[rank]    = {smem_width, smem_height};
   uint32_t elem_stride[rank] = {1, 1};
 
-  CUtensorMapSwizzle swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE;
-  if (smem_width == 16)
-    swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_32B;
-  else if (smem_width == 32)
-    swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B;
-  else if (smem_width == 64)
-    swizzle = CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B;
+  const uint32_t smem_stride_B = smem_width * sizeof(InType);
+  CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE;
+  if (smem_stride_B == 32)
+    swizzle = CU_TENSOR_MAP_SWIZZLE_32B;
+  else if (smem_stride_B == 64)
+    swizzle = CU_TENSOR_MAP_SWIZZLE_64B;
+  else if (smem_stride_B == 128)
+    swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
 
   auto res = cuTensorMapEncodeTiled(
-    tmap_ptr,
-    CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-    rank,
-    (void *)gmem_ptr,
-    size,
-    stride,
-    box_size,
-    elem_stride,
-    CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+    tmap_ptr, GetType<InType>::tmap_dtype, rank,
+    (void *)gmem_ptr, size, stride,
+    box_size, elem_stride,
+    CU_TENSOR_MAP_INTERLEAVE_NONE,
     swizzle,
-    CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-    CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    CU_TENSOR_MAP_L2_PROMOTION_NONE,
+    CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
   );
   if (res != CUDA_SUCCESS) {
     const char *error_msg_ptr;
@@ -206,11 +216,7 @@ static void init_tensor_map(
   }
 };
 
-void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
-  assert(is_power_of_two(M) && "M must be a power of 2");
-  assert(is_power_of_two(N) && "N must be a power of 2");
-  assert(is_power_of_two(K) && "K must be a power of 2");
-
+void matmul_v1_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
   // tuned for 5090
   const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
@@ -221,11 +227,30 @@ void matmul_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   // const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   // const int NUM_STAGES = 3;
 
-  auto kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
+  auto kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, nv_bfloat16, nv_bfloat16>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16) * NUM_STAGES
+                      + NUM_STAGES * 8;  // mbar
+
+  CUtensorMap A_tmap, B_tmap;
+  init_tensor_map(&A_tmap, A, M, K, BLOCK_M, BLOCK_K);
+  init_tensor_map(&B_tmap, B, N, K, BLOCK_N, BLOCK_K);
+
+  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A_tmap, B_tmap, C, M, N, K);
+}
+
+void matmul_v1_int8(const int8_t *A, const int8_t *B, int *C, int M, int N, int K) {
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
+  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
+  const int NUM_STAGES = 3;
+
+  auto kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, int8_t, int>;
+
+  const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
+  const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
+  const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(int8_t) * NUM_STAGES
                       + NUM_STAGES * 8;  // mbar
 
   CUtensorMap A_tmap, B_tmap;

@@ -1,28 +1,43 @@
 
 Resources:
 - https://cudaforfun.substack.com/p/outperforming-cublas-on-h100-a-worklog - TMA
-- https://docs.nvidia.com/cuda/cuda-c-programming-guide/#asynchronous-data-copies-using-the-tensor-memory-accelerator-tma
+- https://github.com/NVIDIA/cutlass/blob/v4.3.5/examples/python/CuTeDSL/blackwell_geforce/dense_gemm.py
 
 BF16 A row-major x B column-major, compile with CUDA 13.0.
-- Theoretical limit: 209.5 TFLOPS for 5090, 503.8 for PRO 6000.
 
-**5090**: Max 209.5 TFLOPS. Report `TFLOPS (%SOL)`
+**5090 @ 400W**: Max 209.5 BF16 TFLOPS, 838 INT8 TFLOPS. Driver 580.126.20. Report `TFLOPS (%SOL)`
 
-Kernel name                    | 1024            | 2048            | 4096            | 8192
--------------------------------|-----------------|-----------------|-----------------|----------------
-CuBLAS 13.0 (via PyTorch 2.10) |  81.44 (38.87%) | 140.14 (66.89%) | 160.54 (76.63%) | 202.88 (96.84%)
-Inductor Triton (PyTorch 2.10) | 104.86 (50.05%) | 139.41 (66.54%) | 173.04 (82.60%) | 201.49 (96.18%)
-v0 (`cp.async`)                | 105.02 (50.13%) | 132.59 (63.29%) | 176.27 (84.14%) | 190.15 (90.76%)
-v1 (TMA)                       | 104.86 (50.05%) | 135.33 (64.60%) | 182.61 (87.16%) | 197.13 (94.09%)
+BF16
+
+Kernel name                    | 2048            | 4096            | 8192
+-------------------------------|-----------------|-----------------|----------------
+CuBLAS 13.0 (via PyTorch 2.10) | 167.77 (80.08%) | 175.46 (83.75%) | 209.92 (100.20%)
+Inductor Triton (PyTorch 2.10) | 174.71 (83.39%) | 198.55 (94.77%) | 209.43 (99.97%)
+v0 (`cp.async`)                | 161.32 (77.00%) | 200.32 (95.62%) | 195.23 (93.19%)
+v1 (TMA)                       | 167.35 (79.88%) | 206.81 (98.71%) | 202.21 (96.52%)
+
+INT8
+
+Kernel name                    | 2048            | 4096            | 8192
+-------------------------------|-----------------|-----------------|----------------
+CuBLAS 13.0 (via PyTorch 2.10) | 470.53 (56.15%) | 553.76 (66.08%) | 503.31 (60.06%)
+Inductor Triton (PyTorch 2.10) | 310.51 (37.05%) | 368.70 (44.00%) | 340.42 (40.62%)
+v0 (`cp.async`)                | 399.46 (47.67%) | 486.68 (58.08%) | 483.14 (57.65%)
+v1 (TMA)                       | 415.86 (49.62%) | 507.68 (60.58%) | 497.87 (59.41%)
+
+Note:
+- Exceeding 100% BF16 SOL is not unexpected on 5090, due to nerfed BF16 MMA.
+- Looks like driver version can heavily affect benchmark results...
+- TODO: we get less TFLOPS from 4096->8192 -> something is wrong with our implementation.
 
 **PRO 6000**: Max 503.8 TFLOPS. Report `TFLOPS (%SOL)`
 
-Kernel name                    | 1024            | 2048            | 4096            | 8192
--------------------------------|-----------------|-----------------|-----------------|----------------
-CuBLAS 13.0 (via PyTorch 2.10) |  76.61 (15.21%) | 199.36 (39.57%) | 370.80 (73.60%) | 431.72 (85.69%)
-Inductor Triton (PyTorch 2.10) |  87.50 (17.37%) | 232.31 (46.11%) | 349.55 (69.38%) | 405.64 (80.52%)
-v0 (`cp.async`)                |  69.33 (13.76%) | 220.12 (43.69%) | 334.50 (66.40%) | 405.05 (80.40%)
-v1 (TMA)                       |  68.41 (13.58%) | 226.62 (44.98%) | 362.75 (72.00%) | 425.84 (84.53%)
+Kernel name                    | 2048            | 4096            | 8192
+-------------------------------|-----------------|-----------------|----------------
+CuBLAS 13.0 (via PyTorch 2.10) | 199.36 (39.57%) | 370.80 (73.60%) | 431.72 (85.69%)
+Inductor Triton (PyTorch 2.10) | 232.31 (46.11%) | 349.55 (69.38%) | 405.64 (80.52%)
+v0 (`cp.async`)                | 220.12 (43.69%) | 334.50 (66.40%) | 405.05 (80.40%)
+v1 (TMA)                       | 226.62 (44.98%) | 362.75 (72.00%) | 425.84 (84.53%)
 
 TODO:
 - Warp specialization

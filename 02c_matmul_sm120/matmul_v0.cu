@@ -20,18 +20,19 @@ void gmem_to_smem(int dst, const T *src, int src_stride, int tid) {
   }
 }
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES, typename InType, typename OutType>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
 void matmul_v0_kernel(
-  const nv_bfloat16 *A,
-  const nv_bfloat16 *B,
-        nv_bfloat16 *C,
+  const InType *A,
+  const InType *B,
+        OutType *C,
   int M, int N, int K
 ) {
   constexpr int WARP_M = BLOCK_M / NUM_WARP_M;
   constexpr int WARP_N = BLOCK_N / NUM_WARP_N;
   constexpr int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
+  constexpr int MMA_K = 32 / sizeof(InType);
 
   static_assert(BLOCK_M % NUM_WARP_M == 0);
   static_assert(BLOCK_N % NUM_WARP_N == 0);
@@ -71,8 +72,8 @@ void matmul_v0_kernel(
   B += off_n * K;
   C += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
 
-  constexpr int A_size = BLOCK_M * BLOCK_K * sizeof(nv_bfloat16);
-  constexpr int B_size = BLOCK_N * BLOCK_K * sizeof(nv_bfloat16);
+  constexpr int A_size = BLOCK_M * BLOCK_K * sizeof(InType);
+  constexpr int B_size = BLOCK_N * BLOCK_K * sizeof(InType);
   constexpr int AB_size = A_size + B_size;
 
   // convert shared memory address to 32-bit from the start
@@ -81,13 +82,15 @@ void matmul_v0_kernel(
   const int A_smem = smem_addr;
   const int B_smem = A_smem + A_size;
 
+  using AccType = typename GetType<InType>::acc;
+
   int A_rmem[WARP_M / MMA_M][BLOCK_K / MMA_K][4];
   int B_rmem[WARP_N / MMA_N][BLOCK_K / MMA_K][2];
-  float acc[WARP_M / MMA_M][WARP_N / MMA_N][4] = {};
+  AccType acc[WARP_M / MMA_M][WARP_N / MMA_N][4] = {};
 
   // pre-compute address and swizzling used for ldmatrix
-  const int A_smem_thread = A_smem + swizzle<BLOCK_K * sizeof(nv_bfloat16)>(warp_id_m * WARP_M + (lane_id % 16), lane_id / 16);
-  const int B_smem_thread = B_smem + swizzle<BLOCK_K * sizeof(nv_bfloat16)>(warp_id_n * WARP_N + (lane_id % 8), lane_id / 8);
+  const int A_smem_thread = A_smem + swizzle<BLOCK_K * sizeof(InType)>(warp_id_m * WARP_M + (lane_id % 16), lane_id / 16);
+  const int B_smem_thread = B_smem + swizzle<BLOCK_K * sizeof(InType)>(warp_id_n * WARP_N + (lane_id % 8), lane_id / 8);
 
   const int num_k_iters = cdiv(K, BLOCK_K);
 
@@ -104,7 +107,7 @@ void matmul_v0_kernel(
     for (int m = 0; m < WARP_M / MMA_M; m++)
       for (int k = 0; k < BLOCK_K / MMA_K; k++) {
         int addr = A_smem_thread + stage_id * AB_size;
-        addr += m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
+        addr += m * MMA_M * BLOCK_K * sizeof(InType);
         ldmatrix_x4(A_rmem[m][k], addr ^ (k * 32));
       }
 
@@ -112,7 +115,7 @@ void matmul_v0_kernel(
     for (int n = 0; n < WARP_N / MMA_N; n++)
       for (int k = 0; k < BLOCK_K / MMA_K; k += 2) {
         int addr = B_smem_thread + stage_id * AB_size;
-        addr += n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
+        addr += n * MMA_N * BLOCK_K * sizeof(InType);
         ldmatrix_x4(B_rmem[n][k], addr ^ (k * 32));
       }
 
@@ -120,7 +123,7 @@ void matmul_v0_kernel(
     for (int m = 0; m < WARP_M / MMA_M; m++)
       for (int n = 0; n < WARP_N / MMA_N; n++)
         for (int k = 0; k < BLOCK_K / MMA_K; k++)
-          mma_m16n8k16(A_rmem[m][k], B_rmem[n][k], acc[m][n]);
+          mma<InType>(A_rmem[m][k], B_rmem[n][k], acc[m][n]);
   };
 
   // initiate NUM_STAGES-1 cp.async stages
@@ -159,17 +162,23 @@ void matmul_v0_kernel(
       const int row = m * MMA_M + (lane_id / 4);
       const int col = n * MMA_N + (lane_id % 4) * 2;
 
-      float *regs = acc[m][n];
-      reinterpret_cast<nv_bfloat162 *>(C + (row + 0) * N + col)[0] = __float22bfloat162_rn({regs[0], regs[1]});
-      reinterpret_cast<nv_bfloat162 *>(C + (row + 8) * N + col)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+      if constexpr (std::is_same_v<InType, nv_bfloat16>) {
+        static_assert(std::is_same_v<OutType, nv_bfloat16>);
+        float *regs = acc[m][n];
+        reinterpret_cast<nv_bfloat162 *>(C + (row + 0) * N + col)[0] = __float22bfloat162_rn({regs[0], regs[1]});
+        reinterpret_cast<nv_bfloat162 *>(C + (row + 8) * N + col)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+      }
+
+      if constexpr (std::is_same_v<InType, int8_t>) {
+        static_assert(std::is_same_v<OutType, int>);
+        int *regs = acc[m][n];
+        reinterpret_cast<int2 *>(C + (row + 0) * N + col)[0] = int2{regs[0], regs[1]};
+        reinterpret_cast<int2 *>(C + (row + 8) * N + col)[0] = int2{regs[2], regs[3]};
+      }
     }
 }
 
-void matmul_v0(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
-  assert(is_power_of_two(M) && "M must be a power of 2");
-  assert(is_power_of_two(N) && "N must be a power of 2");
-  assert(is_power_of_two(K) && "K must be a power of 2");
-
+void matmul_v0_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
   // tuned for 5090
   const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
@@ -180,11 +189,25 @@ void matmul_v0(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   // const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   // const int NUM_STAGES = 3;
 
-  auto kernel = matmul_v0_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
+  auto kernel = matmul_v0_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, nv_bfloat16, nv_bfloat16>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16) * NUM_STAGES;
+
+  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A, B, C, M, N, K);
+}
+
+void matmul_v0_int8(const int8_t *A, const int8_t *B, int *C, int M, int N, int K) {
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
+  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
+  const int NUM_STAGES = 3;
+
+  auto kernel = matmul_v0_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, int8_t, int>;
+
+  const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
+  const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
+  const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(int8_t) * NUM_STAGES;
 
   launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A, B, C, M, N, K);
 }
