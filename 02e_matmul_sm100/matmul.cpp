@@ -71,21 +71,25 @@ at::Tensor profile_matmul(
 }
 
 TORCH_LIBRARY(my_matmul, m) {
-  m.def("matmul_v0(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v0", &matmul<matmul_v0>);
-  m.def("matmul_v1a(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v1a", &matmul<matmul_v1a>);
-  m.def("matmul_v1b(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v1b", &matmul<matmul_v1b>);
-  m.def("matmul_v2a(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v2a", &matmul<matmul_v2a>);
-  m.def("matmul_v2b(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v2b", &matmul<matmul_v2b>);
-  m.def("matmul_v3(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v3", &matmul<matmul_v3>);
-  m.def("matmul_v4(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v4", &matmul<matmul_v4>);
-  m.def("matmul_v5(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v5", &matmul<matmul_v5>);
-  m.def("matmul_v6(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v6", &matmul<matmul_v6>);
-  m.def("matmul_v7a(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v7a", &matmul<matmul_v7a>);
-  m.def("matmul_v7b(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v7b", &matmul<matmul_v7b>);
-  m.def("matmul_v7c(Tensor A, Tensor B) -> Tensor"); m.impl("matmul_v7c", &matmul<matmul_v7c>);
+  m.def("matmul_v0(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v0>);
+  m.def("matmul_v1a(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v1a>);
+  m.def("matmul_v1b(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v1b>);
+  m.def("matmul_v2a(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v2a>);
+  m.def("matmul_v2b(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v2b>);
+  m.def("matmul_v3(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v3>);
+  m.def("matmul_v4(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v4>);
+  m.def("matmul_v5(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v5>);
+  m.def("matmul_v6(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v6>);
+  m.def("matmul_v7a(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v7a>);
+  m.def("matmul_v7b(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v7b>);
+  m.def("matmul_v7c(Tensor A, Tensor B) -> Tensor", &matmul<matmul_v7c>);
 
-  m.def("profile_matmul_v5(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor"); m.impl("profile_matmul_v5", &profile_matmul<profile_matmul_v5>);
-  m.def("profile_matmul_v6(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor"); m.impl("profile_matmul_v6", &profile_matmul<profile_matmul_v6>);
-  m.def("profile_matmul_v7a(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor"); m.impl("profile_matmul_v7a", &profile_matmul<profile_matmul_v7a>);
-  m.def("profile_matmul_v7b(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor"); m.impl("profile_matmul_v7b", &profile_matmul<profile_matmul_v7b>);
+  m.def("profile_matmul_v5(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor",
+        &profile_matmul<profile_matmul_v5>);
+  m.def("profile_matmul_v6(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor",
+        &profile_matmul<profile_matmul_v6>);
+  m.def("profile_matmul_v7a(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor",
+        &profile_matmul<profile_matmul_v7a>);
+  m.def("profile_matmul_v7b(Tensor A, Tensor B, Tensor(a!) profiler, int num_entries) -> Tensor",
+        &profile_matmul<profile_matmul_v7b>);
 }
