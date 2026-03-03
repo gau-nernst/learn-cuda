@@ -5,32 +5,31 @@ Resources:
 
 BF16 A row-major x B column-major, compile with CUDA 13.0.
 
-**5090 @ 400W**: Max 209.5 BF16 TFLOPS, 838 INT8 TFLOPS. Driver 580.126.20. Report `TFLOPS (%SOL)`
+**5090 @ 400W**: Max 209.5 BF16 TFLOPS, 838 INT8 TFLOPS. Report `TFLOPS (%SOL)`
 
 BF16
 
 Kernel name                    | 2048            | 4096            | 8192
 -------------------------------|-----------------|-----------------|----------------
-CuBLAS 13.0 (via PyTorch 2.10) | 167.77 (80.08%) | 175.46 (83.75%) | 209.92 (100.20%)
-Inductor Triton (PyTorch 2.10) | 174.71 (83.39%) | 198.55 (94.77%) | 209.43 (99.97%)
-v0 (`cp.async`)                | 161.32 (77.00%) | 200.32 (95.62%) | 195.23 (93.19%)
-v1 (TMA)                       | 167.35 (79.88%) | 206.81 (98.71%) | 202.21 (96.52%)
+CuBLAS 13.0 (via PyTorch 2.10) | 161.42 (77.05%) | 175.03 (83.55%) | 191.29 (91.31%)
+Inductor Triton (PyTorch 2.10) | 140.03 (66.84%) | 166.94 (79.69%) | 187.40 (89.45%)
+v0 (`cp.async`)                | 148.93 (71.09%) | 172.57 (82.37%) | 166.25 (79.36%)
+v1 (TMA)                       | 153.60 (73.32%) | 179.07 (85.48%) | 172.37 (82.28%)
 
 INT8
 
 Kernel name                    | 2048            | 4096            | 8192
 -------------------------------|-----------------|-----------------|----------------
-CuBLAS 13.0 (via PyTorch 2.10) | 470.53 (56.15%) | 553.76 (66.08%) | 503.31 (60.06%)
-Inductor Triton (PyTorch 2.10) | 310.51 (37.05%) | 368.70 (44.00%) | 340.42 (40.62%)
-v0 (`cp.async`)                | 399.46 (47.67%) | 486.68 (58.08%) | 483.14 (57.65%)
-v1 (TMA)                       | 415.86 (49.62%) | 507.68 (60.58%) | 497.87 (59.41%)
+CuBLAS 13.0 (via PyTorch 2.10) | 395.42 (47.19%) | 427.07 (50.96%) | 433.40 (51.72%)
+Inductor Triton (PyTorch 2.10) | 259.67 (30.99%) | 281.29 (33.57%) | 290.61 (34.68%)
+v0 (`cp.async`)                | 348.98 (41.64%) | 388.23 (46.33%) | 396.32 (47.29%)
+v1 (TMA)                       | 365.03 (43.56%) | 406.09 (48.46%) | 415.84 (49.62%)
 
 Note:
-- Exceeding 100% BF16 SOL is not unexpected on 5090, due to nerfed BF16 MMA.
-- Looks like driver version can heavily affect benchmark results...
+- Exceeding/reaching 100% BF16 SOL is not unexpected for 5090, due to nerfed BF16 MMA.
 - TODO: we get less TFLOPS from 4096->8192 -> something is wrong with our implementation.
 
-**PRO 6000**: Max 503.8 TFLOPS. Report `TFLOPS (%SOL)`
+**PRO 6000** (old results, not updated): Max 503.8 TFLOPS. Report `TFLOPS (%SOL)`
 
 Kernel name                    | 2048            | 4096            | 8192
 -------------------------------|-----------------|-----------------|----------------
