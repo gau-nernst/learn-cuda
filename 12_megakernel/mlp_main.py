@@ -1,3 +1,5 @@
+# TODO: add an option to include input norm and residual connection
+
 import argparse
 import importlib
 import math
@@ -5,18 +7,10 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 import torch
-import torch.nn.functional as F
-from torch import Tensor
+from reference import mlp_ref
 
 if TYPE_CHECKING:
     import cuda.bench
-
-
-# we use combined w13 to align with vLLM/SGLang impl.
-# this helps with the baseline significantly for small shapes.
-def mlp_ref(x: Tensor, w13: Tensor, w2: Tensor):
-    gate, up = (x @ w13.T).chunk(2, dim=1)
-    return (F.silu(gate) * up) @ w2.T
 
 
 # TFLOPS is from specsheet, membw is measured memcpy bw.
@@ -64,9 +58,9 @@ def torch_bench(state: "cuda.bench.State") -> None:
     stream = to_torch_stream(state.get_stream(), device)
     with torch.cuda.stream(stream):
         # apply scaling to make sure the output doesn't explode
-        X = torch.randn(M, K, device=device).mul(K ** -0.5).bfloat16()
-        W13 = torch.randn(N * 2, K, device=device).mul(K ** -0.5).bfloat16()
-        W2 = torch.randn(K, N, device=device).mul(N ** -0.5).bfloat16()
+        X = torch.randn(M, K, device=device).mul(K**-0.5).bfloat16()
+        W13 = torch.randn(N * 2, K, device=device).mul(K**-0.5).bfloat16()
+        W2 = torch.randn(K, N, device=device).mul(N**-0.5).bfloat16()
 
         # correctness check
         out_ref = mlp_ref(X, W13, W2)
@@ -76,9 +70,9 @@ def torch_bench(state: "cuda.bench.State") -> None:
         inputs_list = []
         for _ in range(state.get_int64("num_inputs")):
             # apply scaling to make sure the output doesn't explode
-            X = torch.randn(M, K, device=device).mul(K ** -0.5).bfloat16()
-            W13 = torch.randn(N * 2, K, device=device).mul(K ** -0.5).bfloat16()
-            W2 = torch.randn(K, N, device=device).mul(N ** -0.5).bfloat16()
+            X = torch.randn(M, K, device=device).mul(K**-0.5).bfloat16()
+            W13 = torch.randn(N * 2, K, device=device).mul(K**-0.5).bfloat16()
+            W2 = torch.randn(K, N, device=device).mul(N**-0.5).bfloat16()
             inputs_list.append((X, W13, W2))
 
     def launcher(launch: "cuda.bench.Launch") -> None:
