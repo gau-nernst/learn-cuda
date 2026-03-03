@@ -162,11 +162,12 @@ def attn_ref(
     past_kv[1, position : position + num_tokens] = v
 
     # attention
+    attn_mask = causal_lower_right(num_tokens, position + num_tokens) if num_tokens > 1 else None
     o = F.scaled_dot_product_attention(
         q.transpose(0, 1),
         past_kv[0, : position + num_tokens].transpose(0, 1),
         past_kv[1, : position + num_tokens].transpose(0, 1),
-        attn_mask=causal_lower_right(num_tokens, position + num_tokens),
+        attn_mask=attn_mask,
         enable_gqa=True,
     ).transpose(0, 1)
 
