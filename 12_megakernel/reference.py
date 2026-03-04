@@ -100,7 +100,7 @@ class ModelParams:
 @dataclasses.dataclass(slots=True)
 class ModelBuffers:
     rope: Tensor
-    past_kv: Tensor
+    kv_cache: Tensor
     position: int
 
     @staticmethod
@@ -113,9 +113,9 @@ class ModelBuffers:
         kv_dtype: torch.dtype | None = None,
     ):
         rope = _precompute_rope(max_length, head_dim, theta=1e6).to(device)
-        past_kv = torch.empty(num_layers, 2, max_length, num_kv_heads, head_dim, dtype=kv_dtype, device=device)
+        kv_cache = torch.empty(num_layers, 2, max_length, num_kv_heads, head_dim, dtype=kv_dtype, device=device)
         position = 0
-        return ModelBuffers(rope, past_kv, position)
+        return ModelBuffers(rope, kv_cache, position)
 
 
 def _rms_norm(x: Tensor, weight: Tensor):
@@ -150,19 +150,18 @@ def _apply_rope(x: Tensor, rope: Tensor):
 
 def attn_ref(
     x: Tensor,  # (num_tokens, dim)
-    norm: Tensor,
-    past_kv: Tensor,  # (2, max_context, num_kv_heads, head_dim)
+    norm: Tensor,  # (dim)
+    kv_cache: Tensor,  # (2, max_context, num_kv_heads, head_dim)
     wqkv: Tensor,  # (qkv_dim, dim)
     q_norm: Tensor,
     k_norm: Tensor,
     rope: Tensor,  # (num_tokens, head_dim * 2)
     wo: Tensor,  # (dim, q_dim)
-    num_heads: int,
-    num_kv_heads: int,
     position: int,
-    head_dim: int = 128,
 ):
     num_tokens, _ = x.shape
+    _, _, num_kv_heads, head_dim = kv_cache.shape
+    num_heads = wqkv.shape[0] // head_dim - num_kv_heads * 2
 
     # input projection
     qkv = (_rms_norm(x, norm) @ wqkv.T).unflatten(-1, (-1, head_dim))  # (num_tokens, -1, head_dim)
@@ -173,15 +172,15 @@ def attn_ref(
     k = _apply_rope(_rms_norm(k, k_norm), rope)
 
     # update KV cache
-    past_kv[0, position : position + num_tokens] = k
-    past_kv[1, position : position + num_tokens] = v
+    kv_cache[0, position : position + num_tokens] = k
+    kv_cache[1, position : position + num_tokens] = v
 
     # attention
     attn_mask = causal_lower_right(num_tokens, position + num_tokens) if num_tokens > 1 else None
     o = F.scaled_dot_product_attention(
         q.transpose(0, 1),
-        past_kv[0, : position + num_tokens].transpose(0, 1),
-        past_kv[1, : position + num_tokens].transpose(0, 1),
+        kv_cache[0, : position + num_tokens].transpose(0, 1),
+        kv_cache[1, : position + num_tokens].transpose(0, 1),
         attn_mask=attn_mask,
         enable_gqa=True,
     ).transpose(0, 1)
@@ -201,14 +200,12 @@ def model_ref(input_ids: Tensor, params: ModelParams, buffers: ModelBuffers):
         x = attn_ref(
             x,
             layer.attn_norm,
-            buffers.past_kv[i],
+            buffers.kv_cache[i],
             layer.wqkv,
             layer.q_norm,
             layer.k_norm,
             rope,
             layer.wo,
-            params.num_heads,
-            params.num_kv_heads,
             position,
         )
         x = mlp_ref(x, layer.mlp_norm, layer.w13, layer.w2)

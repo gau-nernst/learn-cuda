@@ -38,9 +38,8 @@ def mlp_triton_v2_kernel(
     # persistent kernel
     w1_ptr = w13_ptr
     w3_ptr = w13_ptr + mlp_dim * hidden_dim
-    grid_n0: tl.constexpr = mlp_dim // BLOCK_N
 
-    for pid_n in range(raw_pid, grid_n0, num_pids):
+    for pid_n in range(raw_pid, mlp_dim // BLOCK_N, num_pids):
         # one-shot
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         w1_ptrs = w1_ptr + (offs_n[:, None] * hidden_dim + offs[None, :])
@@ -62,9 +61,7 @@ def mlp_triton_v2_kernel(
         pass
 
     # persistent kernel
-    grid_n1: tl.constexpr = hidden_dim // BLOCK_N
-
-    for pid_n in range(raw_pid, grid_n1, num_pids):
+    for pid_n in range(raw_pid, hidden_dim // BLOCK_N, num_pids):
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         offs_k = tl.arange(0, BLOCK_K)
 

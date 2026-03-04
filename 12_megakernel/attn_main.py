@@ -55,38 +55,38 @@ def torch_bench(state: "cuda.bench.State") -> None:
         # apply scaling to make sure the output doesn't explode
         X = torch.randn(1, dim, device=device).mul(dim**-0.5).bfloat16()
         norm = torch.randn(dim, device=device).mul(dim**-0.5).bfloat16()
-        past_kv = torch.randn(2, kv_size * 2, num_kv_heads, head_dim, device=device).bfloat16()
+        kv_cache = torch.randn(2, kv_size * 2, num_kv_heads, head_dim, device=device).bfloat16()
         Wqkv = torch.randn(qkv_dim, dim, device=device).mul(dim**-0.5).bfloat16()
         q_norm = torch.randn(head_dim, device=device).mul(head_dim**-0.5).bfloat16()
         k_norm = torch.randn(head_dim, device=device).mul(head_dim**-0.5).bfloat16()
         Wo = torch.randn(dim, q_dim, device=device).mul(q_dim**-0.5).bfloat16()
 
         # correctness check
-        past_kv_ref = past_kv.clone()
-        out_ref = attn_ref(X, norm, past_kv_ref, Wqkv, q_norm, k_norm, rope, Wo, num_heads, num_kv_heads, kv_size)
-        out = f(X, norm, past_kv, Wqkv, q_norm, k_norm, rope, Wo, num_heads, num_kv_heads, kv_size)
+        kv_cache_ref = kv_cache.clone()
+        out_ref = attn_ref(X, norm, kv_cache_ref, Wqkv, q_norm, k_norm, rope, Wo, kv_size)
+        out = f(X, norm, kv_cache, Wqkv, q_norm, k_norm, rope, Wo, kv_size)
 
         # only check atol
         atol, rtol = 1e-4, float("inf")
         torch.testing.assert_close(out, out_ref, atol=atol, rtol=rtol)
-        torch.testing.assert_close(past_kv[:, kv_size], past_kv_ref[:, kv_size], atol=atol, rtol=rtol)
+        torch.testing.assert_close(kv_cache[:, kv_size], kv_cache_ref[:, kv_size], atol=atol, rtol=rtol)
 
         inputs_list = []
         for _ in range(state.get_int64("num_inputs")):
             X = torch.randn(1, dim, device=device).mul(dim**-0.5).bfloat16()
             norm = torch.randn(dim, device=device).mul(dim**-0.5).bfloat16()
-            past_kv = torch.randn(2, kv_size * 2, num_kv_heads, head_dim, device=device).bfloat16()
+            kv_cache = torch.randn(2, kv_size * 2, num_kv_heads, head_dim, device=device).bfloat16()
             Wqkv = torch.randn(qkv_dim, dim, device=device).mul(dim**-0.5).bfloat16()
             q_norm = torch.randn(head_dim, device=device).mul(head_dim**-0.5).bfloat16()
             k_norm = torch.randn(head_dim, device=device).mul(head_dim**-0.5).bfloat16()
             Wo = torch.randn(dim, q_dim, device=device).mul(q_dim**-0.5).bfloat16()
-            inputs_list.append((X, norm, past_kv, Wqkv, q_norm, k_norm, Wo))
+            inputs_list.append((X, norm, kv_cache, Wqkv, q_norm, k_norm, Wo))
 
     def launcher(launch: "cuda.bench.Launch") -> None:
         stream = to_torch_stream(launch.get_stream(), device)
         with torch.cuda.stream(stream):
-            for X, norm, past_kv, Wqkv, q_norm, k_norm, Wo in inputs_list:
-                f(X, norm, past_kv, Wqkv, q_norm, k_norm, rope, Wo, num_heads, num_kv_heads, kv_size)
+            for X, norm, kv_cache, Wqkv, q_norm, k_norm, Wo in inputs_list:
+                f(X, norm, kv_cache, Wqkv, q_norm, k_norm, rope, Wo, kv_size)
 
     state.exec(launcher, sync=True)
 
@@ -124,6 +124,7 @@ def benchmark(args: argparse.Namespace):
 
     kernels_list = []
     kernels_list += ["eager", "inductor"]
+    kernels_list += ["attn_triton_v1.attn_triton_v1"]
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("kernel", kernels_list)
@@ -172,7 +173,7 @@ if __name__ == "__main__":
             .entrypoint([])  # remove verbose logging by base image on entry
             .uv_pip_install("torch==2.10.0", index_url="https://download.pytorch.org/whl/cu130")
             .uv_pip_install("transformers", "ninja", "pandas", "tabulate", "cuda-bench[cu13]")
-            .add_local_python_source("reference")
+            .add_local_python_source("reference", "attn_triton_v1")
         )
         app = modal.App("megakernel-mlp", image=image)
         modal_main = app.function(image=image, gpu=args.modal)(benchmark)

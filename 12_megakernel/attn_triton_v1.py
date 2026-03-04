@@ -1,0 +1,233 @@
+# decode only
+
+import torch
+import triton
+import triton.language as tl
+from torch import Tensor
+
+
+@triton.jit
+def attn_triton_v1_kernel(
+    x_ptr,  # (dim)
+    norm_ptr,  # (dim)
+    kv_cache_ptr,  # (2, max_context, num_kv_heads, head_dim)
+    wqkv_ptr,  # (qkv_dim, dim)
+    q_norm_ptr,  # (head_dim)
+    k_norm_ptr,  # (head_dim)
+    rope_ptr,  # (head_dim * 2)
+    wo_ptr,  # (dim, q_dim)
+    tmp_ptr,  # (qkv_dim)
+    flag_ptr,
+    position,
+    max_context,
+    dim: tl.constexpr,
+    num_heads: tl.constexpr,
+    num_kv_heads: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    head_dim: tl.constexpr = 128,
+):
+    raw_pid = tl.program_id(0)
+    num_pids = tl.num_programs(0)
+
+    # do input RMS norm on all threadblocks.
+    # duplicate work, but avoid grid-wide sync.
+    # assume dim is small
+    offs_dim = tl.arange(0, dim)
+    x = tl.load(x_ptr + offs_dim).to(tl.float32)
+    norm = tl.load(norm_ptr + offs_dim).to(tl.float32)
+
+    mean_sq = tl.sum(x * x, axis=0) * (1 / dim) + 1e-6
+    x_normed = x * norm * tl.rsqrt(mean_sq)
+
+    # QKV projection
+    qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
+    for pid_n in range(raw_pid, qkv_dim // BLOCK_N, num_pids):
+        # one-shot
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        wqkv_ptrs = wqkv_ptr + (offs_n[:, None] * dim + offs_dim[None, :])
+
+        wqkv = tl.load(wqkv_ptrs)  # [BLOCK_N, dim]
+        acc = tl.sum(x_normed * wqkv, axis=1)  # [BLOCK_N]
+
+        # NOTE: since v doesn't have QK-norm or RoPE, we can write v directly to KV cache
+        tmp_ptrs = tmp_ptr + offs_n
+        tl.store(tmp_ptrs, acc)
+
+    # grid-wide sync
+    tl.atomic_add(flag_ptr, 1, sem="release", scope="gpu")
+    while tl.atomic_add(flag_ptr, 0, sem="acquire", scope="gpu") != num_pids:
+        pass
+
+    q_ptr = tmp_ptr
+    k_ptr = q_ptr + num_heads * head_dim
+    v_ptr = k_ptr + num_kv_heads * head_dim
+
+    # each threadblock = 1 attention head
+    if raw_pid < num_heads:
+        head_id = raw_pid
+        kv_head_id = head_id // (num_heads // num_kv_heads)
+
+        cos_ptr = rope_ptr
+        sin_ptr = cos_ptr + head_dim
+
+        # QK norm and RoPE
+        offs_head_dim = tl.arange(0, head_dim)
+        q = tl.load(q_ptr + head_id * head_dim + offs_head_dim).to(tl.float32)
+        k = tl.load(k_ptr + kv_head_id * head_dim + offs_head_dim).to(tl.float32)
+        v = tl.load(v_ptr + kv_head_id * head_dim + offs_head_dim)
+
+        q_norm = tl.load(q_norm_ptr + offs_head_dim).to(tl.float32)
+        k_norm = tl.load(k_norm_ptr + offs_head_dim).to(tl.float32)
+
+        offs_half = tl.arange(0, head_dim // 2)
+        cos = tl.load(cos_ptr + offs_half).to(tl.float32)
+        sin = tl.load(sin_ptr + offs_half).to(tl.float32)
+
+        q_mean_sq = tl.sum(q * q, axis=0) * (1 / head_dim) + 1e-6
+        k_mean_sq = tl.sum(k * k, axis=0) * (1 / head_dim) + 1e-6
+
+        q_normed = q * q_norm * tl.rsqrt(q_mean_sq)
+        k_normed = k * k_norm * tl.rsqrt(k_mean_sq)
+
+        q1, q2 = tl.split(tl.reshape(q_normed, (2, head_dim // 2)).T)  # [head_dim/2] each
+        k1, k2 = tl.split(tl.reshape(k_normed, (2, head_dim // 2)).T)
+
+        q_new = tl.reshape(tl.join(q1 * cos - q2 * sin, q1 * sin + q2 * cos).T, (head_dim,))
+        k_new = tl.reshape(tl.join(k1 * cos - k2 * sin, k1 * sin + k2 * cos).T, (head_dim,))
+
+        # update KV cache
+        k_ptr = kv_cache_ptr
+        v_ptr = kv_cache_ptr + max_context * num_kv_heads * head_dim
+
+        kv_offsets = (position * num_kv_heads + kv_head_id) * head_dim + offs_head_dim
+        tl.store(k_ptr + kv_offsets, k_new)
+        tl.store(v_ptr + kv_offsets, v)
+
+        # iterate over KV cache
+        offs_head_dim = tl.arange(0, head_dim)
+
+        offs_len = tl.arange(0, BLOCK_K)[:, None]
+
+        k_ptrs = k_ptr + (offs_len * num_kv_heads * head_dim + kv_head_id * head_dim + offs_head_dim)
+        v_ptrs = v_ptr + (offs_len * num_kv_heads * head_dim + kv_head_id * head_dim + offs_head_dim)
+
+        # attention w/ online softmax
+        max_s = tl.full((1,), float("-inf"), dtype=tl.float32)
+        sum_exp = tl.zeros((BLOCK_K,), dtype=tl.float32)
+        o = tl.zeros((BLOCK_K, head_dim), dtype=tl.float32)
+
+        for len_ in range(tl.cdiv(position + 1, BLOCK_K)):
+            mask = offs_len < position + 1 - len_ * BLOCK_K
+            k_block = tl.load(k_ptrs, mask=mask)  # [BLOCK_K, head_dim]
+            v_block = tl.load(v_ptrs, mask=mask)
+
+            s = tl.sum(q_new * k_block, axis=1)  # [BLOCK_K]
+            new_max_s = tl.maximum(max_s, tl.max(s, axis=0))
+            rescale = tl.exp(max_s - new_max_s)
+
+            p = tl.exp(s - new_max_s)  # [BLOCK_K]
+            sum_exp = sum_exp * rescale + p
+            o = o * rescale + p[:, None] * v_block
+            max_s = new_max_s
+
+            k_ptrs += BLOCK_K * num_kv_heads * head_dim
+            v_ptrs += BLOCK_K * num_kv_heads * head_dim
+
+        sum_exp = tl.sum(sum_exp, axis=0)  # []
+        o = tl.sum(o, axis=0) / sum_exp  # [head_dim]
+
+        # store to the same tmp memory for query
+        offs_head_dim = tl.arange(0, head_dim)
+        tl.store(q_ptr + head_id * head_dim + offs_head_dim, o)
+
+        tl.atomic_add(flag_ptr + 1, 1, sem="release", scope="gpu")
+
+    while tl.atomic_add(flag_ptr + 1, 0, sem="acquire", scope="gpu") != num_heads:
+        pass
+
+    # output projection
+    for pid_n in range(raw_pid, dim // BLOCK_N, num_pids):
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+
+        o_ptrs = q_ptr + offs_k
+        wo_ptrs = wo_ptr + (offs_n[:, None] * dim + offs_k[None, :])
+
+        acc = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
+
+        for _ in range(dim // BLOCK_K):
+            o = tl.load(o_ptrs)  # [BLOCK_K]
+            wo = tl.load(wo_ptrs)  # [BLOCK_N, BLOCK_K]
+            acc += o * wo
+
+            o_ptrs += BLOCK_K
+            wo_ptrs += BLOCK_K
+
+        acc = tl.sum(acc, axis=1)  # [BLOCK_N]
+
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc += tl.load(x_ptr + offs_n)
+        tl.store(x_ptr + offs_n, acc)
+
+    # signal done. last pid issues reset.
+    before = tl.atomic_add(flag_ptr + 2, 1, sem="release", scope="gpu")
+    if before == num_pids - 1:
+        for i in range(3):
+            tl.store(flag_ptr + i, 0)
+
+
+_FLAG: Tensor | None = None
+
+
+def attn_triton_v1(
+    x: Tensor,  # (num_tokens, dim)
+    norm: Tensor,  # (dim)
+    kv_cache: Tensor,  # (2, max_context, num_kv_heads, head_dim)
+    wqkv: Tensor,  # (qkv_dim, dim)
+    q_norm: Tensor,
+    k_norm: Tensor,
+    rope: Tensor,  # (num_tokens, head_dim * 2)
+    wo: Tensor,  # (dim, q_dim)
+    position: int,
+):
+    # lazily init _FLAG
+    # NOTE: since this flag is shared module-wide, this function is not thread-safe
+    global _FLAG
+    if _FLAG is None:
+        _FLAG = torch.zeros(3, dtype=torch.int32, device=x.device)
+
+    batch_size, dim = x.shape
+    qkv_dim, _ = wqkv.shape
+    _, max_context, num_kv_heads, head_dim = kv_cache.shape
+    num_heads = qkv_dim // head_dim - num_kv_heads * 2
+    assert batch_size == 1, "Only supports decode"
+
+    tmp = x.new_empty(batch_size, qkv_dim)
+
+    # NOTE: may want to limit num SMs used
+    num_sms = torch.cuda.get_device_properties(x.device).multi_processor_count
+    BLOCK_N = 4
+    BLOCK_K = 512
+
+    attn_triton_v1_kernel[(num_sms,)](
+        x,
+        norm,
+        kv_cache,
+        wqkv,
+        q_norm,
+        k_norm,
+        rope,
+        wo,
+        tmp,
+        _FLAG,
+        position=position,
+        max_context=max_context,
+        dim=dim,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        head_dim=head_dim,
+    )
+    return x
