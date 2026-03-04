@@ -104,15 +104,15 @@ class ModelBuffers:
         return ModelBuffers(rope, past_kv, position)
 
 
-# we use combined w13 to align with vLLM/SGLang impl.
-# this helps with the baseline significantly for small shapes.
-def mlp_ref(x: Tensor, w13: Tensor, w2: Tensor):
-    gate, up = (x @ w13.T).chunk(2, dim=1)
-    return (F.silu(gate) * up) @ w2.T
-
-
 def _rms_norm(x: Tensor, weight: Tensor):
     return F.rms_norm(x, x.shape[-1:], weight, eps=1e-6)
+
+
+# we use combined w13 to align with vLLM/SGLang impl.
+# this helps with the baseline significantly for small shapes.
+def mlp_ref(x: Tensor, norm: Tensor, w13: Tensor, w2: Tensor):
+    gate, up = (_rms_norm(x, norm) @ w13.T).chunk(2, dim=1)
+    return x + (F.silu(gate) * up) @ w2.T
 
 
 def _precompute_rope(max_length: int, dim: int, theta: float):
@@ -136,6 +136,7 @@ def _apply_rope(x: Tensor, rope: Tensor):
 
 def attn_ref(
     x: Tensor,  # (num_tokens, dim)
+    norm: Tensor,
     past_kv: Tensor,  # (2, max_context, num_kv_heads, head_dim)
     wqkv: Tensor,  # (qkv_dim, dim)
     q_norm: Tensor,
@@ -150,7 +151,7 @@ def attn_ref(
     num_tokens, _ = x.shape
 
     # input projection
-    qkv = (x @ wqkv.T).unflatten(-1, (-1, head_dim))  # (num_tokens, -1, head_dim)
+    qkv = (_rms_norm(x, norm) @ wqkv.T).unflatten(-1, (-1, head_dim))  # (num_tokens, -1, head_dim)
     q, k, v = qkv.split([num_heads, num_kv_heads, num_kv_heads], dim=-2)
 
     # apply QK norm and rope
@@ -172,7 +173,7 @@ def attn_ref(
     ).transpose(0, 1)
 
     # output projection
-    return o.flatten(-2) @ wo.T
+    return x + o.flatten(-2) @ wo.T
 
 
 def model_ref(input_ids: Tensor, params: ModelParams, buffers: ModelBuffers):
@@ -183,8 +184,9 @@ def model_ref(input_ids: Tensor, params: ModelParams, buffers: ModelBuffers):
     rope = buffers.rope[position : position + num_tokens]
 
     for i, layer in enumerate(params.layers):
-        x = x + attn_ref(
-            _rms_norm(x, layer.attn_norm),
+        x = attn_ref(
+            x,
+            layer.attn_norm,
             buffers.past_kv[i],
             layer.wqkv,
             layer.q_norm,
@@ -195,7 +197,7 @@ def model_ref(input_ids: Tensor, params: ModelParams, buffers: ModelBuffers):
             params.num_kv_heads,
             position,
         )
-        x = x + mlp_ref(_rms_norm(x, layer.mlp_norm), layer.w13, layer.w2)
+        x = mlp_ref(x, layer.mlp_norm, layer.w13, layer.w2)
 
     # increment position
     buffers.position += num_tokens
@@ -237,7 +239,8 @@ if __name__ == "__main__":
 
     # HF reference
     max_new_tokens = 10
-    expected = model.generate(input_ids, max_new_tokens=max_new_tokens)[0, input_ids.shape[1] :]
+    tokens = model.generate(input_ids, max_new_tokens=max_new_tokens, do_sample=False)
+    expected = tokens[0, input_ids.shape[1] :]
 
     # ours
     # buffers will be modified in-place

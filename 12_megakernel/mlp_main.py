@@ -1,5 +1,3 @@
-# TODO: add an option to include input norm and residual connection
-
 import argparse
 import importlib
 import math
@@ -59,27 +57,28 @@ def torch_bench(state: "cuda.bench.State") -> None:
     with torch.cuda.stream(stream):
         # apply scaling to make sure the output doesn't explode
         X = torch.randn(M, K, device=device).mul(K**-0.5).bfloat16()
+        norm = torch.randn(K, device=device).mul(K**-0.5).bfloat16()
         W13 = torch.randn(N * 2, K, device=device).mul(K**-0.5).bfloat16()
         W2 = torch.randn(K, N, device=device).mul(N**-0.5).bfloat16()
 
         # correctness check
-        out_ref = mlp_ref(X, W13, W2)
-        out = f(X, W13, W2)
+        out_ref = mlp_ref(X, norm, W13, W2)
+        out = f(X, norm, W13, W2)
         torch.testing.assert_close(out, out_ref)
 
         inputs_list = []
         for _ in range(state.get_int64("num_inputs")):
-            # apply scaling to make sure the output doesn't explode
             X = torch.randn(M, K, device=device).mul(K**-0.5).bfloat16()
+            norm = torch.randn(K, device=device).mul(K**-0.5).bfloat16()
             W13 = torch.randn(N * 2, K, device=device).mul(K**-0.5).bfloat16()
             W2 = torch.randn(K, N, device=device).mul(N**-0.5).bfloat16()
-            inputs_list.append((X, W13, W2))
+            inputs_list.append((X, norm, W13, W2))
 
     def launcher(launch: "cuda.bench.Launch") -> None:
         stream = to_torch_stream(launch.get_stream(), device)
         with torch.cuda.stream(stream):
-            for X, W13, W2 in inputs_list:
-                f(X, W13, W2)
+            for X, norm, W13, W2 in inputs_list:
+                f(X, norm, W13, W2)
 
     state.exec(launcher, sync=True)
 
@@ -92,9 +91,14 @@ def benchmark(shape: list[int]):
 
     M, N, K = shape
 
-    # we also count writing and reading tmp buffer in total memory traffic
+    # only tensor core flops
     num_flops = 3 * 2 * M * N * K
-    num_gb = 2 * (2 * M * K + 3 * N * K + 2 * M * N) * 1e-9
+
+    # we also count writing and reading tmp buffers in total memory traffic
+    num_elems = 2 * M * K + K  # RMS norm
+    num_elems += M * K + 2 * N * K + M * N  # gate + up proj
+    num_elems += M * N + N * K + M * K  # down proj
+    num_gb = num_elems * 2 * 1e-9
 
     # duplicate inputs to make sure each measurement is at least 10ms
     SOL_COMPUTE, SOL_MEMORY = get_sol()
@@ -151,8 +155,8 @@ if __name__ == "__main__":
             modal.Image.from_registry("nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04", add_python="3.12")
             .entrypoint([])  # remove verbose logging by base image on entry
             .uv_pip_install("torch==2.10.0", index_url="https://download.pytorch.org/whl/cu130")
-            .uv_pip_install("ninja", "pandas", "tabulate", "cuda-bench[cu13]")
-            .add_local_python_source("mlp_triton_v1")
+            .uv_pip_install("transformers", "ninja", "pandas", "tabulate", "cuda-bench[cu13]")
+            .add_local_python_source("reference", "mlp_triton_v1")
         )
         app = modal.App("megakernel-mlp", image=image)
         modal_main = app.function(image=image, gpu=args.modal)(benchmark)
