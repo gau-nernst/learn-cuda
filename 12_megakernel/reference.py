@@ -156,7 +156,7 @@ def attn_ref(
     q_norm: Tensor,
     k_norm: Tensor,
     rope: Tensor,  # (num_tokens, head_dim * 2)
-    wo: Tensor,  # (dim, v_dim)
+    wo: Tensor,  # (dim, q_dim)
     num_heads: int,
     num_kv_heads: int,
     position: int,
