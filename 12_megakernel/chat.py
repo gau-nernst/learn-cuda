@@ -26,7 +26,7 @@ class ReferenceDecoder:
 
         self.buffers = ModelBuffers.create(
             self.params.num_kv_heads,
-            len(self.params.layers),
+            self.params.num_layers,
             device=embeds.device,
             kv_dtype=embeds.dtype,
         )

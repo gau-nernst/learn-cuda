@@ -23,26 +23,19 @@ def get_sol():
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class LayerParams:
-    attn_norm: Tensor
-    wqkv: Tensor
-    q_norm: Tensor
-    k_norm: Tensor
-    wo: Tensor
-    mlp_norm: Tensor
-    w13: Tensor
-    w2: Tensor
-
-    def to(self, *args, **kwargs):
-        return LayerParams(*[x.to(*args, **kwargs) for x in self])
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
 class ModelParams:
-    input_embeds: Tensor
-    layers: list[LayerParams]
-    norm: Tensor
+    input_embeds: Tensor  # [vocab_size, dim]
+    l_attn_norm: Tensor  # [depth, dim]
+    l_wqkv: Tensor  # [depth, qkv_dim, dim]
+    l_q_norm: Tensor  # [depth, head_dim]
+    l_k_norm: Tensor  # [depth, head_dim]
+    l_wo: Tensor  # [depth, dim, q_dim]
+    l_mlp_norm: Tensor  # [depth, dim]
+    l_w13: Tensor  # [depth, mlp_dim * 2, dim]
+    l_w2: Tensor  # [depth, dim, mlp_dim]
+    norm: Tensor  # [dim]
     lm_head: Tensor | None
+    num_layers: int
     num_heads: int
     num_kv_heads: int
 
@@ -61,7 +54,15 @@ class ModelParams:
         num_heads = 0
         num_kv_heads = 0
 
-        layers = []
+        l_attn_norm = []
+        l_wqkv = []
+        l_q_norm = []
+        l_k_norm = []
+        l_wo = []
+        l_mlp_norm = []
+        l_w13 = []
+        l_w2 = []
+
         for i in range(1000):
             prefix = f"model.layers.{i}."
             layer = {k.removeprefix(prefix): v for k, v in state_dict.items() if k.startswith(prefix)}
@@ -74,27 +75,34 @@ class ModelParams:
             num_heads = wq.shape[0] // 128
             num_kv_heads = wk.shape[0] // 128
 
-            layer = LayerParams(
-                attn_norm=layer["input_layernorm.weight"],
-                wqkv=torch.cat([wq, wk, wv], dim=0),
-                q_norm=layer["self_attn.q_norm.weight"],
-                k_norm=layer["self_attn.k_norm.weight"],
-                wo=wo,
-                mlp_norm=layer["post_attention_layernorm.weight"],
-                w13=torch.cat([w1, w3], dim=0),
-                w2=w2,
-            )
-            layers.append(layer)
+            l_attn_norm.append(layer["input_layernorm.weight"])
+            l_wqkv.append(torch.cat([wq, wk, wv], dim=0))
+            l_q_norm.append(layer["self_attn.q_norm.weight"])
+            l_k_norm.append(layer["self_attn.k_norm.weight"])
+            l_wo.append(wo)
+            l_mlp_norm.append(layer["post_attention_layernorm.weight"])
+            l_w13.append(torch.cat([w1, w3], dim=0))
+            l_w2.append(w2)
 
-        return ModelParams(input_embeds, layers, norm, lm_head, num_heads, num_kv_heads)
+        return ModelParams(
+            input_embeds,
+            torch.stack(l_attn_norm, dim=0),
+            torch.stack(l_wqkv, dim=0),
+            torch.stack(l_q_norm, dim=0),
+            torch.stack(l_k_norm, dim=0),
+            torch.stack(l_wo, dim=0),
+            torch.stack(l_mlp_norm, dim=0),
+            torch.stack(l_w13, dim=0),
+            torch.stack(l_w2, dim=0),
+            norm,
+            lm_head,
+            len(l_attn_norm),
+            num_heads,
+            num_kv_heads,
+        )
 
     def to(self, *args, **kwargs):
-        return ModelParams(
-            self.input_embeds.to(*args, **kwargs),
-            [x.to(*args, **kwargs) for x in self.layers],
-            self.norm.to(*args, **kwargs),
-            self.lm_head.to(*args, **kwargs) if self.lm_head is not None else None,
-        )
+        return ModelParams(*[x.to(*args, **kwargs) if x is not None else None for x in self])
 
 
 @dataclasses.dataclass(slots=True)
@@ -196,19 +204,19 @@ def model_ref(input_ids: Tensor, params: ModelParams, buffers: ModelBuffers):
     x = params.input_embeds[input_ids]
     rope = buffers.rope[position : position + num_tokens]
 
-    for i, layer in enumerate(params.layers):
+    for i in range(params.num_layers):
         x = attn_ref(
             x,
-            layer.attn_norm,
+            params.l_attn_norm[i],
             buffers.kv_cache[i],
-            layer.wqkv,
-            layer.q_norm,
-            layer.k_norm,
+            params.l_wqkv[i],
+            params.l_q_norm[i],
+            params.l_k_norm[i],
             rope,
-            layer.wo,
+            params.l_wo[i],
             position,
         )
-        x = mlp_ref(x, layer.mlp_norm, layer.w13, layer.w2)
+        x = mlp_ref(x, params.l_mlp_norm[i], params.l_w13[i], params.l_w2[i])
 
     # increment position
     buffers.position += num_tokens
@@ -256,7 +264,7 @@ if __name__ == "__main__":
     # ours
     # buffers will be modified in-place
     params = ModelParams.from_state_dict(model.state_dict())
-    buffers = ModelBuffers.create(params.num_kv_heads, len(params.layers), kv_dtype=params.input_embeds.dtype)
+    buffers = ModelBuffers.create(params.num_kv_heads, params.num_layers, kv_dtype=params.input_embeds.dtype)
 
     # prefill
     outputs = [model_ref(input_ids.squeeze(0), params, buffers)]

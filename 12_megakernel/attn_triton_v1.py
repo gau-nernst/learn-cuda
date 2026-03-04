@@ -7,6 +7,17 @@ from torch import Tensor
 
 
 @triton.jit
+def _rms_norm(x_ptr, norm_ptr, dim: tl.constexpr):
+    # one-shot: assume we can hold all of data
+    offs = tl.arange(0, dim)
+    x = tl.load(x_ptr + offs).to(tl.float32)
+    norm = tl.load(norm_ptr + offs).to(tl.float32)
+
+    mean_sq = tl.sum(x * x, axis=0) * (1 / dim) + 1e-6
+    return x * norm * tl.rsqrt(mean_sq)
+
+
+@triton.jit
 def attn_triton_v1_kernel(
     x_ptr,  # (dim)
     norm_ptr,  # (dim)
@@ -33,26 +44,20 @@ def attn_triton_v1_kernel(
     # do input RMS norm on all threadblocks.
     # duplicate work, but avoid grid-wide sync.
     # assume dim is small
-    offs_dim = tl.arange(0, dim)
-    x = tl.load(x_ptr + offs_dim).to(tl.float32)
-    norm = tl.load(norm_ptr + offs_dim).to(tl.float32)
-
-    mean_sq = tl.sum(x * x, axis=0) * (1 / dim) + 1e-6
-    x_normed = x * norm * tl.rsqrt(mean_sq)
+    x_normed = _rms_norm(x_ptr, norm_ptr, dim)
 
     # QKV projection
     qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
     for pid_n in range(raw_pid, qkv_dim // BLOCK_N, num_pids):
         # one-shot
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_dim = tl.arange(0, dim)
         wqkv_ptrs = wqkv_ptr + (offs_n[:, None] * dim + offs_dim[None, :])
 
+        # NOTE: since v doesn't have QK-norm or RoPE, we can write v directly to KV cache
         wqkv = tl.load(wqkv_ptrs)  # [BLOCK_N, dim]
         acc = tl.sum(x_normed * wqkv, axis=1)  # [BLOCK_N]
-
-        # NOTE: since v doesn't have QK-norm or RoPE, we can write v directly to KV cache
-        tmp_ptrs = tmp_ptr + offs_n
-        tl.store(tmp_ptrs, acc)
+        tl.store(tmp_ptr + offs_n, acc)
 
     # grid-wide sync
     tl.atomic_add(flag_ptr, 1, sem="release", scope="gpu")
@@ -74,22 +79,14 @@ def attn_triton_v1_kernel(
 
         # QK norm and RoPE
         offs_hdim = tl.arange(0, head_dim)
-        q = tl.load(q_ptr + head_id * head_dim + offs_hdim).to(tl.float32)
-        k = tl.load(k_ptr + kv_head_id * head_dim + offs_hdim).to(tl.float32)
         v = tl.load(v_ptr + kv_head_id * head_dim + offs_hdim)
-
-        q_norm = tl.load(q_norm_ptr + offs_hdim).to(tl.float32)
-        k_norm = tl.load(k_norm_ptr + offs_hdim).to(tl.float32)
 
         offs_half = tl.arange(0, head_dim // 2)
         cos = tl.load(cos_ptr + offs_half).to(tl.float32)
         sin = tl.load(sin_ptr + offs_half).to(tl.float32)
 
-        q_mean_sq = tl.sum(q * q, axis=0) * (1 / head_dim) + 1e-6
-        k_mean_sq = tl.sum(k * k, axis=0) * (1 / head_dim) + 1e-6
-
-        q_normed = q * q_norm * tl.rsqrt(q_mean_sq)
-        k_normed = k * k_norm * tl.rsqrt(k_mean_sq)
+        q_normed = _rms_norm(q_ptr + head_id * head_dim, q_norm_ptr, head_dim)
+        k_normed = _rms_norm(k_ptr + kv_head_id * head_dim, k_norm_ptr, head_dim)
 
         q1, q2 = tl.split(tl.reshape(q_normed, (2, head_dim // 2)).T)  # [head_dim/2] each
         k1, k2 = tl.split(tl.reshape(k_normed, (2, head_dim // 2)).T)
@@ -217,6 +214,7 @@ def attn_triton_v1(
     batch_size, dim = x.shape
     qkv_dim, _ = wqkv.shape
     _, max_context, num_kv_heads, head_dim = kv_cache.shape
+
     num_heads = qkv_dim // head_dim - num_kv_heads * 2
     assert batch_size == 1, "Only supports decode"
 

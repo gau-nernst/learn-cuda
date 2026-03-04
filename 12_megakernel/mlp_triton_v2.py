@@ -7,14 +7,24 @@ from torch import Tensor
 
 
 @triton.jit
+def _rms_norm(x_ptr, norm_ptr, dim: tl.constexpr):
+    # one-shot: assume we can hold all of data
+    offs = tl.arange(0, dim)
+    x = tl.load(x_ptr + offs).to(tl.float32)
+    norm = tl.load(norm_ptr + offs).to(tl.float32)
+
+    mean_sq = tl.sum(x * x, axis=0) * (1 / dim) + 1e-6
+    return x * norm * tl.rsqrt(mean_sq)
+
+
+@triton.jit
 def mlp_triton_v2_kernel(
     x_ptr,  # (hidden_dim)
     norm_ptr,  # (hidden_dim)
     w13_ptr,  # (mlp_dim * 2, hidden_dim)
     w2_ptr,  # (hidden_dim, mlp_dim)
-    tmp_ptr,  # (batch_size, mlp_dim) - for w13
+    tmp_ptr,  # (mlp_dim) - for w13
     flag_ptr,
-    batch_size,
     hidden_dim: tl.constexpr,
     mlp_dim: tl.constexpr,
     # currently using the same hparams for the 1st and 2nd matmul,
@@ -28,12 +38,7 @@ def mlp_triton_v2_kernel(
     # do input RMS norm on all threadblocks.
     # duplicate work, but avoid grid-wide sync.
     # assume hidden_dim is small
-    offs = tl.arange(0, hidden_dim)
-    x = tl.load(x_ptr + offs).to(tl.float32)
-    norm = tl.load(norm_ptr + offs).to(tl.float32)
-
-    mean_sq = tl.sum(x * x, axis=0) * (1 / hidden_dim) + 1e-6
-    x_normed = x * norm * tl.rsqrt(mean_sq)
+    x_normed = _rms_norm(x_ptr, norm_ptr, hidden_dim)
 
     # persistent kernel
     w1_ptr = w13_ptr
@@ -42,8 +47,9 @@ def mlp_triton_v2_kernel(
     for pid_n in range(raw_pid, mlp_dim // BLOCK_N, num_pids):
         # one-shot
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        w1_ptrs = w1_ptr + (offs_n[:, None] * hidden_dim + offs[None, :])
-        w3_ptrs = w3_ptr + (offs_n[:, None] * hidden_dim + offs[None, :])
+        offs_dim = tl.arange(0, hidden_dim)
+        w1_ptrs = w1_ptr + (offs_n[:, None] * hidden_dim + offs_dim[None, :])
+        w3_ptrs = w3_ptr + (offs_n[:, None] * hidden_dim + offs_dim[None, :])
 
         w1 = tl.load(w1_ptrs)  # [BLOCK_N, hidden_dim]
         w3 = tl.load(w3_ptrs)
@@ -51,9 +57,7 @@ def mlp_triton_v2_kernel(
         acc1 = tl.sum(x_normed * w1, axis=1)  # [BLOCK_N]
         acc3 = tl.sum(x_normed * w3, axis=1)
         acc = acc1 * acc3 * tl.sigmoid(acc1)
-
-        tmp_ptrs = tmp_ptr + offs_n
-        tl.store(tmp_ptrs, acc)
+        tl.store(tmp_ptr + offs_n, acc)
 
     # grid-wide sync
     tl.atomic_add(flag_ptr, 1, sem="release", scope="gpu")
@@ -119,7 +123,6 @@ def mlp_triton_v2(x: Tensor, norm: Tensor, w13: Tensor, w2: Tensor):
         w2,
         tmp,
         _FLAG,
-        batch_size=batch_size,
         hidden_dim=hidden_dim,
         mlp_dim=mlp_dim,
         BLOCK_N=BLOCK_N,
