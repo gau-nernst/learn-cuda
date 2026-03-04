@@ -47,7 +47,8 @@ def torch_bench(state: "cuda.bench.State") -> None:
     kv_dim = num_kv_heads * head_dim
     qkv_dim = q_dim + kv_dim * 2
 
-    all_rope = _precompute_rope(kv_dim + 1, head_dim, theta=1e6)
+    max_context = (kv_size + 1 + 128 - 1) // 128 * 128  # round up to multiple of 128
+    all_rope = _precompute_rope(max_context, head_dim, theta=1e6)
     rope = all_rope[kv_size : kv_size + 1].to(device)
 
     stream = to_torch_stream(state.get_stream(), device)
@@ -55,11 +56,11 @@ def torch_bench(state: "cuda.bench.State") -> None:
         # apply scaling to make sure the output doesn't explode
         X = torch.randn(1, dim, device=device).mul(dim**-0.5).bfloat16()
         norm = torch.randn(dim, device=device).mul(dim**-0.5).bfloat16()
-        kv_cache = torch.randn(2, kv_size * 2, num_kv_heads, head_dim, device=device).bfloat16()
+        kv_cache = torch.randn(2, max_context, num_kv_heads, head_dim, device=device).bfloat16()
         Wqkv = torch.randn(qkv_dim, dim, device=device).mul(dim**-0.5).bfloat16()
         q_norm = torch.randn(head_dim, device=device).mul(head_dim**-0.5).bfloat16()
         k_norm = torch.randn(head_dim, device=device).mul(head_dim**-0.5).bfloat16()
-        Wo = torch.randn(dim, q_dim, device=device).mul(q_dim**-0.5).bfloat16()
+        Wo = torch.randn(dim, q_dim, device=device).bfloat16()
 
         # correctness check
         kv_cache_ref = kv_cache.clone()
@@ -75,11 +76,11 @@ def torch_bench(state: "cuda.bench.State") -> None:
         for _ in range(state.get_int64("num_inputs")):
             X = torch.randn(1, dim, device=device).mul(dim**-0.5).bfloat16()
             norm = torch.randn(dim, device=device).mul(dim**-0.5).bfloat16()
-            kv_cache = torch.randn(2, kv_size * 2, num_kv_heads, head_dim, device=device).bfloat16()
+            kv_cache = torch.randn(2, max_context, num_kv_heads, head_dim, device=device).bfloat16()
             Wqkv = torch.randn(qkv_dim, dim, device=device).mul(dim**-0.5).bfloat16()
             q_norm = torch.randn(head_dim, device=device).mul(head_dim**-0.5).bfloat16()
             k_norm = torch.randn(head_dim, device=device).mul(head_dim**-0.5).bfloat16()
-            Wo = torch.randn(dim, q_dim, device=device).mul(q_dim**-0.5).bfloat16()
+            Wo = torch.randn(dim, q_dim, device=device).bfloat16()
             inputs_list.append((X, norm, kv_cache, Wqkv, q_norm, k_norm, Wo))
 
     def launcher(launch: "cuda.bench.Launch") -> None:

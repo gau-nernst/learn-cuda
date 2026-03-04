@@ -45,9 +45,10 @@ def main(args: argparse.Namespace):
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
     messages = []
+    do_warmup = True
 
     while True:
-        prompt = input("> ")
+        prompt = "hi" if do_warmup else input("> ")
         messages.append(dict(role="user", content=prompt))
 
         input_ids = tokenizer.apply_chat_template(
@@ -70,7 +71,7 @@ def main(args: argparse.Namespace):
             token = input_ids.item()
 
             to_print = stream.step(tokenizer._tokenizer, token)
-            if to_print is not None:
+            if not do_warmup and to_print is not None:
                 outputs.append(to_print)
                 print(to_print, end="", flush=True)
 
@@ -88,12 +89,14 @@ def main(args: argparse.Namespace):
                 break
         t2 = time.perf_counter()
 
-        prefill_speed = num_prefill_tokens / (t1 - t0)
-        decode_speed = len(outputs) / (t2 - t1)
-        print(f"Prefill: {prefill_speed:.2f} tok/s, Decode: {decode_speed:.2f} tok/s")
+        if not do_warmup:
+            print(f"Prefill: {num_prefill_tokens} tokens, {num_prefill_tokens / (t1 - t0):.2f} tok/s")
+            print(f"Decode: {len(outputs)} tokens, {len(outputs) / (t2 - t1):.2f} tok/s")
 
-        # update chat history
-        messages.append(dict(role="assistant", content="".join(outputs)))
+            # update chat history
+            messages.append(dict(role="assistant", content="".join(outputs)))
+
+        do_warmup = False
 
 
 if __name__ == "__main__":
