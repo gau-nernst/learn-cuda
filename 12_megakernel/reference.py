@@ -8,6 +8,20 @@ from torch import Tensor
 from torch.nn.attention.bias import causal_lower_right
 
 
+# TFLOPS is from specsheet, membw is measured memcpy bw.
+def get_sol():
+    gpu_name = torch.cuda.get_device_name()
+    if "5090" in gpu_name:
+        sol = 209.5, 1500
+    elif "A100" in gpu_name:
+        sol = 312, 1700
+    elif "H200" in gpu_name:
+        sol = 1979, 4000
+    else:
+        sol = 1e9, 1e9
+    return sol
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class LayerParams:
     attn_norm: Tensor

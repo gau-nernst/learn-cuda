@@ -5,24 +5,10 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 import torch
-from reference import mlp_ref
+from reference import get_sol, mlp_ref
 
 if TYPE_CHECKING:
     import cuda.bench
-
-
-# TFLOPS is from specsheet, membw is measured memcpy bw.
-def get_sol():
-    gpu_name = torch.cuda.get_device_name()
-    if "5090" in gpu_name:
-        sol = 209.5, 1500
-    elif "A100" in gpu_name:
-        sol = 312, 1700
-    elif "H200" in gpu_name:
-        sol = 1979, 4000
-    else:
-        sol = 1e9, 1e9
-    return sol
 
 
 def get_kernel(name: str):
@@ -110,6 +96,8 @@ def benchmark(shape: list[int]):
     kernels_list = []
     kernels_list += ["eager", "inductor"]
     kernels_list += ["mlp_triton_v1.mlp_triton_v1", "mlp_triton_v1.mlp_triton_v1_2stage"]
+    if M == 1:
+        kernels_list += ["mlp_triton_v2.mlp_triton_v2"]
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("kernel", kernels_list)
@@ -156,7 +144,7 @@ if __name__ == "__main__":
             .entrypoint([])  # remove verbose logging by base image on entry
             .uv_pip_install("torch==2.10.0", index_url="https://download.pytorch.org/whl/cu130")
             .uv_pip_install("transformers", "ninja", "pandas", "tabulate", "cuda-bench[cu13]")
-            .add_local_python_source("reference", "mlp_triton_v1")
+            .add_local_python_source("reference", "mlp_triton_v1", "mlp_triton_v2")
         )
         app = modal.App("megakernel-mlp", image=image)
         modal_main = app.function(image=image, gpu=args.modal)(benchmark)
