@@ -11,11 +11,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 class HFDecoder:
     def __init__(self, model):
         self.model = model.to("cuda")
-        self.kv_cache = DynamicCache()
-        torch.cuda.empty_cache()
+        self.reset()
 
     def reset(self):
-        self.kv_cache.reset()
+        self.kv_cache = DynamicCache()
         torch.cuda.empty_cache()
 
     @torch.no_grad()
