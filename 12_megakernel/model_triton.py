@@ -28,7 +28,9 @@ def _grid_sync(ptr, num_pids):
 
 @triton.jit
 def model_triton_kernel(
+    input_ids_ptr,  # ()
     x_ptr,  # (dim)
+    input_embeds_ptr,  # (vocab_size, dim)
     num_layers,
     # attention
     attn_norm_ptr,  # (num_layers, dim)
@@ -38,15 +40,16 @@ def model_triton_kernel(
     k_norm_ptr,  # (num_layers, head_dim)
     rope_ptr,  # (head_dim * 2)
     wo_ptr,  # (num_layers, dim, q_dim)
-    attn_tmp_ptr,  # (num_layers, qkv_dim)
+    attn_tmp_ptr,  # (qkv_dim)
     position,
     max_context,
     # mlp
     mlp_norm_ptr,  # (num_layers, hidden_dim)
     w13_ptr,  # (num_layers, mlp_dim * 2, hidden_dim)
     w2_ptr,  # (num_layers, hidden_dim, mlp_dim)
-    mlp_tmp_ptr,  # (num_layers, batch_size, mlp_dim) - for w13
+    mlp_tmp_ptr,  # (mlp_dim) - for w13
     #
+    norm_ptr,  # (dim)
     flag_ptr,
     dim: tl.constexpr,
     num_heads: tl.constexpr,
@@ -60,6 +63,11 @@ def model_triton_kernel(
 ):
     raw_pid = tl.program_id(0)
     num_pids = tl.num_programs(0)
+
+    # load input embedding on all threadblocks to avoid grid-wide sync
+    offs_dim = tl.arange(0, dim)
+    input_id = tl.load(input_ids_ptr)
+    tl.store(x_ptr + offs_dim, tl.load(input_embeds_ptr + input_id * dim + offs_dim))
 
     for layer_id in range(num_layers):
         x_normed = _rms_norm(x_ptr, attn_norm_ptr + layer_id * dim, dim)
@@ -260,7 +268,13 @@ def model_triton_kernel(
 
         _grid_sync(flag_ptr + layer_id * 5 + 4, num_pids)
 
+    # output norm
+    offs_dim = tl.arange(0, dim)
+    x_normed = _rms_norm(x_ptr, norm_ptr, dim)
+    tl.store(x_ptr + offs_dim, x_normed)
+
     if raw_pid == 0:
+        # reset flag
         for i in range(num_layers * 5):
             tl.store(flag_ptr + i, 0)
 
@@ -282,8 +296,10 @@ def model_triton(input_ids: Tensor, params: reference.ModelParams, buffers: refe
     _, _, mlp_dim = params.l_w2.shape
     _, _, max_context, _, head_dim = buffers.kv_cache.shape
 
-    attn_tmp = params.input_embeds.new_empty(batch_size, qkv_dim)
-    mlp_tmp = params.input_embeds.new_empty(batch_size, mlp_dim)
+    input_embeds = params.input_embeds
+    x = input_embeds.new_empty(batch_size, dim)
+    attn_tmp = input_embeds.new_empty(batch_size, qkv_dim)
+    mlp_tmp = input_embeds.new_empty(batch_size, mlp_dim)
 
     # NOTE: may want to limit num SMs used
     num_sms = torch.cuda.get_device_properties(input_ids.device).multi_processor_count
@@ -292,9 +308,10 @@ def model_triton(input_ids: Tensor, params: reference.ModelParams, buffers: refe
     MLP_BLOCK_N = 4
     MLP_BLOCK_K = 512
 
-    x = params.input_embeds[input_ids]  # TODO: fuse this
     model_triton_kernel[(num_sms,)](
+        input_ids,
         x,
+        params.input_embeds,
         params.num_layers,
         # attention
         params.l_attn_norm,
@@ -313,6 +330,7 @@ def model_triton(input_ids: Tensor, params: reference.ModelParams, buffers: refe
         params.l_w2,
         mlp_tmp,
         #
+        params.norm,
         flag_ptr=_FLAG,
         dim=dim,
         num_heads=params.num_heads,
@@ -328,8 +346,8 @@ def model_triton(input_ids: Tensor, params: reference.ModelParams, buffers: refe
     # increment position
     buffers.position += 1
 
-    # TODO: fuse this
-    x = reference._rms_norm(x[-1], params.norm)
+    # NOTE: right now it's much faster to do LM head separately
+    # (or perhaps i need a better way to write this in triton)
     lm_head = params.lm_head if params.lm_head is not None else params.input_embeds
     logits = x @ lm_head.T
     return logits.argmax(-1)
