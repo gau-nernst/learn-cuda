@@ -6,6 +6,12 @@ Plan
 - Start from small to big: MLP (gate+up+down projections), attention (qkv projections, RoPE, attention, out projection); from Triton to CUDA C++.
 - Test at bs=1,8,64,512
 
+To try interactive chat (only Qwen3-0.6B is supported at the moment)
+
+```bash
+python chat.py
+```
+
 ## MLP Benchmark results
 
 Note:
