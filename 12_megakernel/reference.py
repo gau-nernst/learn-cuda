@@ -1,4 +1,5 @@
 import dataclasses
+from typing import NamedTuple
 
 import safetensors.torch
 import torch
@@ -22,8 +23,7 @@ def get_sol():
     return sol
 
 
-@dataclasses.dataclass(frozen=True, slots=True)
-class ModelParams:
+class ModelParams(NamedTuple):
     input_embeds: Tensor  # [vocab_size, dim]
     l_attn_norm: Tensor  # [depth, dim]
     l_wqkv: Tensor  # [depth, qkv_dim, dim]
@@ -102,7 +102,7 @@ class ModelParams:
         )
 
     def to(self, *args, **kwargs):
-        return ModelParams(*[x.to(*args, **kwargs) if x is not None else None for x in self])
+        return ModelParams(*[x.to(*args, **kwargs) if isinstance(x, Tensor) else x for x in self])
 
 
 @dataclasses.dataclass(slots=True)
@@ -223,11 +223,7 @@ def model_ref(input_ids: Tensor, params: ModelParams, buffers: ModelBuffers):
 
     # LM head for the last token only
     x = _rms_norm(x[-1], params.norm)
-
-    lm_head = params.lm_head
-    if lm_head is None:
-        lm_head = params.input_embeds
-
+    lm_head = params.lm_head if params.lm_head is not None else params.input_embeds
     logits = x @ lm_head.T
     return logits.argmax(-1)
 

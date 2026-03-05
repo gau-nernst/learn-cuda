@@ -2,6 +2,7 @@ import argparse
 import time
 
 import torch
+from model_triton import model_triton
 from reference import ModelBuffers, ModelParams, model_ref
 from tokenizers.decoders import DecodeStream
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
@@ -9,8 +10,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 
 class HFDecoder:
     def __init__(self, model):
-        self.model = model
+        self.model = model.to("cuda")
         self.kv_cache = DynamicCache()
+        torch.cuda.empty_cache()
+
+    def reset(self):
+        self.kv_cache.reset()
         torch.cuda.empty_cache()
 
     @torch.no_grad()
@@ -22,17 +27,25 @@ class HFDecoder:
 class ReferenceDecoder:
     def __init__(self, model):
         self.params = ModelParams.from_state_dict(model.state_dict())
-        embeds = self.params.input_embeds
+        self.params = self.params.to("cuda")
 
+        embeds = self.params.input_embeds
         self.buffers = ModelBuffers.create(
             self.params.num_kv_heads,
             self.params.num_layers,
             device=embeds.device,
             kv_dtype=embeds.dtype,
         )
+        torch.cuda.empty_cache()
+
+    def reset(self):
+        self.buffers.position = 0
 
     def __call__(self, input_ids: torch.Tensor):
-        return model_ref(input_ids, self.params, self.buffers)
+        if input_ids.shape[0] == 1:
+            return model_triton(input_ids, self.params, self.buffers)
+        else:
+            return model_ref(input_ids, self.params, self.buffers)
 
 
 def main(args: argparse.Namespace):
@@ -41,8 +54,12 @@ def main(args: argparse.Namespace):
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model = AutoModelForCausalLM.from_pretrained(model_id, dtype="auto").eval().to(device)
+    # NOTE: have to be careful NOT to duplicate model weights in VRAM
+    model = AutoModelForCausalLM.from_pretrained(model_id, dtype="auto").eval()
     tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    # decoder = HFDecoder(model)
+    decoder = ReferenceDecoder(model)
 
     messages = []
     do_warmup = True
@@ -61,8 +78,7 @@ def main(args: argparse.Namespace):
         num_prefill_tokens = input_ids.shape[0]
 
         # redo prefill everytime
-        # decoder = HFDecoder(model)
-        decoder = ReferenceDecoder(model)
+        decoder.reset()
         stream = DecodeStream(skip_special_tokens=True)
         outputs = []
 
