@@ -6,11 +6,21 @@ Plan
 - Start from small to big: MLP (gate+up+down projections), attention (qkv projections, RoPE, attention, out projection); from Triton to CUDA C++.
 - Test at bs=1,8,64,512
 
+## End2end decode benchmark
+
 To try interactive chat (only Qwen3-0.6B is supported at the moment)
 
 ```bash
 python chat.py
 ```
+
+The measurement is done with `chat.py`, which is not rigorous by any means. Reporting decode speed at various number of input tokens. Using Qwen3-0.6B.
+
+Implementation | 15 in toks | 1218 in tokens
+---------------|------------|----------------
+HF eager       | 130 tok/s  | 130 tok/s
+vLLM           | 620 tok/s  | 615 tok/s
+Ours           | 820 tok/s  | 613 tok/s
 
 ## MLP Benchmark results
 

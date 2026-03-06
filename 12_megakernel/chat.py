@@ -6,27 +6,34 @@ from model_triton import model_triton
 from reference import ModelBuffers, ModelParams, model_ref
 from tokenizers.decoders import DecodeStream
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
+from vllm import EngineArgs, LLMEngine, SamplingParams, TokensPrompt
+from vllm.sampling_params import RequestOutputKind
 
 
-class HFDecoder:
-    def __init__(self, model):
-        self.model = model.to("cuda")
-        self.reset()
-
-    def reset(self):
-        self.kv_cache = DynamicCache()
-        torch.cuda.empty_cache()
+class HFGenerator:
+    def __init__(self, model_id: str):
+        self.model = AutoModelForCausalLM.from_pretrained(model_id, dtype="auto", device_map="cuda").eval()
+        self.eos_token_id = AutoTokenizer.from_pretrained(model_id).eos_token_id
 
     @torch.no_grad()
-    def __call__(self, input_ids: torch.Tensor):
-        logits = self.model(input_ids.unsqueeze(0), past_key_values=self.kv_cache).logits.squeeze(0)
-        return logits[-1].argmax(dim=0)
+    def generate(self, token_ids: list[int], max_tokens: int = 1024):
+        input_ids = torch.tensor(token_ids, device="cuda")
+        kv_cache = DynamicCache()
+
+        for _ in range(max_tokens):
+            logits = self.model(input_ids.unsqueeze(0), past_key_values=kv_cache).logits.squeeze(0)
+            input_ids = logits[-1].argmax(dim=0, keepdim=True)
+            token = input_ids.item()
+            yield token
+
+            if token == self.eos_token_id:
+                break
 
 
-class ReferenceDecoder:
-    def __init__(self, model):
-        self.params = ModelParams.from_state_dict(model.state_dict())
-        self.params = self.params.to("cuda")
+class MyGenerator:
+    def __init__(self, model_id: str):
+        self.params = ModelParams.from_pretrained(model_id).to("cuda")
+        self.eos_token_id = AutoTokenizer.from_pretrained(model_id).eos_token_id
 
         embeds = self.params.input_embeds
         self.buffers = ModelBuffers.create(
@@ -35,30 +42,56 @@ class ReferenceDecoder:
             device=embeds.device,
             kv_dtype=embeds.dtype,
         )
-        torch.cuda.empty_cache()
 
-    def reset(self):
+    def generate(self, token_ids: list[int], max_tokens: int = 1024):
+        input_ids = torch.tensor(token_ids, device="cuda")
         self.buffers.position = 0
 
-    def __call__(self, input_ids: torch.Tensor):
-        if input_ids.shape[0] == 1:
-            return model_triton(input_ids, self.params, self.buffers)
-        else:
-            return model_ref(input_ids, self.params, self.buffers)
+        # prefill
+        input_ids = model_ref(input_ids, self.params, self.buffers).unsqueeze(0)
+        token = input_ids.item()
+        yield token
+
+        if token == self.eos_token_id:
+            return
+
+        # decode
+        for _ in range(max_tokens - 1):
+            input_ids = model_triton(input_ids, self.params, self.buffers).unsqueeze(0)
+            token = input_ids.item()
+            yield token
+
+            if token == self.eos_token_id:
+                return
+
+
+class VllmGenerator:
+    def __init__(self, model_id: str):
+        self.llm = LLMEngine.from_engine_args(EngineArgs(model_id))
+
+    def generate(self, token_ids: list[int], max_tokens: int = 1024):
+        llm = self.llm
+        sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=max_tokens,
+            output_kind=RequestOutputKind.DELTA,
+            detokenize=False,
+        )
+        llm.add_request("1234", TokensPrompt(prompt_token_ids=token_ids), sampling_params)
+        while llm.has_unfinished_requests():
+            for output in llm.step():
+                yield from output.outputs[0].token_ids
 
 
 def main(args: argparse.Namespace):
     model_id = args.model
-    device = args.device
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # NOTE: have to be careful NOT to duplicate model weights in VRAM
-    model = AutoModelForCausalLM.from_pretrained(model_id, dtype="auto").eval()
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-
-    # decoder = HFDecoder(model)
-    decoder = ReferenceDecoder(model)
+    decoder = dict(
+        hf=HFGenerator,
+        vllm=VllmGenerator,
+        my=MyGenerator,
+    )[args.impl](model_id)
 
     messages = []
     do_warmup = True
@@ -67,46 +100,38 @@ def main(args: argparse.Namespace):
         prompt = "hi" if do_warmup else input("> ")
         messages.append(dict(role="user", content=prompt))
 
-        input_ids = tokenizer.apply_chat_template(
+        token_ids = tokenizer.apply_chat_template(
             messages,
-            return_tensors="pt",
             add_generation_prompt=True,
             return_attention_mask=False,
-        )["input_ids"]
-        input_ids = input_ids.squeeze(0).to(device)
-        num_prefill_tokens = input_ids.shape[0]
+        )
 
-        # redo prefill everytime
-        decoder.reset()
         stream = DecodeStream(skip_special_tokens=True)
         outputs = []
 
-        def forward(input_ids: torch.Tensor):
-            input_ids = decoder(input_ids).unsqueeze(0)
-            token = input_ids.item()
+        gen = decoder.generate(token_ids, max_tokens=100)
 
+        # prefill
+        t0 = time.perf_counter()
+        token = next(gen)
+        to_print = stream.step(tokenizer._tokenizer, token)
+        if not do_warmup and to_print is not None:
+            outputs.append(to_print)
+            print(to_print, end="", flush=True)
+        t1 = time.perf_counter()
+
+        # decode
+        for token in gen:
             to_print = stream.step(tokenizer._tokenizer, token)
             if not do_warmup and to_print is not None:
                 outputs.append(to_print)
                 print(to_print, end="", flush=True)
-
-            return input_ids, token
-
-        t0 = time.perf_counter()
-        input_ids, token = forward(input_ids)  # prefill
-        t1 = time.perf_counter()
-
-        # decode
-        for _ in range(1024):
-            input_ids, token = forward(input_ids)
-            if token == tokenizer.eos_token_id:
-                print()
-                break
         t2 = time.perf_counter()
 
         if not do_warmup:
-            print(f"Prefill: {num_prefill_tokens} tokens, {num_prefill_tokens / (t1 - t0):.2f} tok/s")
-            print(f"Decode: {len(outputs)} tokens, {len(outputs) / (t2 - t1):.2f} tok/s")
+            print()
+            print(f"Prefill: {len(token_ids)} tokens, {len(token_ids) / (t1 - t0):,.2f} tok/s")
+            print(f"Decode: {len(outputs)} tokens, {len(outputs) / (t2 - t1):,.2f} tok/s")
 
             # update chat history
             messages.append(dict(role="assistant", content="".join(outputs)))
@@ -117,7 +142,7 @@ def main(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
-    parser.add_argument("--device")
+    parser.add_argument("--impl", choices=["hf", "vllm", "my"], default="my")
     args = parser.parse_args()
 
     main(args)
