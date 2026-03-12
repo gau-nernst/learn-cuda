@@ -1,7 +1,5 @@
 #include "common.h"
-#include <cstdint>
 #include <cuda_bf16.h>
-#include <cuda_fp8.h>
 
 constexpr int BLOCK_K = 128;
 
@@ -38,30 +36,30 @@ void mxfp8_mm_v3_kernel(
   C_ptr += (bid_m * BLOCK_M + warp_id_m * WARP_M) * N + (bid_n * BLOCK_N + warp_id_n * WARP_N);
 
   // shared memory
-  extern __shared__ uint8_t smem[];
-  const uint32_t A_smem = __cvta_generic_to_shared(smem);
-  const uint32_t B_smem = A_smem + BLOCK_M * BLOCK_K;
-  const uint32_t scale_A_smem = B_smem + BLOCK_N * BLOCK_K;
-  const uint32_t scale_B_smem = scale_A_smem + BLOCK_M * (BLOCK_K / 32);
-  constexpr uint32_t one_buffer_size = (BLOCK_M + BLOCK_N) * BLOCK_K / 32 * 33;
+  extern __shared__ char smem_ptr[];
+  const int A_smem = __cvta_generic_to_shared(smem_ptr);
+  const int B_smem = A_smem + BLOCK_M * BLOCK_K;
+  const int scale_A_smem = B_smem + BLOCK_N * BLOCK_K;
+  const int scale_B_smem = scale_A_smem + BLOCK_M * (BLOCK_K / 32);
+  constexpr int one_buffer_size = (BLOCK_M + BLOCK_N) * BLOCK_K / 32 * 33;
 
   // pre-compute ldmatrix address
-  uint32_t A_smem_addr[NUM_STAGES];
+  int A_smem_addr[NUM_STAGES];
   {
     const int row = (warp_id_m * WARP_M) + (lane_id % 16);
     const int col = (lane_id / 16) * 16;
     for (int stage_id = 0; stage_id < NUM_STAGES; stage_id++) {
-      const uint32_t addr = stage_id * one_buffer_size + A_smem + (row * BLOCK_K + col);
+      const int addr = stage_id * one_buffer_size + A_smem + (row * BLOCK_K + col);
       A_smem_addr[stage_id] = swizzle<BLOCK_K>(addr);
     }
   }
 
-  uint32_t B_smem_addr[NUM_STAGES];
+  int B_smem_addr[NUM_STAGES];
   {
     const int row = (warp_id_n * WARP_N) + (lane_id % 8);
     const int col = (lane_id / 8) * 16;
     for (int stage_id = 0; stage_id < NUM_STAGES; stage_id++) {
-      const uint32_t addr = stage_id * one_buffer_size + B_smem + (row * BLOCK_K + col);
+      const int addr = stage_id * one_buffer_size + B_smem + (row * BLOCK_K + col);
       B_smem_addr[stage_id] = swizzle<BLOCK_K>(addr);
     }
   }
@@ -70,25 +68,25 @@ void mxfp8_mm_v3_kernel(
   // for scales, we repack [32,4] = [4,8,4] -> [8,4,4]
   // width is 16 -> we can use cp.async.cg + ldmatrix
   // since width is 16, we also don't need swizzling.
-  uint32_t scale_A_smem_addr[NUM_STAGES];
-  uint32_t scale_B_smem_addr[NUM_STAGES];
+  int scale_A_smem_addr[NUM_STAGES];
+  int scale_B_smem_addr[NUM_STAGES];
   for (int stage_id = 0; stage_id < NUM_STAGES; stage_id++) {
     scale_A_smem_addr[stage_id] = stage_id * one_buffer_size + scale_A_smem + (warp_id_m * WARP_M / 4 + lane_id) * 16;
     scale_B_smem_addr[stage_id] = stage_id * one_buffer_size + scale_B_smem + (warp_id_n * WARP_N / 4 + lane_id) * 16;
   }
 
   // register memory
-  uint32_t A_rmem[WARP_M / MMA_M][BLOCK_K / MMA_K][MMA_M * MMA_K / WARP_SIZE / 4];
-  uint32_t B_rmem[WARP_N / MMA_N][BLOCK_K / MMA_K][MMA_N * MMA_K / WARP_SIZE / 4];
-  uint32_t scale_A_rmem[WARP_M / 32];
-  uint32_t scale_B_rmem[WARP_N / 32];
+  int A_rmem[WARP_M / MMA_M][BLOCK_K / MMA_K][MMA_M * MMA_K / WARP_SIZE / 4];
+  int B_rmem[WARP_N / MMA_N][BLOCK_K / MMA_K][MMA_N * MMA_K / WARP_SIZE / 4];
+  int scale_A_rmem[WARP_M / 32];
+  int scale_B_rmem[WARP_N / 32];
   float acc[WARP_M / MMA_M][WARP_N / MMA_N][MMA_M * MMA_N / WARP_SIZE] = {};
 
   int num_k_iters = cdiv(K, BLOCK_K);
 
   auto load_data = [&](int k_iter) {
     if (k_iter < num_k_iters) {
-      const uint32_t offset = (k_iter % NUM_STAGES) * one_buffer_size;
+      const int offset = (k_iter % NUM_STAGES) * one_buffer_size;
       global_to_shared_swizzle<BLOCK_M, BLOCK_K, TB_SIZE>(offset + A_smem, A_ptr, K, tid);
       global_to_shared_swizzle<BLOCK_N, BLOCK_K, TB_SIZE>(offset + B_smem, B_ptr, K, tid);
       global_to_shared_swizzle<BLOCK_M / 4, BLOCK_K / 8, TB_SIZE>(offset + scale_A_smem, SFA_ptr, K / 8, tid);
@@ -113,15 +111,15 @@ void mxfp8_mm_v3_kernel(
 
     for (int k = 0; k < BLOCK_K / MMA_K; k++)
       for (int m = 0; m < WARP_M / MMA_M; m++) {
-        const uint32_t row = m * MMA_M;
-        const uint32_t col = k * MMA_K;
+        const int row = m * MMA_M;
+        const int col = k * MMA_K;
         ldmatrix<4>(A_rmem[m][k], (A_smem_addr[k_iter % NUM_STAGES] + row * BLOCK_K) ^ col);
       }
 
     for (int k = 0; k < BLOCK_K / MMA_K; k += 2)
       for (int n = 0; n < WARP_N / MMA_N; n++) {
-        const uint32_t row = n * MMA_N;
-        const uint32_t col = k * MMA_K;
+        const int row = n * MMA_N;
+        const int col = k * MMA_K;
         ldmatrix<4>(B_rmem[n][k], (B_smem_addr[k_iter % NUM_STAGES] + row * BLOCK_K) ^ col);
       }
 
