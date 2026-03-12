@@ -28,7 +28,7 @@ void load_scales(int dst, const T *src, int src_stride, int tid) {
   }
 }
 
-template <int BLOCK_M, int BLOCK_N, int NUM_WARP_M, int NUM_WARP_N>
+template <int BLOCK_M, int BLOCK_N, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
 void mxfp8_mm_v1_kernel(
@@ -54,11 +54,14 @@ void mxfp8_mm_v1_kernel(
   const int warp_id_m = warp_id / NUM_WARP_N;
   const int warp_id_n = warp_id % NUM_WARP_N;
 
-  A_ptr += (bid_m * BLOCK_M) * K;
-  B_ptr += (bid_n * BLOCK_N) * K;
-  SFA_ptr += (bid_m * BLOCK_M) * (K / 32);
-  SFB_ptr += (bid_n * BLOCK_N) * (K / 32);
-  C_ptr += (bid_m * BLOCK_M + warp_id_m * WARP_M) * N + (bid_n * BLOCK_N + warp_id_n * WARP_N);
+  const int off_m = bid_m * BLOCK_M;
+  const int off_n = bid_n * BLOCK_N;
+
+  A_ptr += off_m * K;
+  B_ptr += off_n * K;
+  SFA_ptr += off_m * (K / 32);
+  SFB_ptr += off_n * (K / 32);
+  C_ptr += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
 
   // shared memory
   extern __shared__ char smem_ptr[];
@@ -66,6 +69,8 @@ void mxfp8_mm_v1_kernel(
   const int B_smem = A_smem + BLOCK_M * BLOCK_K;
   const int SFA_smem = B_smem + BLOCK_N * BLOCK_K;
   const int SFB_smem = SFA_smem + BLOCK_M * (BLOCK_K / 32);
+
+  constexpr int STAGE_SIZE = (BLOCK_M + BLOCK_N) * (BLOCK_K + BLOCK_K / 32);
 
   // pre-compute ldmatrix address
   const int A_smem_addr = A_smem + swizzle<BLOCK_K>((warp_id_m * WARP_M) + (lane_id % 16), lane_id / 16);
@@ -82,13 +87,11 @@ void mxfp8_mm_v1_kernel(
   int SFB_rmem[WARP_N / 32];
   float acc[WARP_M / MMA_M][WARP_N / MMA_N][4] = {};
 
-  int num_k_iters = cdiv(K, BLOCK_K);
-
-  for (int k_iter = 0; k_iter < num_k_iters; k_iter++) {
-    gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem, A_ptr, K, tid);
-    gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem, B_ptr, K, tid);
-    load_scales<BLOCK_M, BLOCK_K / 32, TB_SIZE>(SFA_smem, SFA_ptr, K / 32, tid);
-    load_scales<BLOCK_N, BLOCK_K / 32, TB_SIZE>(SFB_smem, SFB_ptr, K / 32, tid);
+  auto load = [&](int stage_id) {
+    gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem + stage_id * STAGE_SIZE, A_ptr, K, tid);
+    gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem + stage_id * STAGE_SIZE, B_ptr, K, tid);
+    load_scales<BLOCK_M, BLOCK_K / 32, TB_SIZE>(SFA_smem + stage_id * STAGE_SIZE, SFA_ptr, K / 32, tid);
+    load_scales<BLOCK_N, BLOCK_K / 32, TB_SIZE>(SFB_smem + stage_id * STAGE_SIZE, SFB_ptr, K / 32, tid);
 
     A_ptr += BLOCK_K;
     B_ptr += BLOCK_K;
@@ -96,28 +99,30 @@ void mxfp8_mm_v1_kernel(
     SFB_ptr += BLOCK_K / 32;
 
     asm volatile("cp.async.commit_group;");
-    asm volatile("cp.async.wait_all;");
-    __syncthreads();
+  };
 
+  auto compute = [&](int stage_id) {
     for (int k = 0; k < BLOCK_K / MMA_K; k++)
       for (int m = 0; m < WARP_M / MMA_M; m++) {
-        const int row = m * MMA_M;
-        const int col = k * MMA_K;
-        ldmatrix<4>(A_rmem[m][k], (A_smem_addr + row * BLOCK_K) ^ col);
+        int addr = (A_smem_addr + stage_id * STAGE_SIZE + m * MMA_M * BLOCK_K) ^ (k * 32);
+        ldmatrix<4>(A_rmem[m][k], addr);
       }
 
     for (int k = 0; k < BLOCK_K / MMA_K; k += 2)
       for (int n = 0; n < WARP_N / MMA_N; n++) {
-        const int row = n * MMA_N;
-        const int col = k * MMA_K;
-        ldmatrix<4>(B_rmem[n][k], (B_smem_addr + row * BLOCK_K) ^ col);
+        int addr = (B_smem_addr + stage_id * STAGE_SIZE + n * MMA_N * BLOCK_K) ^ (k * 32);
+        ldmatrix<4>(B_rmem[n][k], addr);
       }
 
     for (int reg_id = 0; reg_id < WARP_M / 32; reg_id++)
-      asm volatile("ld.shared.u32 %0, [%1];" : "=r"(SFA_rmem[reg_id]) : "r"(SFA_smem_addr + reg_id * 32 * 4));
+      asm volatile("ld.shared.u32 %0, [%1];"
+                  : "=r"(SFA_rmem[reg_id])
+                  : "r"(SFA_smem_addr + stage_id * STAGE_SIZE + reg_id * 32 * 4));
 
     for (int reg_id = 0; reg_id < WARP_N / 32; reg_id++)
-      asm volatile("ld.shared.u32 %0, [%1];" : "=r"(SFB_rmem[reg_id]) : "r"(SFB_smem_addr + reg_id * 32 * 4));
+      asm volatile("ld.shared.u32 %0, [%1];"
+                  : "=r"(SFB_rmem[reg_id])
+                  : "r"(SFB_smem_addr + stage_id * STAGE_SIZE + reg_id * 32 * 4));
 
     for (int k = 0; k < BLOCK_K / MMA_K; k++)
       for (int m = 0; m < WARP_M / MMA_M; m++)
@@ -125,8 +130,27 @@ void mxfp8_mm_v1_kernel(
           mma_mxfp8(A_rmem[m][k], B_rmem[n][k], acc[m][n],
                     SFA_rmem[m / 2], k, m % 2,
                     SFB_rmem[n / 4], k, n % 4);
+  };
 
+  int num_k_iters = cdiv(K, BLOCK_K);
+
+  for (int stage_id = 0; stage_id < NUM_STAGES - 1; stage_id++)
+    load(stage_id);
+
+  for (int iter_k = 0; iter_k < num_k_iters - (NUM_STAGES - 1); iter_k++) {
+    __syncthreads();  // wait MMA
+    load((iter_k + NUM_STAGES - 1) % NUM_STAGES);  // issue prefetch
+
+    asm volatile("cp.async.wait_group %0;" :: "n"(NUM_STAGES - 1));  // wait cp.async
     __syncthreads();
+    compute(iter_k % NUM_STAGES);  // issue MMA
+  }
+
+  for (int iter_k = num_k_iters - (NUM_STAGES - 1); iter_k < num_k_iters; iter_k++) {
+    asm volatile("cp.async.commit_group;");  // commit empty group
+    asm volatile("cp.async.wait_group %0;" :: "n"(NUM_STAGES - 1));  // wait cp.async
+    __syncthreads();
+    compute(iter_k % NUM_STAGES);
   }
 
   for (int m = 0; m < WARP_M / MMA_M; m++)
@@ -152,13 +176,14 @@ void mxfp8_mm_v1(
   const int BLOCK_N = 128;
   const int NUM_WARP_M = 2;
   const int NUM_WARP_N = 2;
+  const int NUM_STAGES = 3;
 
   const int num_blocks = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
 
-  // 33/32 = (1 + 1/32), where 1/32 is the amount of each SFA/SFB
-  const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K / 32 * 33;
+  const int STAGE_SIZE = (BLOCK_M + BLOCK_N) * (BLOCK_K + BLOCK_K / 32);
+  const int smem_size = STAGE_SIZE * NUM_STAGES;
 
-  auto kernel = mxfp8_mm_v1_kernel<BLOCK_M, BLOCK_N, NUM_WARP_M, NUM_WARP_N>;
+  auto kernel = mxfp8_mm_v1_kernel<BLOCK_M, BLOCK_N, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
   launch_kernel(kernel, num_blocks, TB_SIZE, smem_size, A_ptr, B_ptr, SFA_ptr, SFB_ptr, C_ptr, M, N, K);
 }

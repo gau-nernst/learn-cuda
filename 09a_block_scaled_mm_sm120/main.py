@@ -60,13 +60,7 @@ def ref_scaled_mm(A: Tensor, B: Tensor, scale_A: Tensor, scale_B: Tensor):
     return (A_f32 @ B_f32.T).bfloat16()
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--profile")
-    parser.add_argument("--format", choices=["mxfp8", "nvfp4"], default="mxfp8")
-    parser.add_argument("--shape", type=int, nargs="+", default=[4096, 4096, 8192])
-    args = parser.parse_args()
-
+def main(args: argparse.Namespace):
     M, N, K = args.shape
     print(f"{M=}, {N=}, {K=}")
 
@@ -136,4 +130,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile")
+    parser.add_argument("--format", choices=["mxfp8", "nvfp4"], default="mxfp8")
+    parser.add_argument("--shape", type=int, nargs="+", default=[4096, 4096, 4096])
+    args = parser.parse_args()
+
+    main(args)
