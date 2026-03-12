@@ -14,7 +14,6 @@ typedef void MxFp8MmFn(const char *A, const char *B, const char *scale_A, const 
 
 MxFp8MmFn mxfp8_mm_v1;
 MxFp8MmFn mxfp8_mm_v2;
-MxFp8MmFn mxfp8_mm_v3;
 
 template <MxFp8MmFn mxfp8_mm_fn>
 at::Tensor mxfp8_mm(
@@ -46,5 +45,4 @@ at::Tensor mxfp8_mm(
 TORCH_LIBRARY(my_module, m) {
   m.def("mxfp8_mm_v1(Tensor A, Tensor B, Tensor SFA, Tensor SFB) -> Tensor", &mxfp8_mm<mxfp8_mm_v1>);
   m.def("mxfp8_mm_v2(Tensor A, Tensor B, Tensor SFA, Tensor SFB) -> Tensor", &mxfp8_mm<mxfp8_mm_v2>);
-  m.def("mxfp8_mm_v3(Tensor A, Tensor B, Tensor SFA, Tensor SFB) -> Tensor", &mxfp8_mm<mxfp8_mm_v3>);
 }

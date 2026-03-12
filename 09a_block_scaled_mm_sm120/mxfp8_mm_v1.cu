@@ -64,27 +64,16 @@ void mxfp8_mm_v1_kernel(
   extern __shared__ char smem_ptr[];
   const int A_smem = __cvta_generic_to_shared(smem_ptr);
   const int B_smem = A_smem + BLOCK_M * BLOCK_K;
-  const int scale_A_smem = B_smem + BLOCK_N * BLOCK_K;
-  const int scale_B_smem = scale_A_smem + BLOCK_M * (BLOCK_K / 32);
+  const int SFA_smem = B_smem + BLOCK_N * BLOCK_K;
+  const int SFB_smem = SFA_smem + BLOCK_M * (BLOCK_K / 32);
 
   // pre-compute ldmatrix address
-  int A_smem_addr;
-  {
-    const int row = (warp_id_m * WARP_M) + (lane_id % 16);
-    const int col = (lane_id / 16) * 16;
-    A_smem_addr = swizzle<BLOCK_K>(A_smem + (row * BLOCK_K + col));
-  }
-
-  int B_smem_addr;
-  {
-    const int row = (warp_id_n * WARP_N) + (lane_id % 8);
-    const int col = (lane_id / 8) * 16;
-    B_smem_addr = swizzle<BLOCK_K>(B_smem + (row * BLOCK_K + col));
-  }
+  const int A_smem_addr = A_smem + swizzle<BLOCK_K>((warp_id_m * WARP_M) + (lane_id % 16), lane_id / 16);
+  const int B_smem_addr = B_smem + swizzle<BLOCK_K>((warp_id_n * WARP_N) + (lane_id % 8), lane_id / 8);
 
   // https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-block-scaling
-  int SFA_smem_addr = scale_A_smem + ((warp_id_m * WARP_M) + (lane_id % 4) * 8 + (lane_id / 4)) * 4;
-  int SFB_smem_addr = scale_B_smem + ((warp_id_n * WARP_N) + (lane_id % 4) * 8 + (lane_id / 4)) * 4;
+  int SFA_smem_addr = SFA_smem + ((warp_id_m * WARP_M) + (lane_id % 4) * 8 + (lane_id / 4)) * 4;
+  int SFB_smem_addr = SFB_smem + ((warp_id_n * WARP_N) + (lane_id % 4) * 8 + (lane_id / 4)) * 4;
 
   // register memory
   int A_rmem[WARP_M / MMA_M][BLOCK_K / MMA_K][4];
@@ -96,10 +85,10 @@ void mxfp8_mm_v1_kernel(
   int num_k_iters = cdiv(K, BLOCK_K);
 
   for (int k_iter = 0; k_iter < num_k_iters; k_iter++) {
-    global_to_shared_swizzle<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem, A_ptr, K, tid);
-    global_to_shared_swizzle<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem, B_ptr, K, tid);
-    load_scales<BLOCK_M, BLOCK_K / 32, TB_SIZE>(scale_A_smem, SFA_ptr, K / 32, tid);
-    load_scales<BLOCK_N, BLOCK_K / 32, TB_SIZE>(scale_B_smem, SFB_ptr, K / 32, tid);
+    gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem, A_ptr, K, tid);
+    gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem, B_ptr, K, tid);
+    load_scales<BLOCK_M, BLOCK_K / 32, TB_SIZE>(SFA_smem, SFA_ptr, K / 32, tid);
+    load_scales<BLOCK_N, BLOCK_K / 32, TB_SIZE>(SFB_smem, SFB_ptr, K / 32, tid);
 
     A_ptr += BLOCK_K;
     B_ptr += BLOCK_K;
@@ -167,7 +156,7 @@ void mxfp8_mm_v1(
   const int num_blocks = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
 
-  // 33/32 = (1 + 1/32), where 1/32 is the amount of each scale_A/B
+  // 33/32 = (1 + 1/32), where 1/32 is the amount of each SFA/SFB
   const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K / 32 * 33;
 
   auto kernel = mxfp8_mm_v1_kernel<BLOCK_M, BLOCK_N, NUM_WARP_M, NUM_WARP_N>;

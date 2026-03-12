@@ -122,9 +122,9 @@ def main():
     torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)
     bench_and_print(cublas_mxfp8_mm, "CuBLAS")
 
-    for i in range(3):
-        fn = getattr(module, f"mxfp8_mm_v{i + 1}")
-        if i + 1 >= 2:
+    for i in range(1, 3):
+        fn = getattr(module, f"mxfp8_mm_v{i}")
+        if i >= 2:
             this_scale_A = permute_scale(SFA)
             this_scale_B = permute_scale(SFB)
         else:
@@ -132,7 +132,7 @@ def main():
             this_scale_B = SFB
         output = fn(A, B.T, this_scale_A, this_scale_B)
         torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)
-        bench_and_print(fn, f"v{i + 1}")
+        bench_and_print(fn, f"v{i}")
 
 
 if __name__ == "__main__":

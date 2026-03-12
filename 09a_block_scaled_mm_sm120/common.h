@@ -21,21 +21,18 @@ __device__ __host__
 constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
 
 // NOTE: stride in bytes
+// col is in unit of 16-byte word
 template <int STRIDE>
 __device__
-int swizzle(int index) {
-  // no need swizzling
-  if constexpr (STRIDE <= 16)
-    return index;
-
-  int row_idx = (index / STRIDE) % 8;
-  int bits_to_xor = row_idx / max(64 / STRIDE, 1);
-  return index ^ (bits_to_xor << 4);
+int swizzle(int row, int col) {
+  if constexpr (STRIDE > 16)
+    col ^= (row % 8) / std::max(128 / STRIDE, 1);
+  return row * STRIDE + col * 16;
 }
 
 template <int HEIGHT, int WIDTH, int TB_SIZE, typename T>
 __device__ inline
-void global_to_shared_swizzle(int dst, const T *src, int src_stride, int tid) {
+void gmem_to_smem(int dst, const T *src, int src_stride, int tid) {
   static_assert(WIDTH * sizeof(T) >= 16);
   constexpr int num_elems = 16 / sizeof(T);
 
@@ -43,7 +40,7 @@ void global_to_shared_swizzle(int dst, const T *src, int src_stride, int tid) {
     const int row = idx / WIDTH;
     const int col = idx % WIDTH;
 
-    const int dst_addr = swizzle<WIDTH * sizeof(T)>(dst + (row * WIDTH + col) * sizeof(T));
+    const int dst_addr = dst + swizzle<WIDTH * sizeof(T)>(row, col / num_elems);
     const T *src_addr = src + (row * src_stride + col);
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(dst_addr), "l"(src_addr));
   };
