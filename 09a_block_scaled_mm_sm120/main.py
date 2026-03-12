@@ -1,11 +1,9 @@
 import argparse
-import os
 import time
 from pathlib import Path
 
-os.environ["TORCH_CUDA_ARCH_LIST"] = "12.0a"
-
 import torch
+import torch.nn.functional as F
 import torch.utils.cpp_extension
 from torch import Tensor
 from torch._inductor.utils import do_bench_using_profiling
@@ -14,23 +12,34 @@ from triton.testing import do_bench
 torch.utils.cpp_extension.include_paths("cuda")
 CURRENT_DIR = Path(__file__).parent
 
-module = torch.utils.cpp_extension.load(
+torch.utils.cpp_extension.load(
     "module",
-    sources=[
-        "ext.cpp",
-        *list(CURRENT_DIR.glob("mxfp8*")),
-    ],
+    sources=list(CURRENT_DIR.glob("mxfp8*")),
     extra_cuda_cflags=[
-        "--ptxas-options=-v",
-        "--generate-line-info",
+        "-O3",
+        "-Xptxas=-v",
+        "-lineinfo",
+        "-gencode=arch=compute_120a,code=sm_120a",
     ],
     # extra_ldflags=["-lcuda"],  # for cuTensorMapEncodeTiled() used by TMA
+    is_python_module=False,
     verbose=True,
 )
+module = torch.ops.my_module
 
 
-def cublas_scaled_mm(A: Tensor, B: Tensor, scale_A: Tensor, scale_B: Tensor):
-    return torch._scaled_mm(A, B, scale_A, scale_B, out_dtype=torch.bfloat16)
+def cublas_mxfp8_mm(A: Tensor, B: Tensor, scale_A: Tensor, scale_B: Tensor):
+    return F.scaled_mm(
+        A,
+        B,
+        scale_a=scale_A,
+        scale_b=scale_B,
+        scale_recipe_a=F.ScalingType.BlockWise1x32,
+        scale_recipe_b=F.ScalingType.BlockWise1x32,
+        swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
+        swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
+        output_dtype=torch.bfloat16,
+    )
 
 
 def permute_cublas_scale(scale: Tensor):
@@ -77,16 +86,16 @@ def main():
 
         return data_lp.cuda(), scale.cuda()
 
-    A, scale_A = generate_tensor(M, K)
-    B, scale_B = generate_tensor(N, K)
-    print(A.shape, scale_A.shape, B.shape, scale_B.shape)
+    A, SFA = generate_tensor(M, K)
+    B, SFB = generate_tensor(N, K)
+    print(A.shape, SFA.shape, B.shape, SFB.shape)
 
     if args.profile is not None:
         if args.profile == "cublas":
-            fn = cublas_scaled_mm
+            fn = cublas_mxfp8_mm
         else:
             fn = getattr(module, f"mxfp8_mm_v{args.profile}")
-        fn(A, B.T, scale_A, scale_B)
+        fn(A, B.T, SFA, SFB)
         torch.cuda.synchronize()
         return
 
@@ -100,30 +109,27 @@ def main():
     def bench_and_print(f, name):
         time.sleep(1)  # stabilize thermal
         # latency_ms = do_bench(lambda: f(A, B.T, scale_A, scale_B), return_mode="median")
-        latency_ms = do_bench_using_profiling(lambda: f(A, B.T, scale_A, scale_B))
+        latency_ms = do_bench_using_profiling(lambda: f(A, B.T, SFA, SFB))
         tflops = 2 * M * N * K / latency_ms / 1e9
         pct_sol = tflops / sol * 100
         print(f"{name}:\t{latency_ms:.4f} ms\t{tflops:.2f} TFLOPS\t{pct_sol:.2f}% SOL")
 
-    output_ref = ref_scaled_mm(A, B.T, scale_A, scale_B)
+    output_ref = ref_scaled_mm(A, B.T, SFA, SFB)
 
-    output = cublas_scaled_mm(
-        A,
-        B.T,
-        permute_cublas_scale(scale_A),
-        permute_cublas_scale(scale_B),
-    )
+    SFA_cublas = permute_cublas_scale(SFA)
+    SFB_cublas = permute_cublas_scale(SFB)
+    output = cublas_mxfp8_mm(A, B.T, SFA_cublas, SFB_cublas)
     torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)
-    bench_and_print(cublas_scaled_mm, "CuBLAS")
+    bench_and_print(cublas_mxfp8_mm, "CuBLAS")
 
     for i in range(3):
         fn = getattr(module, f"mxfp8_mm_v{i + 1}")
         if i + 1 >= 2:
-            this_scale_A = permute_scale(scale_A)
-            this_scale_B = permute_scale(scale_B)
+            this_scale_A = permute_scale(SFA)
+            this_scale_B = permute_scale(SFB)
         else:
-            this_scale_A = scale_A
-            this_scale_B = scale_B
+            this_scale_A = SFA
+            this_scale_B = SFB
         output = fn(A, B.T, this_scale_A, this_scale_B)
         torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)
         bench_and_print(fn, f"v{i + 1}")

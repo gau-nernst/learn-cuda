@@ -5,35 +5,10 @@
 
 constexpr int BLOCK_K = 128;
 
-template <int HEIGHT, int WIDTH, int TB_SIZE, typename T>
-__device__
-void load_scales(uint32_t dst, const T *src, int src_stride, int tid) {
-  constexpr int cp_size = WIDTH * sizeof(T);
-  static_assert(cp_size < 16);  // if WIDTH * sizeof(T) >= 16, use global_to_shared_swizzle()
-
-  // each cp.async loads 1 row
-  auto load_row = [&](int row) {
-    const uint32_t dst_addr = dst + row * WIDTH * sizeof(T);
-    const T *src_addr = src + row * src_stride;
-    asm volatile("cp.async.ca.shared.global [%0], [%1], %2;" :: "r"(dst_addr), "l"(src_addr), "n"(cp_size));
-  };
-
-  for (int iter = 0; iter < HEIGHT / TB_SIZE; iter++)
-    load_row(iter * TB_SIZE + tid);
-
-  // HEIGHT might not be divisible for TB_SIZE
-  // handle the remaining rows
-  if constexpr (HEIGHT % TB_SIZE != 0) {
-    const int row = HEIGHT / TB_SIZE * TB_SIZE + tid;
-    if (row < HEIGHT)
-      load_row(row);
-  }
-}
-
-template <int BLOCK_M, int BLOCK_N, int NUM_WARP_M, int NUM_WARP_N>
+template <int BLOCK_M, int BLOCK_N, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
-void mxfp8_mm_v1_kernel(
+void mxfp8_mm_v3_kernel(
   const char        *A_ptr,    // [M, K]
   const char        *B_ptr,    // [N, K]
   const char        *SFA_ptr,  // [M, K/32]
@@ -58,8 +33,8 @@ void mxfp8_mm_v1_kernel(
 
   A_ptr += (bid_m * BLOCK_M) * K;
   B_ptr += (bid_n * BLOCK_N) * K;
-  SFA_ptr += (bid_m * BLOCK_M) * (K / 32);
-  SFB_ptr += (bid_n * BLOCK_N) * (K / 32);
+  SFA_ptr += (bid_m * (BLOCK_M / 4)) * (K / 8);
+  SFB_ptr += (bid_n * (BLOCK_N / 4)) * (K / 8);
   C_ptr += (bid_m * BLOCK_M + warp_id_m * WARP_M) * N + (bid_n * BLOCK_N + warp_id_n * WARP_N);
 
   // shared memory
@@ -68,25 +43,39 @@ void mxfp8_mm_v1_kernel(
   const uint32_t B_smem = A_smem + BLOCK_M * BLOCK_K;
   const uint32_t scale_A_smem = B_smem + BLOCK_N * BLOCK_K;
   const uint32_t scale_B_smem = scale_A_smem + BLOCK_M * (BLOCK_K / 32);
+  constexpr uint32_t one_buffer_size = (BLOCK_M + BLOCK_N) * BLOCK_K / 32 * 33;
 
   // pre-compute ldmatrix address
-  uint32_t A_smem_addr;
+  uint32_t A_smem_addr[NUM_STAGES];
   {
     const int row = (warp_id_m * WARP_M) + (lane_id % 16);
     const int col = (lane_id / 16) * 16;
-    A_smem_addr = swizzle<BLOCK_K>(A_smem + (row * BLOCK_K + col));
+    for (int stage_id = 0; stage_id < NUM_STAGES; stage_id++) {
+      const uint32_t addr = stage_id * one_buffer_size + A_smem + (row * BLOCK_K + col);
+      A_smem_addr[stage_id] = swizzle<BLOCK_K>(addr);
+    }
   }
 
-  uint32_t B_smem_addr;
+  uint32_t B_smem_addr[NUM_STAGES];
   {
     const int row = (warp_id_n * WARP_N) + (lane_id % 8);
     const int col = (lane_id / 8) * 16;
-    B_smem_addr = swizzle<BLOCK_K>(B_smem + (row * BLOCK_K + col));
+    for (int stage_id = 0; stage_id < NUM_STAGES; stage_id++) {
+      const uint32_t addr = stage_id * one_buffer_size + B_smem + (row * BLOCK_K + col);
+      B_smem_addr[stage_id] = swizzle<BLOCK_K>(addr);
+    }
   }
 
   // https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-block-scaling
-  uint32_t scale_A_smem_addr = scale_A_smem + ((warp_id_m * WARP_M) + (lane_id % 4) * 8 + (lane_id / 4)) * 4;
-  uint32_t scale_B_smem_addr = scale_B_smem + ((warp_id_n * WARP_N) + (lane_id % 4) * 8 + (lane_id / 4)) * 4;
+  // for scales, we repack [32,4] = [4,8,4] -> [8,4,4]
+  // width is 16 -> we can use cp.async.cg + ldmatrix
+  // since width is 16, we also don't need swizzling.
+  uint32_t scale_A_smem_addr[NUM_STAGES];
+  uint32_t scale_B_smem_addr[NUM_STAGES];
+  for (int stage_id = 0; stage_id < NUM_STAGES; stage_id++) {
+    scale_A_smem_addr[stage_id] = stage_id * one_buffer_size + scale_A_smem + (warp_id_m * WARP_M / 4 + lane_id) * 16;
+    scale_B_smem_addr[stage_id] = stage_id * one_buffer_size + scale_B_smem + (warp_id_n * WARP_N / 4 + lane_id) * 16;
+  }
 
   // register memory
   uint32_t A_rmem[WARP_M / MMA_M][BLOCK_K / MMA_K][MMA_M * MMA_K / WARP_SIZE / 4];
@@ -97,44 +86,47 @@ void mxfp8_mm_v1_kernel(
 
   int num_k_iters = cdiv(K, BLOCK_K);
 
-  for (int k_iter = 0; k_iter < num_k_iters; k_iter++) {
-    global_to_shared_swizzle<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem, A_ptr, K, tid);
-    global_to_shared_swizzle<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem, B_ptr, K, tid);
-    load_scales<BLOCK_M, BLOCK_K / 32, TB_SIZE>(scale_A_smem, SFA_ptr, K / 32, tid);
-    load_scales<BLOCK_N, BLOCK_K / 32, TB_SIZE>(scale_B_smem, SFB_ptr, K / 32, tid);
+  auto load_data = [&](int k_iter) {
+    if (k_iter < num_k_iters) {
+      const uint32_t offset = (k_iter % NUM_STAGES) * one_buffer_size;
+      global_to_shared_swizzle<BLOCK_M, BLOCK_K, TB_SIZE>(offset + A_smem, A_ptr, K, tid);
+      global_to_shared_swizzle<BLOCK_N, BLOCK_K, TB_SIZE>(offset + B_smem, B_ptr, K, tid);
+      global_to_shared_swizzle<BLOCK_M / 4, BLOCK_K / 8, TB_SIZE>(offset + scale_A_smem, SFA_ptr, K / 8, tid);
+      global_to_shared_swizzle<BLOCK_N / 4, BLOCK_K / 8, TB_SIZE>(offset + scale_B_smem, SFB_ptr, K / 8, tid);
 
-    A_ptr += BLOCK_K;
-    B_ptr += BLOCK_K;
-    SFA_ptr += BLOCK_K / 32;
-    SFB_ptr += BLOCK_K / 32;
-
+      A_ptr += BLOCK_K;
+      B_ptr += BLOCK_K;
+      SFA_ptr += BLOCK_K / 8;
+      SFB_ptr += BLOCK_K / 8;
+    }
     asm volatile("cp.async.commit_group;");
-    asm volatile("cp.async.wait_all;");
+  };
+
+  // prefetch
+  for (int stage_id = 0; stage_id < NUM_STAGES - 1; stage_id++)
+    load_data(stage_id);
+
+  for (int k_iter = 0; k_iter < num_k_iters; k_iter++) {
+    load_data(k_iter + NUM_STAGES - 1);  // prefetch
+    asm volatile("cp.async.wait_group %0;" :: "n"(NUM_STAGES - 1));
     __syncthreads();
 
     for (int k = 0; k < BLOCK_K / MMA_K; k++)
       for (int m = 0; m < WARP_M / MMA_M; m++) {
         const uint32_t row = m * MMA_M;
         const uint32_t col = k * MMA_K;
-        ldmatrix<4>(A_rmem[m][k], (A_smem_addr + row * BLOCK_K) ^ col);
+        ldmatrix<4>(A_rmem[m][k], (A_smem_addr[k_iter % NUM_STAGES] + row * BLOCK_K) ^ col);
       }
 
     for (int k = 0; k < BLOCK_K / MMA_K; k += 2)
       for (int n = 0; n < WARP_N / MMA_N; n++) {
         const uint32_t row = n * MMA_N;
         const uint32_t col = k * MMA_K;
-        ldmatrix<4>(B_rmem[n][k], (B_smem_addr + row * BLOCK_K) ^ col);
+        ldmatrix<4>(B_rmem[n][k], (B_smem_addr[k_iter % NUM_STAGES] + row * BLOCK_K) ^ col);
       }
 
-    for (int reg_id = 0; reg_id < WARP_M / 32; reg_id++)
-      asm volatile("ld.shared.u32 %0, [%1];"
-                  : "=r"(scale_A_rmem[reg_id])
-                  : "r"(scale_A_smem_addr + reg_id * 32 * 4));
-
-    for (int reg_id = 0; reg_id < WARP_N / 32; reg_id++)
-      asm volatile("ld.shared.u32 %0, [%1];"
-                  : "=r"(scale_B_rmem[reg_id])
-                  : "r"(scale_B_smem_addr + reg_id * 32 * 4));
+    ldmatrix<WARP_M / 32>(scale_A_rmem, scale_A_smem_addr[k_iter % NUM_STAGES]);
+    ldmatrix<WARP_N / 32>(scale_B_rmem, scale_B_smem_addr[k_iter % NUM_STAGES]);
 
     for (int k = 0; k < BLOCK_K / MMA_K; k++)
       for (int m = 0; m < WARP_M / MMA_M; m++)
@@ -157,7 +149,7 @@ void mxfp8_mm_v1_kernel(
     }
 }
 
-void mxfp8_mm_v1(
+void mxfp8_mm_v3(
   const char        *A_ptr,    // [M, K]
   const char        *B_ptr,    // [N, K]
   const char        *SFA_ptr,  // [M, K/32]
@@ -169,13 +161,14 @@ void mxfp8_mm_v1(
   const int BLOCK_N = 128;
   const int NUM_WARP_M = 2;
   const int NUM_WARP_N = 2;
+  const int NUM_STAGES = 2;
 
   const int num_blocks = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
 
   // 33/32 = (1 + 1/32), where 1/32 is the amount of each scale_A/B
-  const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K / 32 * 33;
+  const int smem_size = ((BLOCK_M + BLOCK_N) * BLOCK_K / 32 * 33) * NUM_STAGES;
 
-  auto kernel = mxfp8_mm_v1_kernel<BLOCK_M, BLOCK_N, NUM_WARP_M, NUM_WARP_N>;
+  auto kernel = mxfp8_mm_v3_kernel<BLOCK_M, BLOCK_N, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
   launch_kernel(kernel, num_blocks, TB_SIZE, smem_size, A_ptr, B_ptr, SFA_ptr, SFB_ptr, C_ptr, M, N, K);
 }

@@ -14,10 +14,12 @@
     }                                                                                                                  \
   }
 
-inline constexpr int WARP_SIZE = 32;
+constexpr int WARP_SIZE = 32;
+constexpr int MMA_M = 16;
+constexpr int MMA_N = 8;
 
-__device__ __host__ constexpr
-int cdiv(int a, int b) { return (a + b - 1) / b; }
+__device__ __host__
+constexpr int cdiv(int a, int b) { return (a + b - 1) / b; }
 
 // NOTE: stride in bytes
 template <int STRIDE>
@@ -78,9 +80,11 @@ void ldmatrix(uint32_t *regs, uint32_t addr) {
 }
 
 __device__ inline
-void mma_m16n8k32_mxfp8(uint32_t A[4], uint32_t B[2], float D[4],
-                        uint32_t scale_A, uint16_t byte_id_A, uint16_t thread_id_A,
-                        uint32_t scale_B, uint16_t byte_id_B, uint16_t thread_id_B) {
+void mma_mxfp8(
+  uint32_t A[4], uint32_t B[2], float D[4],
+  uint32_t scale_A, uint16_t byte_id_A, uint16_t thread_id_A,
+  uint32_t scale_B, uint16_t byte_id_B, uint16_t thread_id_B
+) {
   asm volatile("mma.sync.aligned.m16n8k32.row.col.kind::mxf8f6f4.block_scale.f32.e4m3.e4m3.f32.ue8m0 "
               "{%0, %1, %2, %3}, "
               "{%4, %5, %6, %7}, "
