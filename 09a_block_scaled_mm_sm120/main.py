@@ -110,9 +110,7 @@ def main(args: argparse.Namespace):
 
     output_ref = ref_scaled_mm(A, B.T, SFA, SFB)
 
-    SFA_cublas = permute_sf_cublas(SFA)
-    SFB_cublas = permute_sf_cublas(SFB)
-    output = cublas_mxfp8_mm(A, B.T, SFA_cublas, SFB_cublas)
+    output = cublas_mxfp8_mm(A, B.T, permute_sf_cublas(SFA), permute_sf_cublas(SFB))
     torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)
     bench_and_print(cublas_mxfp8_mm, "CuBLAS")
 
@@ -120,7 +118,7 @@ def main(args: argparse.Namespace):
         "1": lambda x: x,
         "2": permute_sf_v2,
         "2b": permute_sf_v2,
-        # "3": permute_sf_cublas,
+        "3": permute_sf_cublas,
     }
 
     for name, permute_fn in permute_fn_map.items():
