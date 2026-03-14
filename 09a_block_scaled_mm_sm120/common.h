@@ -78,8 +78,8 @@ void ldmatrix(int *regs, int addr) {
 __device__ inline
 void mma_mxfp8(
   int A[4], int B[2], float C[4],
-  int scale_A, short byte_id_A, short thread_id_A,
-  int scale_B, short byte_id_B, short thread_id_B
+  int SFA, short byte_id_A, short thread_id_A,
+  int SFB, short byte_id_B, short thread_id_B
 ) {
   asm volatile("mma.sync.aligned.m16n8k32.row.col.kind::mxf8f6f4.block_scale.f32.e4m3.e4m3.f32.ue8m0 "
               "{%0, %1, %2, %3}, "
@@ -91,8 +91,73 @@ void mma_mxfp8(
               : "+f"(C[0]), "+f"(C[1]), "+f"(C[2]), "+f"(C[3])
               : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]),
                 "r"(B[0]), "r"(B[1]),
-                "r"(scale_A), "h"(byte_id_A), "h"(thread_id_A),
-                "r"(scale_B), "h"(byte_id_B), "h"(thread_id_B));
+                "r"(SFA), "h"(byte_id_A), "h"(thread_id_A),
+                "r"(SFB), "h"(byte_id_B), "h"(thread_id_B));
+}
+
+// https://github.com/NVIDIA/cutlass/blob/v4.2.1/include/cute/arch/cluster_sm90.hpp#L180
+__device__ inline
+int elect_sync() {
+  int pred = 0;
+  asm volatile(
+    "{\n"
+    ".reg .pred P;\n"
+    "elect.sync _|P, %1;\n"
+    "@P mov.s32 %0, 1;\n"
+    "}"
+    : "+r"(pred) : "r"(0xFFFF'FFFF)
+  );
+  return pred;
+}
+
+template <typename T>
+__device__ inline
+T warp_uniform(T x) { return __shfl_sync(0xFFFF'FFFF, x, 0); }
+
+__device__ inline
+void mbarrier_init(int addr, int count) {
+  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(addr), "r"(count));
+}
+
+__device__ inline
+void mbarrier_arrive(int addr) {
+  asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" :: "r"(addr) : "memory");
+}
+
+__device__ inline
+void mbarrier_arrive_expect_tx(int addr, int size) {
+  asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;" :: "r"(addr), "r"(size) : "memory");
+}
+
+// https://github.com/NVIDIA/cutlass/blob/v4.2.1/include/cutlass/arch/barrier.h#L408
+__device__ inline
+void mbarrier_wait(int mbar_addr, int phase) {
+  int ticks = 0x989680;  // this is optional
+  asm volatile(
+    "{\n"
+    ".reg .pred P1;\n"
+    "LAB_WAIT:\n"
+    "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 P1, [%0], %1, %2;\n"
+    "@!P1 bra.uni LAB_WAIT;\n"
+    "}"
+    :: "r"(mbar_addr), "r"(phase), "r"(ticks)
+  );
+}
+
+__device__ inline
+void tma_g2s(int dst, const void *src, int size, int mbar_addr) {
+  asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes "
+              "[%0], [%1], %2, [%3];"
+              :: "r"(dst), "l"(src), "r"(size), "r"(mbar_addr)
+              : "memory");
+}
+
+__device__ inline
+void tma_2d_g2s(int dst, const void *tmap_ptr, int x, int y, int mbar_addr) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+              "[%0], [%1, {%2, %3}], [%4];"
+              :: "r"(dst), "l"(tmap_ptr), "r"(x), "r"(y), "r"(mbar_addr)
+              : "memory");
 }
 
 template <typename T, typename... Args>

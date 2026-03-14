@@ -1,17 +1,18 @@
 // using custom SF layout
 #include "common.h"
 #include <cuda_bf16.h>
+#include <cudaTypedefs.h>
 
 constexpr int BLOCK_K = 128;
 
 template <int BLOCK_M, int BLOCK_N, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
-void mxfp8_mm_v2_kernel(
-  const char        *A_ptr,    // [M, K]
-  const char        *B_ptr,    // [N, K]
-  const char        *SFA_ptr,  // [M, K/32]
-  const char        *SFB_ptr,  // [N, K/32]
+void mxfp8_mm_v2b_kernel(
+  const __grid_constant__ CUtensorMap A_tmap,
+  const __grid_constant__ CUtensorMap B_tmap,
+  const __grid_constant__ CUtensorMap SFA_tmap,
+  const __grid_constant__ CUtensorMap SFB_tmap,
         nv_bfloat16 *C_ptr,
   int M, int N, int K
 ) {
@@ -25,7 +26,7 @@ void mxfp8_mm_v2_kernel(
   const int bid_n = bid % cdiv(N, BLOCK_N);
 
   const int tid = threadIdx.x;
-  const int warp_id = tid / WARP_SIZE;
+  const int warp_id = warp_uniform(tid / WARP_SIZE);
   const int lane_id = tid % WARP_SIZE;
   const int warp_id_m = warp_id / NUM_WARP_N;
   const int warp_id_n = warp_id % NUM_WARP_N;
@@ -33,20 +34,26 @@ void mxfp8_mm_v2_kernel(
   const int off_m = bid_m * BLOCK_M;
   const int off_n = bid_n * BLOCK_N;
 
-  A_ptr += off_m * K;
-  B_ptr += off_n * K;
-  SFA_ptr += (bid_m * (BLOCK_M / 4)) * (K / 8);
-  SFB_ptr += (bid_n * (BLOCK_N / 4)) * (K / 8);
   C_ptr += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
 
   // shared memory
+  constexpr int STAGE_SIZE = (BLOCK_M + BLOCK_N) * (BLOCK_K + BLOCK_K / 32);
+
   extern __shared__ char smem_ptr[];
-  const int A_smem = __cvta_generic_to_shared(smem_ptr);
+  const int smem_addr = __cvta_generic_to_shared(smem_ptr);
+  const int A_smem = smem_addr;
   const int B_smem = A_smem + BLOCK_M * BLOCK_K;
   const int SFA_smem = B_smem + BLOCK_N * BLOCK_K;
   const int SFB_smem = SFA_smem + BLOCK_M * (BLOCK_K / 32);
 
-  constexpr int STAGE_SIZE = (BLOCK_M + BLOCK_N) * (BLOCK_K + BLOCK_K / 32);
+  const int mbar_addr = smem_addr + NUM_STAGES * STAGE_SIZE;
+
+  if (warp_id == 0 && elect_sync()) {
+    for (int i = 0; i < NUM_STAGES; i++)
+      mbarrier_init(mbar_addr + i * 8, 1);
+    asm volatile("fence.mbarrier_init.release.cluster;");  // visible to async proxy
+  }
+  __syncthreads();  // mbarrier visible
 
   // pre-compute ldmatrix address
   const int A_smem_addr = A_smem + swizzle<BLOCK_K>((warp_id_m * WARP_M) + (lane_id % 16), lane_id / 16);
@@ -66,18 +73,16 @@ void mxfp8_mm_v2_kernel(
   int SFB_rmem[WARP_N / 32];
   float acc[WARP_M / MMA_M][WARP_N / MMA_N][4] = {};
 
-  auto load = [&](int stage_id) {
-    gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem + stage_id * STAGE_SIZE, A_ptr, K, tid);
-    gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem + stage_id * STAGE_SIZE, B_ptr, K, tid);
-    gmem_to_smem<BLOCK_M / 4, BLOCK_K / 8, TB_SIZE>(SFA_smem + stage_id * STAGE_SIZE, SFA_ptr, K / 8, tid);
-    gmem_to_smem<BLOCK_N / 4, BLOCK_K / 8, TB_SIZE>(SFB_smem + stage_id * STAGE_SIZE, SFB_ptr, K / 8, tid);
-
-    A_ptr += BLOCK_K;
-    B_ptr += BLOCK_K;
-    SFA_ptr += BLOCK_K / 8;
-    SFB_ptr += BLOCK_K / 8;
-
-    asm volatile("cp.async.commit_group;");
+  auto load = [&](int iter_k, int stage_id) {
+    if (warp_id == 0 && elect_sync()) {
+      const int this_mbar = mbar_addr + stage_id * 8;
+      const int off_k = iter_k * BLOCK_K;
+      tma_2d_g2s(A_smem + stage_id * STAGE_SIZE, &A_tmap, off_k, off_m, this_mbar);
+      tma_2d_g2s(B_smem + stage_id * STAGE_SIZE, &B_tmap, off_k, off_n, this_mbar);
+      tma_2d_g2s(SFA_smem + stage_id * STAGE_SIZE, &SFA_tmap, off_k / 8, off_m / 4, this_mbar);
+      tma_2d_g2s(SFB_smem + stage_id * STAGE_SIZE, &SFB_tmap, off_k / 8, off_n / 4, this_mbar);
+      mbarrier_arrive_expect_tx(this_mbar, STAGE_SIZE);
+    }
   };
 
   auto compute = [&](int stage_id) {
@@ -107,22 +112,40 @@ void mxfp8_mm_v2_kernel(
   int num_k_iters = cdiv(K, BLOCK_K);
 
   for (int stage_id = 0; stage_id < NUM_STAGES - 1; stage_id++)
-    load(stage_id);
+    load(stage_id, stage_id);
+
+  int stage_id = 0;
+  int phase = 0;
 
   for (int iter_k = 0; iter_k < num_k_iters - (NUM_STAGES - 1); iter_k++) {
+    // issue prefetch
     __syncthreads();  // wait MMA
-    load((iter_k + NUM_STAGES - 1) % NUM_STAGES);  // issue prefetch
+    const int prefetch_iter_k = iter_k + NUM_STAGES - 1;
+    load(prefetch_iter_k, prefetch_iter_k % NUM_STAGES);
 
-    asm volatile("cp.async.wait_group %0;" :: "n"(NUM_STAGES - 1));  // wait cp.async
+    // issue MMA
+    if (warp_id == 1)  // warp0 issues prefetch TMA, warp1 waits current TMA
+      mbarrier_wait(mbar_addr + stage_id * 8, phase);  // wait TMA
     __syncthreads();
-    compute(iter_k % NUM_STAGES);  // issue MMA
+    compute(stage_id);
+
+    // increment stage_id and phase
+    stage_id = (stage_id + 1) % NUM_STAGES;
+    if (stage_id == 0)
+      phase ^= 1;
   }
 
   for (int iter_k = num_k_iters - (NUM_STAGES - 1); iter_k < num_k_iters; iter_k++) {
-    asm volatile("cp.async.commit_group;");  // commit empty group
-    asm volatile("cp.async.wait_group %0;" :: "n"(NUM_STAGES - 1));  // wait cp.async
+    // issue MMA
+    if (warp_id == 0)
+      mbarrier_wait(mbar_addr + stage_id * 8, phase);  // wait TMA
     __syncthreads();
-    compute(iter_k % NUM_STAGES);
+    compute(stage_id);
+
+    // increment stage_id and phase
+    stage_id = (stage_id + 1) % NUM_STAGES;
+    if (stage_id == 0)
+      phase ^= 1;
   }
 
   for (int m = 0; m < WARP_M / MMA_M; m++)
@@ -136,7 +159,38 @@ void mxfp8_mm_v2_kernel(
     }
 }
 
-void mxfp8_mm_v2(
+static void init_tensor_map(
+  CUtensorMap *tmap_ptr,
+  const char *gmem_ptr,
+  uint64_t gmem_height, uint64_t gmem_width,
+  uint32_t smem_height, uint32_t smem_width,
+  CUtensorMapSwizzle swizzle
+) {
+  constexpr uint32_t rank = 2;
+  uint64_t size[rank]        = {gmem_width, gmem_height};
+  uint64_t stride[rank - 1]  = {gmem_width};  // in bytes
+  uint32_t box_size[rank]    = {smem_width, smem_height};
+  uint32_t elem_stride[rank] = {1, 1};
+
+  auto res = cuTensorMapEncodeTiled(
+    tmap_ptr,
+    CU_TENSOR_MAP_DATA_TYPE_UINT8,
+    rank, (void *)gmem_ptr, size, stride,
+    box_size, elem_stride,
+    CU_TENSOR_MAP_INTERLEAVE_NONE,
+    swizzle,
+    CU_TENSOR_MAP_L2_PROMOTION_NONE,
+    CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+  );
+  if (res != CUDA_SUCCESS) {
+    const char *error_msg_ptr;
+    if (cuGetErrorString(res, &error_msg_ptr) != CUDA_SUCCESS)
+      error_msg_ptr = "unable to get error string";
+    std::cerr << "cuTensorMapEncodeTiled error: " << error_msg_ptr << std::endl;
+  }
+};
+
+void mxfp8_mm_v2b(
   const char        *A_ptr,    // [M, K]
   const char        *B_ptr,    // [N, K]
   const char        *SFA_ptr,  // [M, K/32]
@@ -144,18 +198,27 @@ void mxfp8_mm_v2(
         nv_bfloat16 *C_ptr,
   int M, int N, int K
 ) {
+  // TODO: currently the code is only correct for BLOCK_M=BLOCK_N=128
+  // need to investigate why
   const int BLOCK_M = 128;
   const int BLOCK_N = 128;
   const int NUM_WARP_M = 2;
   const int NUM_WARP_N = 2;
-  const int NUM_STAGES = 3;
+  const int NUM_STAGES = 2;
 
   const int num_blocks = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
 
   const int STAGE_SIZE = (BLOCK_M + BLOCK_N) * (BLOCK_K + BLOCK_K / 32);
-  const int smem_size = STAGE_SIZE * NUM_STAGES;
+  const int smem_size = STAGE_SIZE * NUM_STAGES
+                      + NUM_STAGES * 8;  // mbar
 
-  auto kernel = mxfp8_mm_v2_kernel<BLOCK_M, BLOCK_N, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
-  launch_kernel(kernel, num_blocks, TB_SIZE, smem_size, A_ptr, B_ptr, SFA_ptr, SFB_ptr, C_ptr, M, N, K);
+  CUtensorMap A_tmap, B_tmap, SFA_tmap, SFB_tmap;
+  init_tensor_map(&A_tmap, A_ptr, M, K, BLOCK_M, BLOCK_K, CU_TENSOR_MAP_SWIZZLE_128B);
+  init_tensor_map(&B_tmap, B_ptr, N, K, BLOCK_N, BLOCK_K, CU_TENSOR_MAP_SWIZZLE_128B);
+  init_tensor_map(&SFA_tmap, SFA_ptr, M / 4, K / 8, BLOCK_M / 4, BLOCK_K / 8, CU_TENSOR_MAP_SWIZZLE_NONE);
+  init_tensor_map(&SFB_tmap, SFB_ptr, N / 4, K / 8, BLOCK_N / 4, BLOCK_K / 8, CU_TENSOR_MAP_SWIZZLE_NONE);
+
+  auto kernel = mxfp8_mm_v2b_kernel<BLOCK_M, BLOCK_N, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
+  launch_kernel(kernel, num_blocks, TB_SIZE, smem_size, A_tmap, B_tmap, SFA_tmap, SFB_tmap, C_ptr, M, N, K);
 }

@@ -21,7 +21,7 @@ torch.utils.cpp_extension.load(
         "-lineinfo",
         "-gencode=arch=compute_120a,code=sm_120a",
     ],
-    # extra_ldflags=["-lcuda"],  # for cuTensorMapEncodeTiled() used by TMA
+    extra_ldflags=["-lcuda"],  # for cuTensorMapEncodeTiled() used by TMA
     is_python_module=False,
     verbose=True,
 )
@@ -42,13 +42,13 @@ def cublas_mxfp8_mm(A: Tensor, B: Tensor, scale_A: Tensor, scale_B: Tensor):
     )
 
 
-def permute_cublas_scale(scale: Tensor):
+def permute_sf_cublas(scale: Tensor):
     M, N = scale.shape
     scale = scale.view(M // 128, 4, 32, N // 4, 4).permute(0, 3, 2, 1, 4)  # [M/128,N/4,32,4,4]
     return scale.contiguous()
 
 
-def permute_scale(scale: Tensor):
+def permute_sf_v2(scale: Tensor):
     M, N = scale.shape
     scale = scale.view(M // 32, 4, 8, N // 4, 4).permute(0, 2, 3, 1, 4)  # [M/32,8,N/4,4,4]
     return scale.contiguous()
@@ -110,23 +110,24 @@ def main(args: argparse.Namespace):
 
     output_ref = ref_scaled_mm(A, B.T, SFA, SFB)
 
-    SFA_cublas = permute_cublas_scale(SFA)
-    SFB_cublas = permute_cublas_scale(SFB)
+    SFA_cublas = permute_sf_cublas(SFA)
+    SFB_cublas = permute_sf_cublas(SFB)
     output = cublas_mxfp8_mm(A, B.T, SFA_cublas, SFB_cublas)
     torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)
     bench_and_print(cublas_mxfp8_mm, "CuBLAS")
 
-    for i in range(1, 3):
-        fn = getattr(module, f"mxfp8_mm_v{i}")
-        if i >= 2:
-            this_scale_A = permute_scale(SFA)
-            this_scale_B = permute_scale(SFB)
-        else:
-            this_scale_A = SFA
-            this_scale_B = SFB
-        output = fn(A, B.T, this_scale_A, this_scale_B)
-        torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)
-        bench_and_print(fn, f"v{i}")
+    permute_fn_map = {
+        "1": lambda x: x,
+        "2": permute_sf_v2,
+        "2b": permute_sf_v2,
+        # "3": permute_sf_cublas,
+    }
+
+    for name, permute_fn in permute_fn_map.items():
+        fn = getattr(module, f"mxfp8_mm_v{name}")
+        output = fn(A, B.T, permute_fn(SFA), permute_fn(SFB))
+        torch.testing.assert_close(output, output_ref, rtol=1e-2, atol=1e-4)  # is the tolerance too loose?
+        bench_and_print(fn, f"v{name}")
 
 
 if __name__ == "__main__":
