@@ -83,7 +83,7 @@ void matmul_v5_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
     cp_async_wait_all();
     __syncthreads();
 
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++) {
+    for (int k = 0; k < NUM_MMA_K; k++) {
       // iterate MMA_K=16 -> increment bit5 (32 bytes) -> affects swizzled bits
       // assume we have alignment (bit0-6 are all zeros), increment bit5
       // is equivalent to XOR mma_id_k directly, which is commutative with swizzling
@@ -92,20 +92,20 @@ void matmul_v5_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
 
       // load B to registers
       uint32_t B_reg[NUM_MMA_N][num_B_regs];
-      for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n += 2) {
-        const uint32_t B_addr = B_shm_thread + mma_id_n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(B_reg[mma_id_n], B_addr ^ (mma_id_k * MMA_K * sizeof(nv_bfloat16)));
+      for (int n = 0; n < NUM_MMA_N; n += 2) {
+        const uint32_t B_addr = B_shm_thread + n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
+        ldmatrix_x4(B_reg[n], B_addr ^ (k * MMA_K * sizeof(nv_bfloat16)));
       }
 
-      for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++) {
+      for (int m = 0; m < NUM_MMA_M; m++) {
         // load A to registers
         uint32_t A_reg[num_A_regs];
-        const uint32_t A_addr = A_shm_thread + mma_id_m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(A_reg, A_addr ^ (mma_id_k * MMA_K * sizeof(nv_bfloat16)));
+        const uint32_t A_addr = A_shm_thread + m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
+        ldmatrix_x4(A_reg, A_addr ^ (k * MMA_K * sizeof(nv_bfloat16)));
 
         // call mma
-        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
-          mma_m16n8k16(A_reg, B_reg[mma_id_n], acc[mma_id_m][mma_id_n]);
+        for (int n = 0; n < NUM_MMA_N; n++)
+          mma_m16n8k16(A_reg, B_reg[n], acc[m][n]);
       }
     }
     __syncthreads();
@@ -114,22 +114,20 @@ void matmul_v5_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
     B += BLOCK_K;
   }
 
-  for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
-    for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-      const int row = mma_id_m * MMA_M + (lane_id / 4);
-      const int col = mma_id_n * MMA_N + (lane_id % 4) * 2;
-      nv_bfloat16 *C_local = C + row * N + col;
+  for (int m = 0; m < NUM_MMA_M; m++)
+    for (int n = 0; n < NUM_MMA_N; n++) {
+      const int row = m * MMA_M + (lane_id / 4);
+      const int col = n * MMA_N + (lane_id % 4) * 2;
 
-      float *regs = acc[mma_id_m][mma_id_n];
-      reinterpret_cast<nv_bfloat162 *>(C_local)[0]         = __float22bfloat162_rn({regs[0], regs[1]});
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+      float *regs = acc[m][n];
+      reinterpret_cast<nv_bfloat162 *>(C + (row + 0) * N + col)[0] = __float22bfloat162_rn({regs[0], regs[1]});
+      reinterpret_cast<nv_bfloat162 *>(C + (row + 8) * N + col)[0] = __float22bfloat162_rn({regs[2], regs[3]});
     }
 }
 
 void matmul_v5(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
   // 4 warps
-  // const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;  // same as previous kernels
-  const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64; // this is only faster for this kernel
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
 
   auto kernel = matmul_v5_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N>;

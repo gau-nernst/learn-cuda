@@ -16,8 +16,7 @@ MatmulFn matmul_v3;
 MatmulFn matmul_v4;
 MatmulFn matmul_v5;
 MatmulFn matmul_v6;
-MatmulFn matmul_v7;
-MatmulFn matmul_v8;
+MatmulFn matmul_v6b;
 
 template <MatmulFn matmul_fn>
 at::Tensor matmul_pt(const at::Tensor& A, const at::Tensor& B) {
@@ -45,6 +44,5 @@ TORCH_LIBRARY(my_module, m) {
   m.def("matmul_v4(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v4>);
   m.def("matmul_v5(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v5>);
   m.def("matmul_v6(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v6>);
-  m.def("matmul_v7(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v7>);
-  m.def("matmul_v8(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v8>);
+  m.def("matmul_v6b(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v6b>);
 }

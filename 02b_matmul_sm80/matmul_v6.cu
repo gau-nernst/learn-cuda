@@ -15,12 +15,12 @@ void global_to_shared_async(const nv_bfloat16 *in, int in_stride, uint32_t out, 
     const int col = idx % WIDTH;
 
     // NOTE: perhaps we can move swizzle out of this loop as well
-    uint32_t dst_addr = swizzle<WIDTH * sizeof(nv_bfloat16)>(out + (row * WIDTH + col) * sizeof(nv_bfloat16));
+    uint32_t dst_addr = out + swizzle_better<WIDTH * sizeof(nv_bfloat16)>(row, col / num_elems);
     cp_async(dst_addr, in + row * in_stride + col);
   }
 }
 
-template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N, int NUM_STAGES, int GROUP_M>
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
 void matmul_v6_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
@@ -42,20 +42,39 @@ void matmul_v6_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
 
-  // TODO: threadblock swizzling to improve L2 cache hit rate
-  const int num_blocks_n = cdiv(N, BLOCK_N);
-  const int bid_m = bid / num_blocks_n;
-  const int bid_n = bid % num_blocks_n;
-  const int offset_m = bid_m * BLOCK_M;
-  const int offset_n = bid_n * BLOCK_N;
-
   const int warp_id_m = warp_id / NUM_WARP_N;
   const int warp_id_n = warp_id % NUM_WARP_N;
 
+  const int grid_m = cdiv(M, BLOCK_M);
+  const int grid_n = cdiv(N, BLOCK_N);
+  int bid_m, bid_n;
+
+  if constexpr (GROUP_M == 0) {
+    // no swizzling
+    bid_m = bid / grid_n;
+    bid_n = bid % grid_n;
+  }
+  else {
+    // threadblock swizzling to improve L2 cache hit rate
+    // https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
+    // each group is [GROUP_M, grid_n], tile from top (small M) to bottom (large M).
+    // the last group might be shorter than GROUP_M if grid_m % GROUP_M != 0.
+    const int group_size = GROUP_M * grid_n;
+    const int group_id = bid / group_size;
+    const int group_off_m = group_id * GROUP_M;
+    const int group_m = std::min(grid_m - group_off_m, GROUP_M);  // actual group height
+
+    bid_m = group_off_m + ((bid % group_size) % group_m);
+    bid_n = (bid % group_size) / group_m;
+  }
+
+  const int off_m = bid_m * BLOCK_M;
+  const int off_n = bid_n * BLOCK_N;
+
   // A is row-major, B is column-major, C is row-major
-  A += offset_m * K;
-  B += offset_n * K;
-  C += (offset_m + warp_id_m * WARP_M) * N + (offset_n + warp_id_n * WARP_N);
+  A += off_m * K;
+  B += off_n * K;
+  C += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
 
   constexpr int A_size = BLOCK_M * BLOCK_K * sizeof(nv_bfloat16);
   constexpr int B_size = BLOCK_N * BLOCK_K * sizeof(nv_bfloat16);
@@ -74,27 +93,47 @@ void matmul_v6_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
   // pre-compute address used for ldmatrix
   // also pre-compute swizzling
   const int A_offm = (warp_id_m * WARP_M) + (lane_id % 16);
-  const int A_offk = (lane_id / 16) * 8;
-  const uint32_t A_shm_thread = swizzle<BLOCK_K * sizeof(nv_bfloat16)>(A_shm + (A_offm * BLOCK_K + A_offk) * sizeof(nv_bfloat16));
+  const uint32_t A_shm_thread = A_shm + swizzle_better<BLOCK_K * sizeof(nv_bfloat16)>(A_offm, lane_id / 16);
 
   const int B_offn = (warp_id_n * WARP_N) + (lane_id % 8) + (lane_id / 16) * 8;
-  const int B_offk = ((lane_id % 16) / 8) * 8;
-  const uint32_t B_shm_thread = swizzle<BLOCK_K * sizeof(nv_bfloat16)>(B_shm + (B_offn * BLOCK_K + B_offk) * sizeof(nv_bfloat16));
+  const uint32_t B_shm_thread = B_shm + swizzle_better<BLOCK_K * sizeof(nv_bfloat16)>(B_offn, (lane_id % 16) / 8);
 
   const int num_k_iters = cdiv(K, BLOCK_K);
 
   auto load_AB = [&](int k_iter) {
-    if (k_iter < num_k_iters) {
-      // select the correct shared memory buffer
-      const int stage_id = k_iter % NUM_STAGES;
-      global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shm + stage_id * AB_size, tid);
-      global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shm + stage_id * AB_size, tid);
+    // select the correct shared memory buffer
+    const int stage_id = k_iter % NUM_STAGES;
+    global_to_shared_async<TB_SIZE, BLOCK_M, BLOCK_K>(A, K, A_shm + stage_id * AB_size, tid);
+    global_to_shared_async<TB_SIZE, BLOCK_N, BLOCK_K>(B, K, B_shm + stage_id * AB_size, tid);
 
-      // A/B pointer tracks position for global->shared load
-      A += BLOCK_K;
-      B += BLOCK_K;
-    }
+    // A/B pointer tracks position for global->shared load
+    A += BLOCK_K;
+    B += BLOCK_K;
     cp_async_commit_group();
+  };
+
+  auto compute = [&](int k_iter) {
+    // A shared->regs
+    for (int k = 0; k < NUM_MMA_K; k++)
+      for (int m = 0; m < NUM_MMA_M; m++) {
+        uint32_t A_addr = A_shm_thread + (k_iter % NUM_STAGES) * AB_size;
+        A_addr += m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
+        ldmatrix_x4(A_regs[k][m], A_addr ^ (k * 32));
+      }
+
+    // B shared->regs
+    for (int k = 0; k < NUM_MMA_K; k++)
+      for (int n = 0; n < NUM_MMA_N; n += 2) {
+        uint32_t B_addr = B_shm_thread + (k_iter % NUM_STAGES) * AB_size;
+        B_addr += n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
+        ldmatrix_x4(B_regs[k][n], B_addr ^ (k * 32));
+      }
+
+    // do MMA
+    for (int k = 0; k < NUM_MMA_K; k++)
+      for (int m = 0; m < NUM_MMA_M; m++)
+        for (int n = 0; n < NUM_MMA_N; n++)
+          mma_m16n8k16(A_regs[k][m], B_regs[k][n], acc[m][n]);
   };
 
   // initiate NUM_STAGES-1 stages
@@ -103,7 +142,7 @@ void matmul_v6_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
 
   // loop invariance: there is always NUM_STAGES - 1 prefetch stages in-flight
   // thanks to pipelining, this loop now only has 1 __syncthreads()
-  for (int k_iter = 0; k_iter < num_k_iters; k_iter++) {
+  for (int k_iter = 0; k_iter < num_k_iters - (NUM_STAGES - 1); k_iter++) {
     // wait for previous MMA to finish using the shared buffer
     __syncthreads();
 
@@ -115,52 +154,57 @@ void matmul_v6_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
     cp_async_wait_group<NUM_STAGES - 1>();
     __syncthreads();
 
-    // A shared->regs
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
-      for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++) {
-        uint32_t A_addr = A_shm_thread + (k_iter % NUM_STAGES) * AB_size;
-        A_addr += mma_id_m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
-        A_addr ^= mma_id_k * MMA_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(A_regs[mma_id_k][mma_id_m], A_addr);
-      }
-
-    // B shared->regs
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
-      for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n += 2) {
-        uint32_t B_addr = B_shm_thread + (k_iter % NUM_STAGES) * AB_size;
-        B_addr += mma_id_n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
-        B_addr ^= mma_id_k * MMA_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(B_regs[mma_id_k][mma_id_n], B_addr);
-      }
-
-    // do MMA. NUM_STAGES-1 prefetch stages are still on-going
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
-      for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
-        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
-          mma_m16n8k16(A_regs[mma_id_k][mma_id_m],
-                       B_regs[mma_id_k][mma_id_n],
-                       acc[mma_id_m][mma_id_n]);
+    // ldmatrix and mma
+    compute(k_iter);
   }
 
-  for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
-    for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-      const int row = mma_id_m * MMA_M + (lane_id / 4);
-      const int col = mma_id_n * MMA_N + (lane_id % 4) * 2;
-      nv_bfloat16 *C_local = C + row * N + col;
+  for (int k_iter = num_k_iters - (NUM_STAGES - 1); k_iter < num_k_iters; k_iter++) {
+    // preserve invariance of cp.async commited groups
+    cp_async_commit_group();
 
-      float *regs = acc[mma_id_m][mma_id_n];
-      reinterpret_cast<nv_bfloat162 *>(C_local)[0]         = __float22bfloat162_rn({regs[0], regs[1]});
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+    // wait cp.async
+    cp_async_wait_group<NUM_STAGES - 1>();
+    __syncthreads();
+
+    // ldmatrix and mma
+    compute(k_iter);
+  }
+
+  for (int m = 0; m < NUM_MMA_M; m++)
+    for (int n = 0; n < NUM_MMA_N; n++) {
+      const int row = m * MMA_M + (lane_id / 4);
+      const int col = n * MMA_N + (lane_id % 4) * 2;
+
+      float *regs = acc[m][n];
+      reinterpret_cast<nv_bfloat162 *>(C + ((row + 0) * N + col))[0] = __float22bfloat162_rn({regs[0], regs[1]});
+      reinterpret_cast<nv_bfloat162 *>(C + ((row + 8) * N + col))[0] = __float22bfloat162_rn({regs[2], regs[3]});
     }
 }
 
 void matmul_v6(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
   // 4 warps
-  const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
 
-  auto kernel = matmul_v6_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES>;
+  const int GROUP_M = 0;
+  auto kernel = matmul_v6_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, GROUP_M>;
+
+  const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
+  const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
+  const int shm_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16) * NUM_STAGES;
+
+  launch_kernel(kernel, grid_size, TB_SIZE, shm_size, A, B, C, M, N, K);
+}
+
+void matmul_v6b(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+  // 4 warps
+  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
+  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
+  const int NUM_STAGES = 2;
+
+  const int GROUP_M = 8;
+  auto kernel = matmul_v6_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, GROUP_M>;
 
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
   const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);

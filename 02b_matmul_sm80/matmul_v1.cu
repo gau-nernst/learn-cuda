@@ -112,7 +112,7 @@ void matmul_v1_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
     }
     __syncthreads();
 
-    for (int mma_k = 0; mma_k < BLOCK_K; mma_k += MMA_K) {
+    for (int k = 0; k < BLOCK_K; k += MMA_K) {
       // for m16n8k8
       // https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-fragment-mma-1688
       //   A\B   [8x8-0]
@@ -129,8 +129,8 @@ void matmul_v1_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
       // [8x8-1][8x8-3]
 
       // select the tile this warp is responsible for
-      const nv_bfloat16 *A_shm_warp = A_shared + (warp_id_m * WARP_M) * SHM_STRIDE + mma_k;
-      const nv_bfloat16 *B_shm_warp = B_shared + (warp_id_n * WARP_N) * SHM_STRIDE + mma_k;
+      const nv_bfloat16 *A_shm_warp = A_shared + (warp_id_m * WARP_M) * SHM_STRIDE + k;
+      const nv_bfloat16 *B_shm_warp = B_shared + (warp_id_n * WARP_N) * SHM_STRIDE + k;
 
       // to use ldmatrix: each thread holds the address of 1 row e.g.
       // - thread 0 holds address of row 0
@@ -140,28 +140,28 @@ void matmul_v1_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
 
       // load B to registers
       uint32_t B_reg[NUM_MMA_N][num_B_regs];
-      for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
+      for (int n = 0; n < NUM_MMA_N; n++) {
         // NOTE: we can reduce unnecessary address calculation if we know MMA_K=8 or 16
         // convert generic address to .shared state space address expected by inline PTX
-        const nv_bfloat16 *B_ptr = B_shm_warp + (mma_id_n * MMA_N + (lane_id % 8)) * SHM_STRIDE + (lane_id / 8) * 8;
+        const nv_bfloat16 *B_ptr = B_shm_warp + (n * MMA_N + (lane_id % 8)) * SHM_STRIDE + (lane_id / 8) * 8;
         uint32_t B_addr = cvta_shared(B_ptr);
         if constexpr (use_swizzle)
           B_addr = swizzle<SHM_STRIDE * sizeof(nv_bfloat16)>(B_addr);
-        ldmatrix_x2(B_reg[mma_id_n], B_addr);
+        ldmatrix_x2(B_reg[n], B_addr);
       }
 
-      for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++) {
+      for (int m = 0; m < NUM_MMA_M; m++) {
         // load A to registers
         uint32_t A_reg[num_A_regs];
-        const nv_bfloat16 *A_ptr = A_shm_warp + (mma_id_m * MMA_M + (lane_id % 16)) * SHM_STRIDE + (lane_id / 16) * 8;
+        const nv_bfloat16 *A_ptr = A_shm_warp + (m * MMA_M + (lane_id % 16)) * SHM_STRIDE + (lane_id / 16) * 8;
         uint32_t A_addr = cvta_shared(A_ptr);
         if constexpr (use_swizzle)
           A_addr = swizzle<SHM_STRIDE * sizeof(nv_bfloat16)>(A_addr);
         ldmatrix_x4(A_reg, A_addr);
 
         // call mma
-        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
-          mma_m16n8k16(A_reg, B_reg[mma_id_n], acc[mma_id_m][mma_id_n]);
+        for (int n = 0; n < NUM_MMA_N; n++)
+          mma_m16n8k16(A_reg, B_reg[n], acc[m][n]);
       }
     }
     __syncthreads();
@@ -173,15 +173,14 @@ void matmul_v1_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
   // check output layout here
   // https://docs.nvidia.com/cuda/parallel-thread-execution/#mma-16816-c
   // NOTE: we can do some warp shuffle to get coalesced write
-  for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
-    for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-      const int row = mma_id_m * MMA_M + (lane_id / 4);
-      const int col = mma_id_n * MMA_N + (lane_id % 4) * 2;
-      nv_bfloat16 *C_local = C + row * N + col;
+  for (int m = 0; m < NUM_MMA_M; m++)
+    for (int n = 0; n < NUM_MMA_N; n++) {
+      const int row = m * MMA_M + (lane_id / 4);
+      const int col = n * MMA_N + (lane_id % 4) * 2;
 
-      float *regs = acc[mma_id_m][mma_id_n];
-      reinterpret_cast<nv_bfloat162 *>(C_local)[0]         = __float22bfloat162_rn({regs[0], regs[1]});  // c0 and c1
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N)[0] = __float22bfloat162_rn({regs[2], regs[3]});  // c2 and c3
+      float *regs = acc[m][n];
+      reinterpret_cast<nv_bfloat162 *>(C + (row + 0) * N + col)[0] = __float22bfloat162_rn({regs[0], regs[1]});
+      reinterpret_cast<nv_bfloat162 *>(C + (row + 8) * N + col)[0] = __float22bfloat162_rn({regs[2], regs[3]});
     }
 }
 

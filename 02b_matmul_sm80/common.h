@@ -40,14 +40,13 @@ void ldmatrix_x4(uint32_t reg[4], uint32_t addr) {
 __device__ inline
 void mma_m16n8k16(const uint32_t A[4], const uint32_t B[2], float D[4]) {
   asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-               "{%0, %1, %2, %3}, "    // D
-               "{%4, %5, %6, %7}, "    // A
-               "{%8, %9}, "            // B
-               "{%10, %11, %12, %13};" // C
-              : "=f"(D[0]), "=f"(D[1]), "=f"(D[2]), "=f"(D[3])
+               "{%0, %1, %2, %3}, "  // D
+               "{%4, %5, %6, %7}, "  // A
+               "{%8, %9}, "          // B
+               "{%0, %1, %2, %3};"   // C
+              : "+f"(D[0]), "+f"(D[1]), "+f"(D[2]), "+f"(D[3])
               : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]),
-                "r"(B[0]), "r"(B[1]),
-                "f"(D[0]), "f"(D[1]), "f"(D[2]), "f"(D[3]));
+                "r"(B[0]), "r"(B[1]));
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-non-bulk-copy

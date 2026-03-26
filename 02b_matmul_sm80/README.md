@@ -9,41 +9,45 @@ Resources:
 - https://github.com/NVIDIA/cutlass/blob/v3.9.2/include/cutlass/gemm/threadblock/mma_multistage.h
 - https://www.spatters.ca/mma-matmul
 
-BF16 A row-major x B column-major, compile with CUDA 13.0.
+BF16 A row-major x B column-major, compile with CUDA 13.0, driver 580.126.20.
 
-**5090 @ 400W**: Fixed M=N=K=4096. Max 209.5 TFLOPS.
+Fixed M=N=K=4096. Reporting TFLOPS (%SOL). 5090 has peak 209.5 BF16 TFLOPS, A100 has peak 312 BF16 TFLOPS.
 
-Kernel name                                            | TFLOPS | %SOL
--------------------------------------------------------|--------|-------
-CuBLAS 13.0 (via PyTorch 2.10)                         | 166.75 | 79.59%
-Inductor Triton (PyTorch 2.10)                         | 174.97 | 83.52%
-v1 (block+warp tiling, vectorized load)                | 138.33 | 66.03%
-v2 (`cp.async`)                                        | 150.72 | 71.94%
-v3 (pad shared memory)                                 | 159.25 | 76.02%
-v4 (swizzle shared memory)                             | 175.30 | 83.68%
-v5 (`ldmatrix.x4` for B, optimize address computation) | 173.10 | 82.63%
-v6 (2-stage pipelining)                                | 170.17 | 81.23%
-v7 (better swizzling logic, unroll prefetch stages)    | 175.46 | 83.75%
-v8 (threadblock swizzling)                             | 174.85 | 83.46%
+Kernel name                                            | 5090 @ 400W     | Modal A100
+-------------------------------------------------------|-----------------|----------------
+CuBLAS 13.0 (via PyTorch 2.10)                         | 177.05 (84.51%) | 244.40 (78.33%)
+Inductor Triton (PyTorch 2.10)                         | 169.03 (80.68%) | 226.62 (72.63%)
+v1 (block+warp tiling, vectorized load)                | 140.66 (67.14%) |  59.92 (19.20%)
+v2 (`cp.async`)                                        | 152.91 (72.99%) |  64.94 (20.81%)
+v3 (pad shared memory)                                 | 160.47 (76.60%) | 166.78 (53.46%)
+v4 (swizzle shared memory)                             | 177.42 (84.69%) | 190.94 (61.20%)
+v5 (`ldmatrix.x4` for B, optimize address computation) | 177.60 (84.77%) | 160.42 (51.42%)
+v6 (2-stage pipelining, improved swizzling logic)      | 177.66 (84.80%) | 220.77 (70.76%)
+v6b (threadblock swizzling)                            | 177.40 (84.68%) | 220.66 (70.72%)
 
-**5090 @ 400W**: Varying problem shapes. Max 209.5 BF16 TFLOPS. Driver 580.126.20. Report `TFLOPS (%SOL)`
+Note:
+- Modal A100 refers to `A100-SXM4-40GB`. A100-80GB on Modal comes in PCIe and SXM4 versions, which have different perf characteristics, and there is no way to select a particular version. Using the 40GB variant gives more reliable benchmark results.
+- TODO: investigate v5 regression on A100
 
-Kernel name                    | 2048            | 4096            | 8192
--------------------------------|-----------------|-----------------|----------------
-CuBLAS 13.0 (via PyTorch 2.10) | 162.42 (77.53%) | 173.85 (82.99%) | 187.15 (89.33%)
-Inductor Triton (PyTorch 2.10) | 160.67 (76.69%) | 173.75 (82.93%) | 184.28 (87.96%)
-v7                             | 150.98 (72.07%) | 173.25 (82.70%) | 139.11 (66.40%)
-v8 (threadblock swizzling)     | 150.69 (71.93%) | 171.81 (82.01%) | 164.47 (78.51%)
+### Varying problem shapes
 
-**Modal A100 40GB SXM4**: Varying problem shapes. Max 312 TFLOPS. Driver 580.95.05. Report `TFLOPS (%SOL)`.
-- Note: A100-80GB on Modal comes in PCIe and SXM4 versions. They have different perf characteristics, and there is no way to select a particular version. Hence, I went with 40GB variant, which only has SXM4 version, for reliable benchmark result.
+**5090 @ 400W**. Report `TFLOPS (%SOL)`. Peak 209.5 BF16 TFLOPS
 
 Kernel name                    | 2048            | 4096            | 8192
 -------------------------------|-----------------|-----------------|----------------
-CuBLAS 13.0 (via PyTorch 2.10) | 156.47 (50.15%) | 241.45 (77.39%) | 256.98 (82.37%)
-Inductor Triton (PyTorch 2.10) | 179.82 (57.63%) | 224.76 (72.04%) | 236.40 (75.77%)
-v7                             | 168.83 (54.11%) | 219.58 (70.38%) | 211.68 (67.85%)
-v8 (threadblock swizzling)     | 165.73 (53.12%) | 219.47 (70.34%) | 234.72 (75.23%)
+CuBLAS 13.0 (via PyTorch 2.10) | 164.48 (78.51%) | 173.51 (82.82%) | 166.13 (79.30%)
+Inductor Triton (PyTorch 2.10) | 142.07 (67.81%) | 165.51 (79.00%) | 184.81 (88.22%)
+v6                             | 155.02 (73.99%) | 175.83 (83.93%) | 165.28 (78.89%)
+v6b                            | 152.33 (72.71%) | 175.23 (83.64%) | 178.37 (85.14%)
+
+**Modal A100 40GB SXM4**. Report `TFLOPS (%SOL)`. Peak 312 BF16 TFLOPS
+
+Kernel name                    | 2048            | 4096            | 8192
+-------------------------------|-----------------|-----------------|----------------
+CuBLAS 13.0 (via PyTorch 2.10) | 155.31 (49.78%) | 246.29 (78.94%) | 261.82 (83.92%)
+Inductor Triton (PyTorch 2.10) | 181.05 (58.03%) | 229.08 (73.42%) | 241.66 (77.46%)
+v6                             | 170.64 (54.69%) | 225.03 (72.12%) | 224.79 (72.05%)
+v6b                            | 168.09 (53.88%) | 224.30 (71.89%) | 240.05 (76.94%)
 
 Lessons learned:
 - Inline PTX: instruction, outputs, inputs, constraints

@@ -97,7 +97,8 @@ def torch_bench(state: cuda.bench.State) -> None:
 def run_nvbench(M: int, N: int, K: int, source_dir: str):
     kernels_list = []
     kernels_list += ["cublas", "inductor"]
-    kernels_list += [f"matmul_v{i}" for i in range(7, 9)]
+    kernels_list += [f"matmul_v{i}" for i in ["1", "2", "3", "4", "5"]]
+    kernels_list += [f"matmul_v{i}" for i in ["6", "6b"]]
 
     # duplicate inputs to make sure each measurement is at least 10ms
     SOL = get_sol()
