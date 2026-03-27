@@ -2,24 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from torch import Tensor
-
-
-@triton.jit
-def _rms_norm(
-    x_ptr,  # (batch_size, hidden_dim)
-    norm_ptr,  # (hidden_dim)
-    tmp1_ptr,  # (batch_size, hidden_dim)
-    batch_id,
-    hidden_dim: tl.constexpr,
-):
-    # one-shot: assume we can hold all of data
-    offs = tl.arange(0, hidden_dim)
-    x = tl.load(x_ptr + batch_id * hidden_dim + offs).to(tl.float32)
-    norm = tl.load(norm_ptr + offs).to(tl.float32)
-
-    mean_sq = tl.sum(x * x, axis=0) * (1 / hidden_dim) + 1e-6
-    x = x * norm * tl.rsqrt(mean_sq)
-    tl.store(tmp1_ptr + batch_id * hidden_dim + offs, x)
+from triton_utils import _grid_sync, _rms_norm
 
 
 @triton.jit
@@ -141,11 +124,8 @@ def mlp_triton_v1_kernel(
     num_pids = tl.num_programs(0)
 
     for batch_id in range(raw_pid, batch_size, num_pids):
-        _rms_norm(x_ptr, norm_ptr, tmp1_ptr, batch_id, hidden_dim)
-
-    tl.atomic_add(flag_ptr, 1, sem="release", scope="gpu")
-    while tl.atomic_add(flag_ptr, 0, sem="acquire", scope="gpu") != num_pids:
-        pass
+        _rms_norm(x_ptr + batch_id * hidden_dim, norm_ptr, tmp1_ptr + batch_id * hidden_dim, hidden_dim)
+    _grid_sync(flag_ptr, num_pids)
 
     # NOTE: typically mlp_dim is 2-5x hidden_dim
     # hence, the 1st MMA has many output tiles, with short mainloop
@@ -165,15 +145,7 @@ def mlp_triton_v1_kernel(
         _stage1_mainloop(
             tmp1_ptr, w1_ptr, w3_ptr, tmp2_ptr, pid, batch_size, hidden_dim, mlp_dim, BLOCK_M, BLOCK_N, BLOCK_K
         )
-
-    # signal done
-    tl.atomic_add(flag_ptr + 1, 1, sem="release", scope="gpu")
-
-    # spin
-    # triton will rewrite atomic add 0 to ld.acquire
-    # NOTE: we can prefetch W2 during this time
-    while tl.atomic_add(flag_ptr + 1, 0, sem="acquire", scope="gpu") != num_pids:
-        pass
+    _grid_sync(flag_ptr + 1, num_pids)
 
     # persistent kernel
     grid_n1: tl.constexpr = hidden_dim // BLOCK_N
@@ -197,7 +169,7 @@ def mlp_triton_v1_rms_norm_kernel(
     hidden_dim: tl.constexpr,
 ):
     pid = tl.program_id(0)
-    _rms_norm(x_ptr, norm_ptr, tmp1_ptr, pid, hidden_dim)
+    _rms_norm(x_ptr + pid * hidden_dim, norm_ptr, tmp1_ptr + pid * hidden_dim, hidden_dim)
 
 
 @triton.jit

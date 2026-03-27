@@ -6,24 +6,7 @@ import torch
 import triton
 import triton.language as tl
 from torch import Tensor
-
-
-@triton.jit
-def _rms_norm(x_ptr, norm_ptr, dim: tl.constexpr):
-    # one-shot: assume we can hold all of data
-    offs = tl.arange(0, dim)
-    x = tl.load(x_ptr + offs).to(tl.float32)
-    norm = tl.load(norm_ptr + offs).to(tl.float32)
-
-    mean_sq = tl.sum(x * x, axis=0) * (1 / dim) + 1e-6
-    return x * norm * tl.rsqrt(mean_sq)
-
-
-@triton.jit
-def _grid_sync(ptr, num_pids):
-    tl.atomic_add(ptr, 1, sem="release", scope="gpu")
-    while tl.atomic_add(ptr, 0, sem="acquire", scope="gpu") != num_pids:
-        pass
+from triton_utils import _grid_sync, _rms_norm, _spin_wait
 
 
 @triton.jit
@@ -65,31 +48,60 @@ def model_triton_kernel(
     num_pids = tl.num_programs(0)
 
     # load input embedding on all threadblocks to avoid grid-wide sync
-    offs_dim = tl.arange(0, dim)
     input_id = tl.load(input_ids_ptr)
-    tl.store(x_ptr + offs_dim, tl.load(input_embeds_ptr + input_id * dim + offs_dim))
+    for k in range(tl.cdiv(dim, 1024)):
+        offs = k * 1024 + tl.arange(0, 1024)
+        x = tl.load(input_embeds_ptr + (input_id * dim + offs))
+        tl.store(x_ptr + offs, x, mask=offs < dim)
+    tl.debug_barrier()
 
     for layer_id in range(num_layers):
-        x_normed = _rms_norm(x_ptr, attn_norm_ptr + layer_id * dim, dim)
+        if raw_pid == 0:
+            _rms_norm(x_ptr, attn_norm_ptr + layer_id * dim, attn_tmp_ptr, dim)
+            tl.atomic_add(flag_ptr + layer_id * 8, 1, sem="release", scope="gpu")
+        else:
+            _spin_wait(flag_ptr + layer_id * 8, 1)
 
         # QKV projection
         qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
         for pid_n in range(raw_pid, qkv_dim // ATTN_BLOCK_N, num_pids):
-            # one-shot
             offs_n = pid_n * ATTN_BLOCK_N + tl.arange(0, ATTN_BLOCK_N)
-            offs_dim = tl.arange(0, dim)
-            wqkv_ptrs = wqkv_ptr + (layer_id * qkv_dim * dim + offs_n[:, None] * dim + offs_dim[None, :])
+            offs_k = tl.arange(0, ATTN_BLOCK_K)
+
+            tmp_ptrs = attn_tmp_ptr + offs_k
+            wqkv_ptrs = wqkv_ptr + (layer_id * qkv_dim * dim + offs_n[:, None] * dim + offs_k[None, :])
+
+            acc = tl.zeros((ATTN_BLOCK_N, ATTN_BLOCK_K), dtype=tl.float32)
+
+            for _ in range(dim // ATTN_BLOCK_K):
+                x_normed = tl.load(tmp_ptrs)
+                wqkv = tl.load(wqkv_ptrs)  # [BLOCK_N, BLOCK_K]
+                acc += x_normed * wqkv
+
+                tmp_ptrs += ATTN_BLOCK_K
+                wqkv_ptrs += ATTN_BLOCK_K
 
             # NOTE: since v doesn't have QK-norm or RoPE, we can write v directly to KV cache
-            wqkv = tl.load(wqkv_ptrs)  # [BLOCK_N, dim]
-            acc = tl.sum(x_normed * wqkv, axis=1)  # [BLOCK_N]
-            tl.store(attn_tmp_ptr + offs_n, acc)
+            tl.store(attn_tmp_ptr + (dim + offs_n), tl.sum(acc, axis=1))  # [BLOCK_N]
 
-        _grid_sync(flag_ptr + layer_id * 5, num_pids)
+        _grid_sync(flag_ptr + (layer_id * 8 + 1), num_pids)
 
-        q_ptr = attn_tmp_ptr
+        q_ptr = attn_tmp_ptr + dim
         k_ptr = q_ptr + num_heads * head_dim
         v_ptr = k_ptr + num_kv_heads * head_dim
+
+        # QK norm
+        if raw_pid < num_heads:
+            q_head_ptr = q_ptr + raw_pid * head_dim
+            _rms_norm(q_head_ptr, q_norm_ptr + layer_id * head_dim, q_head_ptr, head_dim, BLOCK_SIZE=head_dim)
+            tl.atomic_add(flag_ptr + (layer_id * 8 + 2), 1, sem="release", scope="gpu")
+
+        elif raw_pid < num_heads + num_kv_heads:
+            k_head_ptr = k_ptr + (raw_pid - num_heads) * head_dim
+            _rms_norm(k_head_ptr, k_norm_ptr + layer_id * head_dim, k_head_ptr, head_dim, BLOCK_SIZE=head_dim)
+            tl.atomic_add(flag_ptr + (layer_id * 8 + 2), 1, sem="release", scope="gpu")
+
+        _spin_wait(flag_ptr + (layer_id * 8 + 2), num_heads + num_kv_heads)
 
         # each threadblock = 1 attention head
         # this won't perform well for long context
@@ -108,8 +120,8 @@ def model_triton_kernel(
             cos = tl.load(cos_ptr + offs_half).to(tl.float32)
             sin = tl.load(sin_ptr + offs_half).to(tl.float32)
 
-            q_normed = _rms_norm(q_ptr + head_id * head_dim, q_norm_ptr + layer_id * head_dim, head_dim)
-            k_normed = _rms_norm(k_ptr + kv_head_id * head_dim, k_norm_ptr + layer_id * head_dim, head_dim)
+            q_normed = tl.load(q_ptr + (head_id * head_dim + offs_hdim))
+            k_normed = tl.load(k_ptr + (kv_head_id * head_dim + offs_hdim))
 
             q1, q2 = tl.split(tl.reshape(q_normed, (2, head_dim // 2)).T)  # [head_dim/2] each
             k1, k2 = tl.split(tl.reshape(k_normed, (2, head_dim // 2)).T)
@@ -186,10 +198,9 @@ def model_triton_kernel(
             offs_hdim = tl.arange(0, head_dim)
             tl.store(q_ptr + head_id * head_dim + offs_hdim, o)
 
-            tl.atomic_add(flag_ptr + layer_id * 5 + 1, 1, sem="release", scope="gpu")
+            tl.atomic_add(flag_ptr + (layer_id * 8 + 3), 1, sem="release", scope="gpu")
 
-        while tl.atomic_add(flag_ptr + layer_id * 5 + 1, 0, sem="acquire", scope="gpu") != num_heads:
-            pass
+        _spin_wait(flag_ptr + (layer_id * 8 + 3), num_heads)
 
         # output projection
         q_dim: tl.constexpr = num_heads * head_dim
@@ -216,38 +227,55 @@ def model_triton_kernel(
             acc += tl.load(x_ptr + offs_n)
             tl.store(x_ptr + offs_n, acc)
 
-        _grid_sync(flag_ptr + layer_id * 5 + 2, num_pids)
+        _grid_sync(flag_ptr + (layer_id * 8 + 4), num_pids)
 
         # start of MLP
-        x_normed = _rms_norm(x_ptr, mlp_norm_ptr + layer_id * dim, dim)
+        if raw_pid == 0:
+            _rms_norm(x_ptr, mlp_norm_ptr + layer_id * dim, mlp_tmp_ptr, dim)
+            tl.atomic_add(flag_ptr + (layer_id * 8 + 5), 1, sem="release", scope="gpu")
+        else:
+            _spin_wait(flag_ptr + (layer_id * 8 + 5), 1)
 
         # w13 projection
         w1_ptr = w13_ptr + layer_id * 2 * mlp_dim * dim
         w3_ptr = w1_ptr + mlp_dim * dim
 
         for pid_n in range(raw_pid, mlp_dim // MLP_BLOCK_N, num_pids):
-            # one-shot
             offs_n = pid_n * MLP_BLOCK_N + tl.arange(0, MLP_BLOCK_N)
-            offs_dim = tl.arange(0, dim)
-            w1_ptrs = w1_ptr + (offs_n[:, None] * dim + offs_dim[None, :])
-            w3_ptrs = w3_ptr + (offs_n[:, None] * dim + offs_dim[None, :])
+            offs_k = tl.arange(0, MLP_BLOCK_K)
 
-            w1 = tl.load(w1_ptrs)  # [BLOCK_N, hidden_dim]
-            w3 = tl.load(w3_ptrs)
+            tmp_ptrs = mlp_tmp_ptr + offs_k
+            w1_ptrs = w1_ptr + (offs_n[:, None] * dim + offs_k[None, :])
+            w3_ptrs = w3_ptr + (offs_n[:, None] * dim + offs_k[None, :])
 
-            acc1 = tl.sum(x_normed * w1, axis=1)  # [BLOCK_N]
-            acc3 = tl.sum(x_normed * w3, axis=1)
+            acc1 = tl.zeros((MLP_BLOCK_N, MLP_BLOCK_K), dtype=tl.float32)
+            acc3 = tl.zeros((MLP_BLOCK_N, MLP_BLOCK_K), dtype=tl.float32)
+
+            for _ in range(dim // MLP_BLOCK_K):
+                x_normed = tl.load(tmp_ptrs)
+                w1 = tl.load(w1_ptrs)  # [BLOCK_N, BLOCK_K]
+                w3 = tl.load(w3_ptrs)
+
+                acc1 += x_normed * w1
+                acc3 += x_normed * w3
+
+                tmp_ptrs += MLP_BLOCK_K
+                w1_ptrs += MLP_BLOCK_K
+                w3_ptrs += MLP_BLOCK_K
+
+            acc1 = tl.sum(acc1, axis=1)  # [BLOCK_N]
+            acc3 = tl.sum(acc3, axis=1)
             acc = acc1 * acc3 * tl.sigmoid(acc1)
-            tl.store(mlp_tmp_ptr + offs_n, acc)
+            tl.store(mlp_tmp_ptr + (dim + offs_n), acc)
 
-        _grid_sync(flag_ptr + layer_id * 5 + 3, num_pids)
+        _grid_sync(flag_ptr + (layer_id * 8 + 6), num_pids)
 
         # persistent kernel
         for pid_n in range(raw_pid, dim // MLP_BLOCK_N, num_pids):
             offs_n = pid_n * MLP_BLOCK_N + tl.arange(0, MLP_BLOCK_N)
             offs_k = tl.arange(0, MLP_BLOCK_K)
 
-            mlp_tmp_ptrs = mlp_tmp_ptr + offs_k
+            mlp_tmp_ptrs = mlp_tmp_ptr + (dim + offs_k)
             w2_ptrs = w2_ptr + (layer_id * dim * mlp_dim + offs_n[:, None] * mlp_dim + offs_k[None, :])
 
             acc = tl.zeros((MLP_BLOCK_N, MLP_BLOCK_K), dtype=tl.float32)
@@ -266,16 +294,15 @@ def model_triton_kernel(
             acc += tl.load(x_ptr + offs_n)
             tl.store(x_ptr + offs_n, acc)
 
-        _grid_sync(flag_ptr + layer_id * 5 + 4, num_pids)
+        _grid_sync(flag_ptr + (layer_id * 8 + 7), num_pids)
 
     # output norm
-    offs_dim = tl.arange(0, dim)
-    x_normed = _rms_norm(x_ptr, norm_ptr, dim)
-    tl.store(x_ptr + offs_dim, x_normed)
-
     if raw_pid == 0:
+        _rms_norm(x_ptr, norm_ptr, x_ptr, dim)
+
+    elif raw_pid == 1:
         # reset flag
-        for i in range(num_layers * 5):
+        for i in range(num_layers * 8):
             tl.store(flag_ptr + i, 0)
 
 
@@ -298,12 +325,12 @@ def model_triton(input_ids: Tensor, params: reference.ModelParams, buffers: refe
 
     input_embeds = params.input_embeds
     x = input_embeds.new_empty(batch_size, dim)
-    attn_tmp = input_embeds.new_empty(batch_size, qkv_dim)
-    mlp_tmp = input_embeds.new_empty(batch_size, mlp_dim)
+    attn_tmp = input_embeds.new_empty(batch_size, dim + qkv_dim)
+    mlp_tmp = input_embeds.new_empty(batch_size, dim + mlp_dim)
 
     # NOTE: may want to limit num SMs used
     num_sms = torch.cuda.get_device_properties(input_ids.device).multi_processor_count
-    ATTN_BLOCK_N = 8
+    ATTN_BLOCK_N = 16
     ATTN_BLOCK_K = 128
     MLP_BLOCK_N = 4
     MLP_BLOCK_K = 512

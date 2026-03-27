@@ -6,8 +6,6 @@ from model_triton import model_triton
 from reference import ModelBuffers, ModelParams, model_ref
 from tokenizers.decoders import DecodeStream
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
-from vllm import EngineArgs, LLMEngine, SamplingParams, TokensPrompt
-from vllm.sampling_params import RequestOutputKind
 
 
 class HFGenerator:
@@ -67,9 +65,14 @@ class MyGenerator:
 
 class VllmGenerator:
     def __init__(self, model_id: str):
+        from vllm import EngineArgs, LLMEngine
+
         self.llm = LLMEngine.from_engine_args(EngineArgs(model_id))
 
     def generate(self, token_ids: list[int], max_tokens: int = 1024):
+        from vllm import SamplingParams, TokensPrompt
+        from vllm.sampling_params import RequestOutputKind
+
         llm = self.llm
         sampling_params = SamplingParams(
             temperature=0,
@@ -104,7 +107,7 @@ def main(args: argparse.Namespace):
             messages,
             add_generation_prompt=True,
             return_attention_mask=False,
-        )
+        )["input_ids"]
 
         stream = DecodeStream(skip_special_tokens=True)
         outputs = []

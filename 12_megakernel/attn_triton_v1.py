@@ -4,17 +4,7 @@ import torch
 import triton
 import triton.language as tl
 from torch import Tensor
-
-
-@triton.jit
-def _rms_norm(x_ptr, norm_ptr, dim: tl.constexpr):
-    # one-shot: assume we can hold all of data
-    offs = tl.arange(0, dim)
-    x = tl.load(x_ptr + offs).to(tl.float32)
-    norm = tl.load(norm_ptr + offs).to(tl.float32)
-
-    mean_sq = tl.sum(x * x, axis=0) * (1 / dim) + 1e-6
-    return x * norm * tl.rsqrt(mean_sq)
+from triton_utils import _grid_sync, _rms_norm, _spin_wait
 
 
 @triton.jit
@@ -27,7 +17,7 @@ def attn_triton_v1_kernel(
     k_norm_ptr,  # (head_dim)
     rope_ptr,  # (head_dim * 2)
     wo_ptr,  # (dim, q_dim)
-    tmp_ptr,  # (qkv_dim)
+    tmp_ptr,  # (dim + qkv_dim)
     flag_ptr,
     position,
     max_context,
@@ -41,32 +31,52 @@ def attn_triton_v1_kernel(
     raw_pid = tl.program_id(0)
     num_pids = tl.num_programs(0)
 
-    # do input RMS norm on all threadblocks.
-    # duplicate work, but avoid grid-wide sync.
-    # assume dim is small
-    x_normed = _rms_norm(x_ptr, norm_ptr, dim)
+    if raw_pid == 0:
+        _rms_norm(x_ptr, norm_ptr, tmp_ptr, dim)
+        tl.atomic_add(flag_ptr, 1, sem="release", scope="gpu")
+    else:
+        _spin_wait(flag_ptr, 1)
 
     # QKV projection
     qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
     for pid_n in range(raw_pid, qkv_dim // BLOCK_N, num_pids):
-        # one-shot
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        offs_dim = tl.arange(0, dim)
-        wqkv_ptrs = wqkv_ptr + (offs_n[:, None] * dim + offs_dim[None, :])
+        offs_k = tl.arange(0, BLOCK_K)
+
+        tmp_ptrs = tmp_ptr + offs_k
+        wqkv_ptrs = wqkv_ptr + (offs_n[:, None] * dim + offs_k[None, :])
+
+        acc = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
+
+        for _ in range(dim // BLOCK_K):
+            x_normed = tl.load(tmp_ptrs)
+            wqkv = tl.load(wqkv_ptrs)  # [BLOCK_N, BLOCK_K]
+            acc += x_normed * wqkv
+
+            tmp_ptrs += BLOCK_K
+            wqkv_ptrs += BLOCK_K
 
         # NOTE: since v doesn't have QK-norm or RoPE, we can write v directly to KV cache
-        wqkv = tl.load(wqkv_ptrs)  # [BLOCK_N, dim]
-        acc = tl.sum(x_normed * wqkv, axis=1)  # [BLOCK_N]
-        tl.store(tmp_ptr + offs_n, acc)
+        tl.store(tmp_ptr + (dim + offs_n), tl.sum(acc, axis=1))  # [BLOCK_N]
 
-    # grid-wide sync
-    tl.atomic_add(flag_ptr, 1, sem="release", scope="gpu")
-    while tl.atomic_add(flag_ptr, 0, sem="acquire", scope="gpu") != num_pids:
-        pass
+    _grid_sync(flag_ptr + 1, num_pids)
 
-    q_ptr = tmp_ptr
+    q_ptr = tmp_ptr + dim
     k_ptr = q_ptr + num_heads * head_dim
     v_ptr = k_ptr + num_kv_heads * head_dim
+
+    # QK norm
+    if raw_pid < num_heads:
+        q_head_ptr = q_ptr + raw_pid * head_dim
+        _rms_norm(q_head_ptr, q_norm_ptr, q_head_ptr, head_dim, BLOCK_SIZE=head_dim)
+        tl.atomic_add(flag_ptr + 2, 1, sem="release", scope="gpu")
+
+    elif raw_pid < num_heads + num_kv_heads:
+        k_head_ptr = k_ptr + (raw_pid - num_heads) * head_dim
+        _rms_norm(k_head_ptr, k_norm_ptr, k_head_ptr, head_dim, BLOCK_SIZE=head_dim)
+        tl.atomic_add(flag_ptr + 2, 1, sem="release", scope="gpu")
+
+    _spin_wait(flag_ptr + 2, num_heads + num_kv_heads)
 
     # each threadblock = 1 attention head
     # this won't perform well for long context
@@ -85,8 +95,8 @@ def attn_triton_v1_kernel(
         cos = tl.load(cos_ptr + offs_half).to(tl.float32)
         sin = tl.load(sin_ptr + offs_half).to(tl.float32)
 
-        q_normed = _rms_norm(q_ptr + head_id * head_dim, q_norm_ptr, head_dim)
-        k_normed = _rms_norm(k_ptr + kv_head_id * head_dim, k_norm_ptr, head_dim)
+        q_normed = tl.load(q_ptr + (head_id * head_dim + offs_hdim))
+        k_normed = tl.load(k_ptr + (kv_head_id * head_dim + offs_hdim))
 
         q1, q2 = tl.split(tl.reshape(q_normed, (2, head_dim // 2)).T)  # [head_dim/2] each
         k1, k2 = tl.split(tl.reshape(k_normed, (2, head_dim // 2)).T)
@@ -154,10 +164,9 @@ def attn_triton_v1_kernel(
         offs_hdim = tl.arange(0, head_dim)
         tl.store(q_ptr + head_id * head_dim + offs_hdim, o)
 
-        tl.atomic_add(flag_ptr + 1, 1, sem="release", scope="gpu")
+        tl.atomic_add(flag_ptr + 3, 1, sem="release", scope="gpu")
 
-    while tl.atomic_add(flag_ptr + 1, 0, sem="acquire", scope="gpu") != num_heads:
-        pass
+    _spin_wait(flag_ptr + 3, num_heads)
 
     # output projection
     q_dim: tl.constexpr = num_heads * head_dim
@@ -185,9 +194,9 @@ def attn_triton_v1_kernel(
         tl.store(x_ptr + offs_n, acc)
 
     # signal done. last pid issues reset.
-    before = tl.atomic_add(flag_ptr + 2, 1, sem="release", scope="gpu")
+    before = tl.atomic_add(flag_ptr + 4, 1, sem="release", scope="gpu")
     if before == num_pids - 1:
-        for i in range(3):
+        for i in range(5):
             tl.store(flag_ptr + i, 0)
 
 
@@ -209,7 +218,7 @@ def attn_triton_v1(
     # NOTE: since this flag is shared module-wide, this function is not thread-safe
     global _FLAG
     if _FLAG is None:
-        _FLAG = torch.zeros(3, dtype=torch.int32, device=x.device)
+        _FLAG = torch.zeros(100, dtype=torch.int32, device=x.device)
 
     batch_size, dim = x.shape
     qkv_dim, _ = wqkv.shape
@@ -218,11 +227,11 @@ def attn_triton_v1(
     num_heads = qkv_dim // head_dim - num_kv_heads * 2
     assert batch_size == 1, "Only supports decode"
 
-    tmp = x.new_empty(batch_size, qkv_dim)
+    tmp = x.new_empty(batch_size, dim + qkv_dim)
 
     # NOTE: may want to limit num SMs used
     num_sms = torch.cuda.get_device_properties(x.device).multi_processor_count
-    BLOCK_N = 8
+    BLOCK_N = 16
     BLOCK_K = 128
 
     attn_triton_v1_kernel[(num_sms,)](

@@ -47,7 +47,7 @@ class ModelParams(NamedTuple):
     def from_state_dict(state_dict: dict[str, Tensor]):
         input_embeds = state_dict["model.embed_tokens.weight"]
         norm = state_dict["model.norm.weight"]
-        lm_head = state_dict["lm_head.weight"]
+        lm_head = state_dict.get("lm_head.weight", None)
         if lm_head is input_embeds:
             lm_head = None
 
