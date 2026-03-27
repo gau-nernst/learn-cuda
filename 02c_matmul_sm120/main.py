@@ -113,7 +113,7 @@ def main(args: argparse.Namespace):
         else:
             output_ref = torch._int_mm(A, B)
 
-        for i in range(3):
+        for i in range(4):
             fn = getattr(module, f"matmul_v{i}")
             output = fn(A, B)
             torch.testing.assert_close(output, output_ref)
@@ -121,7 +121,7 @@ def main(args: argparse.Namespace):
     # benchmark with nvbench
     kernels_list = []
     kernels_list += ["cublas", "inductor"]
-    kernels_list += [f"matmul_v{i}" for i in range(3)]
+    kernels_list += [f"matmul_v{i}" for i in range(4)]
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("kernel", kernels_list)

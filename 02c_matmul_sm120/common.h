@@ -47,6 +47,45 @@ template<> struct GetType<int8_t> {
   static constexpr CUtensorMapDataType tmap_dtype = CU_TENSOR_MAP_DATA_TYPE_UINT8;
 };
 
+template <typename InType>
+void init_tensor_map(
+  CUtensorMap *tmap_ptr,
+  const InType *gmem_ptr,
+  uint64_t gmem_height, uint64_t gmem_width,
+  uint32_t smem_height, uint32_t smem_width
+) {
+  constexpr uint32_t rank = 2;
+  uint64_t size[rank]        = {gmem_width, gmem_height};
+  uint64_t stride[rank - 1]  = {gmem_width * sizeof(InType)};  // in bytes
+  uint32_t box_size[rank]    = {smem_width, smem_height};
+  uint32_t elem_stride[rank] = {1, 1};
+
+  const uint32_t smem_stride_B = smem_width * sizeof(InType);
+  CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE;
+  if (smem_stride_B == 32)
+    swizzle = CU_TENSOR_MAP_SWIZZLE_32B;
+  else if (smem_stride_B == 64)
+    swizzle = CU_TENSOR_MAP_SWIZZLE_64B;
+  else if (smem_stride_B == 128)
+    swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
+
+  auto res = cuTensorMapEncodeTiled(
+    tmap_ptr, GetType<InType>::tmap_dtype, rank,
+    (void *)gmem_ptr, size, stride,
+    box_size, elem_stride,
+    CU_TENSOR_MAP_INTERLEAVE_NONE,
+    swizzle,
+    CU_TENSOR_MAP_L2_PROMOTION_NONE,
+    CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+  );
+  if (res != CUDA_SUCCESS) {
+    const char *error_msg_ptr;
+    if (cuGetErrorString(res, &error_msg_ptr) != CUDA_SUCCESS)
+      error_msg_ptr = "unable to get error string";
+    std::cerr << "cuTensorMapEncodeTiled error: " << error_msg_ptr << std::endl;
+  }
+};
+
 template<typename InType, typename AccType>
 __device__ inline
 void mma(const int A[4], const int B[2], AccType C[4]) {

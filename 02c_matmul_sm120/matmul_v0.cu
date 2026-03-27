@@ -24,9 +24,9 @@ template <int BLOCK_M, int BLOCK_N, int BLOCK_K, int NUM_WARP_M, int NUM_WARP_N,
 __launch_bounds__(NUM_WARP_M * NUM_WARP_N * WARP_SIZE) // maxThreadsPerBlock
 __global__
 void matmul_v0_kernel(
-  const InType *A,
-  const InType *B,
-        OutType *C,
+  const InType *A_ptr,
+  const InType *B_ptr,
+        OutType *C_ptr,
   int M, int N, int K
 ) {
   constexpr int WARP_M = BLOCK_M / NUM_WARP_M;
@@ -68,9 +68,9 @@ void matmul_v0_kernel(
   const int off_n = bid_n * BLOCK_N;
 
   // A is row-major, B is column-major, C is row-major
-  A += off_m * K;
-  B += off_n * K;
-  C += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
+  A_ptr += off_m * K;
+  B_ptr += off_n * K;
+  C_ptr += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
 
   constexpr int A_size = BLOCK_M * BLOCK_K * sizeof(InType);
   constexpr int B_size = BLOCK_N * BLOCK_K * sizeof(InType);
@@ -96,10 +96,10 @@ void matmul_v0_kernel(
   const int num_k_iters = cdiv(K, BLOCK_K);
 
   auto load_AB = [&](int stage_id) {
-    gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem + stage_id * AB_size, A, K, tid);
-    gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem + stage_id * AB_size, B, K, tid);
-    A += BLOCK_K;
-    B += BLOCK_K;
+    gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem + stage_id * AB_size, A_ptr, K, tid);
+    gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem + stage_id * AB_size, B_ptr, K, tid);
+    A_ptr += BLOCK_K;
+    B_ptr += BLOCK_K;
     asm volatile("cp.async.commit_group;");
   };
 
@@ -157,20 +157,20 @@ void matmul_v0_kernel(
       if constexpr (std::is_same_v<InType, nv_bfloat16>) {
         static_assert(std::is_same_v<OutType, nv_bfloat16>);
         float *regs = acc[m][n];
-        reinterpret_cast<nv_bfloat162 *>(C + ((row + 0) * N + col))[0] = __float22bfloat162_rn({regs[0], regs[1]});
-        reinterpret_cast<nv_bfloat162 *>(C + ((row + 8) * N + col))[0] = __float22bfloat162_rn({regs[2], regs[3]});
+        reinterpret_cast<nv_bfloat162 *>(C_ptr + ((row + 0) * N + col))[0] = __float22bfloat162_rn({regs[0], regs[1]});
+        reinterpret_cast<nv_bfloat162 *>(C_ptr + ((row + 8) * N + col))[0] = __float22bfloat162_rn({regs[2], regs[3]});
       }
 
       if constexpr (std::is_same_v<InType, int8_t>) {
         static_assert(std::is_same_v<OutType, int>);
         int *regs = acc[m][n];
-        reinterpret_cast<int2 *>(C + ((row + 0) * N + col))[0] = int2{regs[0], regs[1]};
-        reinterpret_cast<int2 *>(C + ((row + 8) * N + col))[0] = int2{regs[2], regs[3]};
+        reinterpret_cast<int2 *>(C_ptr + ((row + 0) * N + col))[0] = int2{regs[0], regs[1]};
+        reinterpret_cast<int2 *>(C_ptr + ((row + 8) * N + col))[0] = int2{regs[2], regs[3]};
       }
     }
 }
 
-void matmul_v0_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+void matmul_v0_bf16(const nv_bfloat16 *A_ptr, const nv_bfloat16 *B_ptr, nv_bfloat16 *C_ptr, int M, int N, int K) {
   const int BLOCK_M = 256, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 4, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
@@ -181,10 +181,10 @@ void matmul_v0_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, 
   const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16) * NUM_STAGES;
 
-  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A, B, C, M, N, K);
+  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A_ptr, B_ptr, C_ptr, M, N, K);
 }
 
-void matmul_v0_int8(const int8_t *A, const int8_t *B, int *C, int M, int N, int K) {
+void matmul_v0_int8(const int8_t *A_ptr, const int8_t *B_ptr, int *C_ptr, int M, int N, int K) {
   const int BLOCK_M = 256, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 4, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
@@ -195,5 +195,5 @@ void matmul_v0_int8(const int8_t *A, const int8_t *B, int *C, int M, int N, int 
   const int grid_size = cdiv(M, BLOCK_M) * cdiv(N, BLOCK_N);
   const int smem_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(int8_t) * NUM_STAGES;
 
-  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A, B, C, M, N, K);
+  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A_ptr, B_ptr, C_ptr, M, N, K);
 }

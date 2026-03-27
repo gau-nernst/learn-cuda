@@ -34,6 +34,7 @@ Note:
 
 TODO:
 - setmaxnreg
+- persistent kernel w/ ping-pong
 
 Learnings
 - TMA / `cp.async.bulk.tensor`

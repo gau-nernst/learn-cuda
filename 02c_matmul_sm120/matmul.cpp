@@ -14,10 +14,12 @@ typedef void MatmulINT8Fn(const int8_t *A, const int8_t *B, int *C, int M, int N
 MatmulBF16Fn matmul_v0_bf16;
 MatmulBF16Fn matmul_v1_bf16;
 MatmulBF16Fn matmul_v2_bf16;
+MatmulBF16Fn matmul_v3_bf16;
 
 MatmulINT8Fn matmul_v0_int8;
 MatmulINT8Fn matmul_v1_int8;
 MatmulINT8Fn matmul_v2_int8;
+MatmulINT8Fn matmul_v3_int8;
 
 template <MatmulBF16Fn matmul_bf16_fn, MatmulINT8Fn matmul_int8_fn>
 at::Tensor matmul_pt(const at::Tensor& A, const at::Tensor& B) {
@@ -55,4 +57,5 @@ TORCH_LIBRARY(my_module, m) {
   m.def("matmul_v0(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v0_bf16, matmul_v0_int8>);
   m.def("matmul_v1(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v1_bf16, matmul_v1_int8>);
   m.def("matmul_v2(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v2_bf16, matmul_v2_int8>);
+  m.def("matmul_v3(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v3_bf16, matmul_v3_int8>);
 }

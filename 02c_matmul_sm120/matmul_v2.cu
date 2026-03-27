@@ -9,7 +9,7 @@ __global__
 void matmul_v2_kernel(
   const __grid_constant__ CUtensorMap A_tmap,
   const __grid_constant__ CUtensorMap B_tmap,
-  OutType *C,
+  OutType *C_ptr,
   int M, int N, int K
 ) {
   constexpr int WARP_M = BLOCK_M / NUM_WARP_M;
@@ -147,7 +147,7 @@ void matmul_v2_kernel(
     }
 
     // epilogue
-    C += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
+    C_ptr += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
     for (int m = 0; m < WARP_M / MMA_M; m++)
       for (int n = 0; n < WARP_N / MMA_N; n++) {
         const int row = m * MMA_M + (lane_id / 4);
@@ -156,60 +156,21 @@ void matmul_v2_kernel(
         if constexpr (std::is_same_v<InType, nv_bfloat16>) {
           static_assert(std::is_same_v<OutType, nv_bfloat16>);
           float *regs = acc[m][n];
-          reinterpret_cast<nv_bfloat162 *>(C + ((row + 0) * N + col))[0] = __float22bfloat162_rn({regs[0], regs[1]});
-          reinterpret_cast<nv_bfloat162 *>(C + ((row + 8) * N + col))[0] = __float22bfloat162_rn({regs[2], regs[3]});
+          reinterpret_cast<nv_bfloat162 *>(C_ptr + ((row + 0) * N + col))[0] = __float22bfloat162_rn({regs[0], regs[1]});
+          reinterpret_cast<nv_bfloat162 *>(C_ptr + ((row + 8) * N + col))[0] = __float22bfloat162_rn({regs[2], regs[3]});
         }
 
         if constexpr (std::is_same_v<InType, int8_t>) {
           static_assert(std::is_same_v<OutType, int>);
           int *regs = acc[m][n];
-          reinterpret_cast<int2 *>(C + ((row + 0) * N + col))[0] = int2{regs[0], regs[1]};
-          reinterpret_cast<int2 *>(C + ((row + 8) * N + col))[0] = int2{regs[2], regs[3]};
+          reinterpret_cast<int2 *>(C_ptr + ((row + 0) * N + col))[0] = int2{regs[0], regs[1]};
+          reinterpret_cast<int2 *>(C_ptr + ((row + 8) * N + col))[0] = int2{regs[2], regs[3]};
         }
       }
   }
 }
 
-template <typename InType>
-static void init_tensor_map(
-  CUtensorMap *tmap_ptr,
-  const InType *gmem_ptr,
-  uint64_t gmem_height, uint64_t gmem_width,
-  uint32_t smem_height, uint32_t smem_width
-) {
-  constexpr uint32_t rank = 2;
-  uint64_t size[rank]        = {gmem_width, gmem_height};
-  uint64_t stride[rank - 1]  = {gmem_width * sizeof(InType)};  // in bytes
-  uint32_t box_size[rank]    = {smem_width, smem_height};
-  uint32_t elem_stride[rank] = {1, 1};
-
-  const uint32_t smem_stride_B = smem_width * sizeof(InType);
-  CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE;
-  if (smem_stride_B == 32)
-    swizzle = CU_TENSOR_MAP_SWIZZLE_32B;
-  else if (smem_stride_B == 64)
-    swizzle = CU_TENSOR_MAP_SWIZZLE_64B;
-  else if (smem_stride_B == 128)
-    swizzle = CU_TENSOR_MAP_SWIZZLE_128B;
-
-  auto res = cuTensorMapEncodeTiled(
-    tmap_ptr, GetType<InType>::tmap_dtype, rank,
-    (void *)gmem_ptr, size, stride,
-    box_size, elem_stride,
-    CU_TENSOR_MAP_INTERLEAVE_NONE,
-    swizzle,
-    CU_TENSOR_MAP_L2_PROMOTION_NONE,
-    CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
-  );
-  if (res != CUDA_SUCCESS) {
-    const char *error_msg_ptr;
-    if (cuGetErrorString(res, &error_msg_ptr) != CUDA_SUCCESS)
-      error_msg_ptr = "unable to get error string";
-    std::cerr << "cuTensorMapEncodeTiled error: " << error_msg_ptr << std::endl;
-  }
-};
-
-void matmul_v2_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+void matmul_v2_bf16(const nv_bfloat16 *A_ptr, const nv_bfloat16 *B_ptr, nv_bfloat16 *C_ptr, int M, int N, int K) {
   const int BLOCK_M = 256, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 4, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
@@ -222,13 +183,13 @@ void matmul_v2_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, 
                       + NUM_STAGES * 2 * 8;  // tma mbar and mma mbar
 
   CUtensorMap A_tmap, B_tmap;
-  init_tensor_map(&A_tmap, A, M, K, BLOCK_M, BLOCK_K);
-  init_tensor_map(&B_tmap, B, N, K, BLOCK_N, BLOCK_K);
+  init_tensor_map(&A_tmap, A_ptr, M, K, BLOCK_M, BLOCK_K);
+  init_tensor_map(&B_tmap, B_ptr, N, K, BLOCK_N, BLOCK_K);
 
-  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A_tmap, B_tmap, C, M, N, K);
+  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A_tmap, B_tmap, C_ptr, M, N, K);
 }
 
-void matmul_v2_int8(const int8_t *A, const int8_t *B, int *C, int M, int N, int K) {
+void matmul_v2_int8(const int8_t *A_ptr, const int8_t *B_ptr, int *C_ptr, int M, int N, int K) {
   const int BLOCK_M = 256, BLOCK_N = 128, BLOCK_K = 128;
   const int NUM_WARP_M = 4, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
@@ -241,8 +202,8 @@ void matmul_v2_int8(const int8_t *A, const int8_t *B, int *C, int M, int N, int 
                       + NUM_STAGES * 2 * 8;  // tma mbar and mma mbar
 
   CUtensorMap A_tmap, B_tmap;
-  init_tensor_map(&A_tmap, A, M, K, BLOCK_M, BLOCK_K);
-  init_tensor_map(&B_tmap, B, N, K, BLOCK_N, BLOCK_K);
+  init_tensor_map(&A_tmap, A_ptr, M, K, BLOCK_M, BLOCK_K);
+  init_tensor_map(&B_tmap, B_ptr, N, K, BLOCK_N, BLOCK_K);
 
-  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A_tmap, B_tmap, C, M, N, K);
+  launch_kernel(kernel, grid_size, TB_SIZE, smem_size, A_tmap, B_tmap, C_ptr, M, N, K);
 }
