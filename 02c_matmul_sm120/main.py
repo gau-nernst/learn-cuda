@@ -69,6 +69,12 @@ def torch_bench(state: cuda.bench.State) -> None:
     # problem shape
     M, N, K = [int(x) for x in state.get_string("shape").split("_")]
 
+    # duplicate inputs to make sure each measurement is at least 10ms
+    sol = SOL_LOOKUP.get(torch.cuda.get_device_name(), dict(bf16=1e9, int8=1e9))[args.dtype]
+    min_latency_ms = 2 * M * N * K / (sol * 1e12) * 1e3
+    num_inputs = math.ceil(10 / min_latency_ms)
+    state.add_element_count(num_inputs, "num_inputs")
+
     # create inputs and warmup
     stream = to_torch_stream(state.get_stream(), device)
     with torch.cuda.stream(stream):
@@ -76,7 +82,7 @@ def torch_bench(state: cuda.bench.State) -> None:
         for _ in range(5):
             f(A, B)
 
-        inputs_list = [make_inputs(M, N, K, dtype) for _ in range(state.get_int64("num_inputs"))]
+        inputs_list = [make_inputs(M, N, K, dtype) for _ in range(num_inputs)]
 
     def launcher(launch: cuda.bench.Launch) -> None:
         stream = to_torch_stream(launch.get_stream(), device)
@@ -88,56 +94,53 @@ def torch_bench(state: cuda.bench.State) -> None:
 
 
 def main(args: argparse.Namespace):
-    gpu_name = torch.cuda.get_device_name()
-    if gpu_name in SOL_LOOKUP:
-        sol = SOL_LOOKUP[gpu_name][args.dtype]
-    else:
-        sol = 1e9
+    for shape in args.shape:
+        M, N, K = [int(x) for x in shape.split("_")]
+        print(f"{M=}, {N=}, {K=}")
+        A, B = make_inputs(M, N, K, args.dtype)
 
-    M, N, K = args.shape
-    print(f"{M=}, {N=}, {K=}")
-    A, B = make_inputs(M, N, K, args.dtype)
+        if args.profile is not None:
+            fn = get_kernel(args.profile, args.dtype)
+            with torch.cuda.nvtx.range("kernel"):
+                fn(A, B)
+            torch.cuda.synchronize()
+            return
 
-    if args.profile is not None:
-        fn = get_kernel(args.profile, args.dtype)
-        fn(A, B)
-        torch.cuda.synchronize()
-        return
+        # correctness check
+        if args.dtype == "bf16":
+            # reference in FP32 to avoid things like split-K
+            output_ref = torch.matmul(A.float(), B.float()).bfloat16()
+        else:
+            output_ref = torch._int_mm(A, B)
 
-    # correctness check
-    if args.dtype == "bf16":
-        # reference in FP32 to avoid things like split-K
-        output_ref = torch.matmul(A.float(), B.float()).bfloat16()
-    else:
-        output_ref = torch._int_mm(A, B)
-
-    for i in range(3):
-        fn = getattr(module, f"matmul_v{i}_{args.dtype}")
-        output = fn(A, B)
-        torch.testing.assert_close(output, output_ref)
+        for i in range(3):
+            fn = getattr(module, f"matmul_v{i}")
+            output = fn(A, B)
+            torch.testing.assert_close(output, output_ref)
 
     # benchmark with nvbench
     kernels_list = []
     kernels_list += ["cublas", "inductor"]
-    kernels_list += [f"matmul_v{i}_{args.dtype}" for i in range(3)]
-
-    # duplicate inputs to make sure each measurement is at least 10ms
-    min_latency_ms = 2 * M * N * K / (sol * 1e12) * 1e3
-    num_inputs = math.ceil(10 / min_latency_ms)
+    kernels_list += [f"matmul_v{i}" for i in range(3)]
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("kernel", kernels_list)
     bench.add_string_axis("dtype", [args.dtype])
-    bench.add_string_axis("shape", [f"{M}_{N}_{K}"])
-    bench.add_int64_axis("num_inputs", [num_inputs])
+    bench.add_string_axis("shape", args.shape)
 
     result_path = "/tmp/result.csv"
     cuda.bench.run_all_benchmarks(["--csv", result_path])
 
     df = pd.read_csv(result_path)
-    df["GPU Time (sec)"] /= num_inputs
+    df["GPU Time (sec)"] /= df["num_inputs"]
     df["latency (us)"] = df["GPU Time (sec)"] * 1e6
-    df["TFLOPS"] = 2 * M * N * K / df["GPU Time (sec)"] * 1e-12
+
+    def parse_tflops(shape: str, time: float):
+        M, N, K = [int(x) for x in shape.split("_")]
+        return 2 * M * N * K / time * 1e-12
+
+    sol = SOL_LOOKUP.get(torch.cuda.get_device_name(), dict(bf16=1e9, int8=1e9))[args.dtype]
+    df["TFLOPS"] = [parse_tflops(shape, time) for shape, time in zip(df["shape"], df["GPU Time (sec)"])]
     df["% SOL"] = df["TFLOPS"] / sol
 
     # apply formatting
@@ -146,14 +149,16 @@ def main(args: argparse.Namespace):
     df["% SOL"] = df["% SOL"].map("{:.2%}".format)
     df["Noise"] = df["Noise"].map("{:.2%}".format)
 
-    print()
-    print(df[["kernel", "latency (us)", "Noise", "TFLOPS", "% SOL"]].to_markdown(index=False))
+    for shape, sub_df in df.groupby("shape"):
+        print()
+        print(shape)
+        print(sub_df[["kernel", "latency (us)", "Noise", "TFLOPS", "% SOL"]].to_markdown(index=False))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile")
-    parser.add_argument("--shape", type=int, nargs="+", default=[4096, 4096, 4096])
+    parser.add_argument("--shape", nargs="+", default=["4096_4096_4096"])
     parser.add_argument("--dtype", default="bf16")
     args = parser.parse_args()
 

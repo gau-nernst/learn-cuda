@@ -80,14 +80,10 @@ void matmul_v2_kernel(
         const int mbar_addr = tma_mbar_addr + stage_id * 8;
         const int off_k = iter_k * BLOCK_K;
 
-        // wait MMA
-        mbarrier_wait(mma_mbar_addr + stage_id * 8, phase);
-
-        tma_2d_g2s(A_smem + stage_id * AB_size, &A_tmap, off_k, off_m, mbar_addr);
+        mbarrier_wait(mma_mbar_addr + stage_id * 8, phase);  // wait MMA
+        tma_2d_g2s(A_smem + stage_id * AB_size, &A_tmap, off_k, off_m, mbar_addr);  // issue TMA
         tma_2d_g2s(B_smem + stage_id * AB_size, &B_tmap, off_k, off_n, mbar_addr);
-
-        // signal TMA done
-        mbarrier_arrive_expect_tx(mbar_addr, AB_size);
+        mbarrier_arrive_expect_tx(mbar_addr, AB_size);  // signal TMA done
 
         stage_id = (stage_id + 1) % NUM_STAGES;
         if (stage_id == 0)
@@ -103,13 +99,13 @@ void matmul_v2_kernel(
     using AccType = typename GetType<InType>::acc;
 
     // set up rmem
-    int A_rmem[WARP_M / MMA_M][BLOCK_K / MMA_K][4];
-    int B_rmem[WARP_N / MMA_N][BLOCK_K / MMA_K][2];
+    int A_rmem[BLOCK_K / MMA_K][WARP_M / MMA_M][4];
+    int B_rmem[BLOCK_K / MMA_K][WARP_N / MMA_N][2];
     AccType acc[WARP_M / MMA_M][WARP_N / MMA_N][4] = {};
 
     // pre-compute address and swizzling used for ldmatrix
     const int A_smem_thread = A_smem + swizzle<BLOCK_K * sizeof(InType)>(warp_id_m * WARP_M + (lane_id % 16), lane_id / 16);
-    const int B_smem_thread = B_smem + swizzle<BLOCK_K * sizeof(InType)>(warp_id_n * WARP_N + (lane_id % 8), lane_id / 8);
+    const int B_smem_thread = B_smem + swizzle<BLOCK_K * sizeof(InType)>(warp_id_n * WARP_N + (lane_id / 16) * 8 + (lane_id % 8), (lane_id / 8) % 2);
 
     int stage_id = 0;
     int phase = 0;
@@ -120,30 +116,30 @@ void matmul_v2_kernel(
         mbarrier_wait(tma_mbar_addr + stage_id * 8, phase);
       asm volatile("bar.sync %0, %1;" :: "n"(1), "n"(NUM_WARP_M * NUM_WARP_N * WARP_SIZE));
 
-      // A smem->rmem
-      for (int m = 0; m < WARP_M / MMA_M; m++)
-        for (int k = 0; k < BLOCK_K / MMA_K; k++) {
-          int addr = A_smem_thread + stage_id * AB_size;
-          addr += m * MMA_M * BLOCK_K * sizeof(InType);
-          ldmatrix_x4(A_rmem[m][k], addr ^ (k * 32));
+      for (int k = 0; k < BLOCK_K / MMA_K; k++) {
+        // A smem->rmem
+        int A_addr = (A_smem_thread + stage_id * AB_size) ^ (k * 32);
+        for (int m = 0; m < WARP_M / MMA_M; m++) {
+          ldmatrix_x4(A_rmem[k][m], A_addr);
+          A_addr += MMA_M * BLOCK_K * sizeof(InType);
         }
 
-      // B smem->rmem
-      for (int n = 0; n < WARP_N / MMA_N; n++)
-        for (int k = 0; k < BLOCK_K / MMA_K; k += 2) {
-          int addr = B_smem_thread + stage_id * AB_size;
-          addr += n * MMA_N * BLOCK_K * sizeof(InType);
-          ldmatrix_x4(B_rmem[n][k], addr ^ (k * 32));
+        // B smem->rmem
+        int B_addr = (B_smem_thread + stage_id * AB_size) ^ (k * 32);
+        for (int n = 0; n < WARP_N / MMA_N; n += 2) {
+          ldmatrix_x4(B_rmem[k][n], B_addr);
+          B_addr += 2 * MMA_N * BLOCK_K * sizeof(InType);
         }
 
-      // signal finished using smem buffer
-      mbarrier_arrive(mma_mbar_addr + stage_id * 8);
+        // signal finished using smem buffer
+        if (k == BLOCK_K / MMA_K - 1)
+          mbarrier_arrive(mma_mbar_addr + stage_id * 8);
 
-      // MMA
-      for (int m = 0; m < WARP_M / MMA_M; m++)
-        for (int n = 0; n < WARP_N / MMA_N; n++)
-          for (int k = 0; k < BLOCK_K / MMA_K; k++)
-            mma<InType>(A_rmem[m][k], B_rmem[n][k], acc[m][n]);
+        // MMA
+        for (int m = 0; m < WARP_M / MMA_M; m++)
+          for (int n = 0; n < WARP_N / MMA_N; n++)
+            mma<InType>(A_rmem[k][m], B_rmem[k][n], acc[m][n]);
+      }
 
       stage_id = (stage_id + 1) % NUM_STAGES;
       if (stage_id == 0)
@@ -160,15 +156,15 @@ void matmul_v2_kernel(
         if constexpr (std::is_same_v<InType, nv_bfloat16>) {
           static_assert(std::is_same_v<OutType, nv_bfloat16>);
           float *regs = acc[m][n];
-          reinterpret_cast<nv_bfloat162 *>(C + (row + 0) * N + col)[0] = __float22bfloat162_rn({regs[0], regs[1]});
-          reinterpret_cast<nv_bfloat162 *>(C + (row + 8) * N + col)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+          reinterpret_cast<nv_bfloat162 *>(C + ((row + 0) * N + col))[0] = __float22bfloat162_rn({regs[0], regs[1]});
+          reinterpret_cast<nv_bfloat162 *>(C + ((row + 8) * N + col))[0] = __float22bfloat162_rn({regs[2], regs[3]});
         }
 
         if constexpr (std::is_same_v<InType, int8_t>) {
           static_assert(std::is_same_v<OutType, int>);
           int *regs = acc[m][n];
-          reinterpret_cast<int2 *>(C + (row + 0) * N + col)[0] = int2{regs[0], regs[1]};
-          reinterpret_cast<int2 *>(C + (row + 8) * N + col)[0] = int2{regs[2], regs[3]};
+          reinterpret_cast<int2 *>(C + ((row + 0) * N + col))[0] = int2{regs[0], regs[1]};
+          reinterpret_cast<int2 *>(C + ((row + 8) * N + col))[0] = int2{regs[2], regs[3]};
         }
       }
   }
@@ -214,9 +210,8 @@ static void init_tensor_map(
 };
 
 void matmul_v2_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
-  // tuned for 5090
-  const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
-  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
+  const int BLOCK_M = 256, BLOCK_N = 128, BLOCK_K = 64;
+  const int NUM_WARP_M = 4, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
 
   auto kernel = matmul_v2_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, nv_bfloat16, nv_bfloat16>;
@@ -234,11 +229,9 @@ void matmul_v2_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, 
 }
 
 void matmul_v2_int8(const int8_t *A, const int8_t *B, int *C, int M, int N, int K) {
-  // when BLOCK_M=128, BLOCK_N=64, BLOCK_K=128, NUM_STAGES=2, there are ~224 / 16777216 wrong values
-  // not exactly sure why.
-  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 128;
-  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
-  const int NUM_STAGES = 3;
+  const int BLOCK_M = 256, BLOCK_N = 128, BLOCK_K = 128;
+  const int NUM_WARP_M = 4, NUM_WARP_N = 2;
+  const int NUM_STAGES = 2;
 
   auto kernel = matmul_v2_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, int8_t, int>;
 

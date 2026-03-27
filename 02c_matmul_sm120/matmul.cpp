@@ -19,45 +19,40 @@ MatmulINT8Fn matmul_v0_int8;
 MatmulINT8Fn matmul_v1_int8;
 MatmulINT8Fn matmul_v2_int8;
 
-template <MatmulBF16Fn matmul_fn>
-at::Tensor matmul_bf16_pt(const at::Tensor& A, const at::Tensor& B) {
+template <MatmulBF16Fn matmul_bf16_fn, MatmulINT8Fn matmul_int8_fn>
+at::Tensor matmul_pt(const at::Tensor& A, const at::Tensor& B) {
   CHECK_INPUT(A);
   CHECK_INPUT(B.t());
   TORCH_CHECK(A.size(1) == B.size(0), "dim1 of input2 should be equal to dim2 of input1");
   int M = A.size(0);
   int K = A.size(1);
   int N = B.size(1);
-  at::Tensor C = at::empty({M, N}, A.options());
-  // at::Tensor C = at::zeros({M, N}, A.options());  // for correctness check, use this
-  matmul_fn(
-    reinterpret_cast<nv_bfloat16 *>(A.data_ptr<at::BFloat16>()),
-    reinterpret_cast<nv_bfloat16 *>(B.data_ptr<at::BFloat16>()),
-    reinterpret_cast<nv_bfloat16 *>(C.data_ptr<at::BFloat16>()),
-    M, N, K);
-  return C;
-}
 
-template <MatmulINT8Fn matmul_fn>
-at::Tensor matmul_int8_pt(const at::Tensor& A, const at::Tensor& B) {
-  CHECK_INPUT(A);
-  CHECK_INPUT(B.t());
-  TORCH_CHECK(A.size(1) == B.size(0), "dim1 of input2 should be equal to dim2 of input1");
-  int M = A.size(0);
-  int K = A.size(1);
-  int N = B.size(1);
-  auto options = A.options().dtype(at::kInt);
-  // at::Tensor C = at::empty({M, N}, options);
-  at::Tensor C = at::zeros({M, N}, options);  // for correctness check, use this
-  matmul_fn(A.data_ptr<int8_t>(), B.data_ptr<int8_t>(), C.data_ptr<int>(), M, N, K);
-  return C;
+  if (A.dtype() == at::kBFloat16) {
+    auto options = A.options();
+    at::Tensor C = at::empty({M, N}, options);
+    // at::Tensor C = at::zeros({M, N}, options);  // for correctness check, use this
+    matmul_bf16_fn(
+      reinterpret_cast<nv_bfloat16 *>(A.data_ptr<at::BFloat16>()),
+      reinterpret_cast<nv_bfloat16 *>(B.data_ptr<at::BFloat16>()),
+      reinterpret_cast<nv_bfloat16 *>(C.data_ptr<at::BFloat16>()),
+      M, N, K);
+    return C;
+  }
+  else if (A.dtype() == at::kChar) {
+    auto options = A.options().dtype(at::kInt);
+    at::Tensor C = at::empty({M, N}, options);
+    // at::Tensor C = at::zeros({M, N}, options);  // for correctness check, use this
+    matmul_int8_fn(A.data_ptr<int8_t>(), B.data_ptr<int8_t>(), C.data_ptr<int>(), M, N, K);
+    return C;
+  }
+  else {
+    TORCH_CHECK(false);
+  }
 }
 
 TORCH_LIBRARY(my_module, m) {
-  m.def("matmul_v0_bf16(Tensor A, Tensor B) -> Tensor", &matmul_bf16_pt<matmul_v0_bf16>);
-  m.def("matmul_v1_bf16(Tensor A, Tensor B) -> Tensor", &matmul_bf16_pt<matmul_v1_bf16>);
-  m.def("matmul_v2_bf16(Tensor A, Tensor B) -> Tensor", &matmul_bf16_pt<matmul_v2_bf16>);
-
-  m.def("matmul_v0_int8(Tensor A, Tensor B) -> Tensor", &matmul_int8_pt<matmul_v0_int8>);
-  m.def("matmul_v1_int8(Tensor A, Tensor B) -> Tensor", &matmul_int8_pt<matmul_v1_int8>);
-  m.def("matmul_v2_int8(Tensor A, Tensor B) -> Tensor", &matmul_int8_pt<matmul_v2_int8>);
+  m.def("matmul_v0(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v0_bf16, matmul_v0_int8>);
+  m.def("matmul_v1(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v1_bf16, matmul_v1_int8>);
+  m.def("matmul_v2(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v2_bf16, matmul_v2_int8>);
 }

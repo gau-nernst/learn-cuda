@@ -71,13 +71,13 @@ void matmul_v1_kernel(
   using AccType = typename GetType<InType>::acc;
 
   // set up rmem
-  int A_rmem[WARP_M / MMA_M][BLOCK_K / MMA_K][4];
-  int B_rmem[WARP_N / MMA_N][BLOCK_K / MMA_K][2];
+  int A_rmem[BLOCK_K / MMA_K][WARP_M / MMA_M][4];
+  int B_rmem[BLOCK_K / MMA_K][WARP_N / MMA_N][2];
   AccType acc[WARP_M / MMA_M][WARP_N / MMA_N][4] = {};
 
   // pre-compute address and swizzling used for ldmatrix
   const int A_smem_thread = A_smem + swizzle<BLOCK_K * sizeof(InType)>(warp_id_m * WARP_M + (lane_id % 16), lane_id / 16);
-  const int B_smem_thread = B_smem + swizzle<BLOCK_K * sizeof(InType)>(warp_id_n * WARP_N + (lane_id % 8), lane_id / 8);
+  const int B_smem_thread = B_smem + swizzle<BLOCK_K * sizeof(InType)>(warp_id_n * WARP_N + (lane_id / 16) * 8 + (lane_id % 8), (lane_id / 8) % 2);
 
   auto load_AB = [&](int iter_k, int stage_id) {
     if (warp_id == 0 && elect_sync()) {
@@ -90,27 +90,26 @@ void matmul_v1_kernel(
   };
 
   auto compute = [&](int stage_id) {
-    // A smem->rmem
-    for (int m = 0; m < WARP_M / MMA_M; m++)
-      for (int k = 0; k < BLOCK_K / MMA_K; k++) {
-        int addr = A_smem_thread + stage_id * AB_size;
-        addr += m * MMA_M * BLOCK_K * sizeof(InType);
-        ldmatrix_x4(A_rmem[m][k], addr ^ (k * 32));
+    for (int k = 0; k < BLOCK_K / MMA_K; k++) {
+      // A smem->rmem
+      int A_addr = (A_smem_thread + stage_id * AB_size) ^ (k * 32);
+      for (int m = 0; m < WARP_M / MMA_M; m++) {
+        ldmatrix_x4(A_rmem[k][m], A_addr);
+        A_addr += MMA_M * BLOCK_K * sizeof(InType);
       }
 
-    // B smem->rmem
-    for (int n = 0; n < WARP_N / MMA_N; n++)
-      for (int k = 0; k < BLOCK_K / MMA_K; k += 2) {
-        int addr = B_smem_thread + stage_id * AB_size;
-        addr += n * MMA_N * BLOCK_K * sizeof(InType);
-        ldmatrix_x4(B_rmem[n][k], addr ^ (k * 32));
+      // B smem->rmem
+      int B_addr = (B_smem_thread + stage_id * AB_size) ^ (k * 32);
+      for (int n = 0; n < WARP_N / MMA_N; n += 2) {
+        ldmatrix_x4(B_rmem[k][n], B_addr);
+        B_addr += 2 * MMA_N * BLOCK_K * sizeof(InType);
       }
 
-    // MMA
-    for (int m = 0; m < WARP_M / MMA_M; m++)
-      for (int n = 0; n < WARP_N / MMA_N; n++)
-        for (int k = 0; k < BLOCK_K / MMA_K; k++)
-          mma<InType>(A_rmem[m][k], B_rmem[n][k], acc[m][n]);
+      // MMA
+      for (int m = 0; m < WARP_M / MMA_M; m++)
+        for (int n = 0; n < WARP_N / MMA_N; n++)
+          mma<InType>(A_rmem[k][m], B_rmem[k][n], acc[m][n]);
+    }
   };
 
   const int num_k_iters = cdiv(K, BLOCK_K);
@@ -123,20 +122,16 @@ void matmul_v1_kernel(
   int phase = 0;
 
   for (int iter_k = 0; iter_k < num_k_iters - (NUM_STAGES - 1); iter_k++) {
-    // wait for previous MMA
-    __syncthreads();
-
-    // issue TMA
+    // TMA next stage
+    __syncthreads();  // wait for previous MMA
     const int prefetch_iter_k = iter_k + NUM_STAGES - 1;
-    load_AB(prefetch_iter_k, prefetch_iter_k % NUM_STAGES);
+    load_AB(prefetch_iter_k, prefetch_iter_k % NUM_STAGES);  // issue TMA
 
-    // wait for TMA
+    // MMA
     if (warp_id == 0)
-      mbarrier_wait(mbar_addr + stage * 8, phase);
+      mbarrier_wait(mbar_addr + stage * 8, phase);  // wait TMA
     __syncthreads();
-
-    // issue MMA
-    compute(stage);
+    compute(stage);  // ldmatrix + mma
 
     // update stage and phase
     stage = (stage + 1) % NUM_STAGES;
@@ -148,8 +143,8 @@ void matmul_v1_kernel(
     if (warp_id == 0)
       mbarrier_wait(mbar_addr + stage * 8, phase);
     __syncthreads();
-
     compute(stage);
+
     stage = (stage + 1) % NUM_STAGES;
     if (stage == 0)
       phase ^= 1;
@@ -164,15 +159,15 @@ void matmul_v1_kernel(
       if constexpr (std::is_same_v<InType, nv_bfloat16>) {
         static_assert(std::is_same_v<OutType, nv_bfloat16>);
         float *regs = acc[m][n];
-        reinterpret_cast<nv_bfloat162 *>(C + (row + 0) * N + col)[0] = __float22bfloat162_rn({regs[0], regs[1]});
-        reinterpret_cast<nv_bfloat162 *>(C + (row + 8) * N + col)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+        reinterpret_cast<nv_bfloat162 *>(C + ((row + 0) * N + col))[0] = __float22bfloat162_rn({regs[0], regs[1]});
+        reinterpret_cast<nv_bfloat162 *>(C + ((row + 8) * N + col))[0] = __float22bfloat162_rn({regs[2], regs[3]});
       }
 
       if constexpr (std::is_same_v<InType, int8_t>) {
         static_assert(std::is_same_v<OutType, int>);
         int *regs = acc[m][n];
-        reinterpret_cast<int2 *>(C + (row + 0) * N + col)[0] = int2{regs[0], regs[1]};
-        reinterpret_cast<int2 *>(C + (row + 8) * N + col)[0] = int2{regs[2], regs[3]};
+        reinterpret_cast<int2 *>(C + ((row + 0) * N + col))[0] = int2{regs[0], regs[1]};
+        reinterpret_cast<int2 *>(C + ((row + 8) * N + col))[0] = int2{regs[2], regs[3]};
       }
     }
 }
@@ -217,15 +212,9 @@ static void init_tensor_map(
 };
 
 void matmul_v1_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
-  // tuned for 5090
-  const int BLOCK_M = 128, BLOCK_N = 64, BLOCK_K = 64;
-  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
+  const int BLOCK_M = 256, BLOCK_N = 128, BLOCK_K = 64;
+  const int NUM_WARP_M = 4, NUM_WARP_N = 2;
   const int NUM_STAGES = 2;
-
-  // tuned for PRO 6000
-  // const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 32;
-  // const int NUM_WARP_M = 2, NUM_WARP_N = 2;
-  // const int NUM_STAGES = 3;
 
   auto kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, nv_bfloat16, nv_bfloat16>;
 
@@ -242,9 +231,9 @@ void matmul_v1_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, 
 }
 
 void matmul_v1_int8(const int8_t *A, const int8_t *B, int *C, int M, int N, int K) {
-  const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
-  const int NUM_WARP_M = 2, NUM_WARP_N = 2;
-  const int NUM_STAGES = 3;
+  const int BLOCK_M = 256, BLOCK_N = 128, BLOCK_K = 128;
+  const int NUM_WARP_M = 4, NUM_WARP_N = 2;
+  const int NUM_STAGES = 2;
 
   auto kernel = matmul_v1_kernel<BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARP_M, NUM_WARP_N, NUM_STAGES, int8_t, int>;
 
