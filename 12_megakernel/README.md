@@ -43,15 +43,15 @@ Triton v1 fused MLP    | 30.34     | 0.73   | 622.79
 Triton v1 2-kernel MLP | 54.06     | 0.52   | 349.57
 Triton v2              | 21.31     | 0.89   | 886.75
 
-5090 (400W)
+5090 (400W). PyTorch 2.11 (CUDA 13.0)
 
 Kernel                 | Time (us) | TFLOPS | Memory BW (GB/s)
 -----------------------|-----------|--------|-----------------
-Eager                  | 28.82     | 0.65   |  655.69
-torch.compile          | 20.86     | 0.90   |  905.68
-Triton v1 fused MLP    | 22.56     | 0.91   |  837.64
-Triton v1 2-kernel MLP | 24.76     | 0.84   |  763.09
-Triton v2              | 18.28     | 1.03   | 1033.66
+Eager                  | 22.28     | 0.85   |  848.01
+torch.compile          | 22.51     | 0.84   |  839.47
+Triton v1 fused MLP    | 17.73     | 1.06   | 1065.63
+Triton v1 2-kernel MLP | 21.70     | 0.87   |  870.94
+Triton v2              | 15.87     | 1.19   | 1190.96
 
 **M=256, N=3072, K=1024**
 
@@ -64,14 +64,14 @@ torch.compile          | 72.73     |  66.43 | 331.61
 Triton v1 fused MLP    | 32.64     | 148.05 | 739.04
 Triton v1 2-kernel MLP | 54.57     |  88.54 | 441.97
 
-5090 (400W)
+5090 (400W). PyTorch 2.11 (CUDA 13.0)
 
 Kernel                 | Time (us) | TFLOPS | Memory BW (GB/s)
 -----------------------|-----------|--------|-----------------
-Eager                  | 57.39     |  84.20 | 420.28
-torch.compile          | 48.48     |  99.67 | 497.51
-Triton v1 fused MLP    | 55.71     |  86.72 | 432.91
-Triton v1 2-kernel MLP | 57.53     |  83.99 | 419.26
+Eager                  | 48.57     |  99.48 | 496.55
+torch.compile          | 47.05     | 102.69 | 512.61
+Triton v1 fused MLP    | 48.89     |  98.83 | 493.36
+Triton v1 2-kernel MLP | 46.24     |  90.68 | 521.63
 
 ## Decode Attention Benchmark results
 

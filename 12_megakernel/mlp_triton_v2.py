@@ -17,10 +17,10 @@ def mlp_triton_v2_kernel(
     flag_ptr,
     hidden_dim: tl.constexpr,
     mlp_dim: tl.constexpr,
-    # currently using the same hparams for the 1st and 2nd matmul,
-    # which is probably not optimal
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
+    BLOCK_N1: tl.constexpr,
+    BLOCK_K1: tl.constexpr,
+    BLOCK_N2: tl.constexpr,
+    BLOCK_K2: tl.constexpr,
 ):
     raw_pid = tl.program_id(0)
     num_pids = tl.num_programs(0)
@@ -39,28 +39,28 @@ def mlp_triton_v2_kernel(
     w1_ptr = w13_ptr
     w3_ptr = w13_ptr + mlp_dim * hidden_dim
 
-    for pid_n in range(raw_pid, mlp_dim // BLOCK_N, num_pids):
-        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        offs_k = tl.arange(0, BLOCK_K)
+    for pid_n in range(raw_pid, mlp_dim // BLOCK_N1, num_pids):
+        offs_n = pid_n * BLOCK_N1 + tl.arange(0, BLOCK_N1)
+        offs_k = tl.arange(0, BLOCK_K1)
 
         tmp_ptrs = tmp_ptr + offs_k
         w1_ptrs = w1_ptr + (offs_n[:, None] * hidden_dim + offs_k[None, :])
         w3_ptrs = w3_ptr + (offs_n[:, None] * hidden_dim + offs_k[None, :])
 
-        acc1 = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
-        acc3 = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
+        acc1 = tl.zeros((BLOCK_N1, BLOCK_K1), dtype=tl.float32)
+        acc3 = tl.zeros((BLOCK_N1, BLOCK_K1), dtype=tl.float32)
 
-        for _ in range(hidden_dim // BLOCK_K):
+        for _ in range(hidden_dim // BLOCK_K1):
             x_normed = tl.load(tmp_ptrs)
-            w1 = tl.load(w1_ptrs)  # [BLOCK_N, BLOCK_K]
-            w3 = tl.load(w3_ptrs)
+            w1 = tl.load(w1_ptrs, eviction_policy="evict_first")  # [BLOCK_N, BLOCK_K]
+            w3 = tl.load(w3_ptrs, eviction_policy="evict_first")
 
             acc1 += x_normed * w1
             acc3 += x_normed * w3
 
-            tmp_ptrs += BLOCK_K
-            w1_ptrs += BLOCK_K
-            w3_ptrs += BLOCK_K
+            tmp_ptrs += BLOCK_K1
+            w1_ptrs += BLOCK_K1
+            w3_ptrs += BLOCK_K1
 
         acc1 = tl.sum(acc1, axis=1)  # [BLOCK_N]
         acc3 = tl.sum(acc3, axis=1)
@@ -70,26 +70,26 @@ def mlp_triton_v2_kernel(
     _grid_sync(flag_ptr + 1, num_pids)
 
     # persistent kernel
-    for pid_n in range(raw_pid, hidden_dim // BLOCK_N, num_pids):
-        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        offs_k = tl.arange(0, BLOCK_K)
+    for pid_n in range(raw_pid, hidden_dim // BLOCK_N2, num_pids):
+        offs_n = pid_n * BLOCK_N2 + tl.arange(0, BLOCK_N2)
+        offs_k = tl.arange(0, BLOCK_K2)
 
         tmp_ptrs = tmp_ptr + (hidden_dim + offs_k)
         w2_ptrs = w2_ptr + (offs_n[:, None] * mlp_dim + offs_k[None, :])
 
-        acc = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
+        acc = tl.zeros((BLOCK_N2, BLOCK_K2), dtype=tl.float32)
 
-        for _ in range(mlp_dim // BLOCK_K):
+        for _ in range(mlp_dim // BLOCK_K2):
             TMP = tl.load(tmp_ptrs)  # [BLOCK_K]
-            W2 = tl.load(w2_ptrs)  # [BLOCK_N, BLOCK_K]
+            W2 = tl.load(w2_ptrs, eviction_policy="evict_first")  # [BLOCK_N, BLOCK_K]
             acc += TMP * W2
 
-            tmp_ptrs += BLOCK_K
-            w2_ptrs += BLOCK_K
+            tmp_ptrs += BLOCK_K2
+            w2_ptrs += BLOCK_K2
 
         acc = tl.sum(acc, axis=1)  # [BLOCK_N]
 
-        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_n = pid_n * BLOCK_N2 + tl.arange(0, BLOCK_N2)
         acc += tl.load(x_ptr + offs_n)
         tl.store(x_ptr + offs_n, acc)
 
@@ -118,8 +118,10 @@ def mlp_triton_v2(x: Tensor, norm: Tensor, w13: Tensor, w2: Tensor):
 
     # NOTE: may want to limit num SMs used
     num_sms = torch.cuda.get_device_properties(x.device).multi_processor_count
-    BLOCK_N = 4
-    BLOCK_K = 512
+    BLOCK_N1 = 4
+    BLOCK_K1 = 512
+    BLOCK_N2 = 8
+    BLOCK_K2 = 512
 
     mlp_triton_v2_kernel[(num_sms,)](
         x,
@@ -130,7 +132,10 @@ def mlp_triton_v2(x: Tensor, norm: Tensor, w13: Tensor, w2: Tensor):
         _FLAG,
         hidden_dim=hidden_dim,
         mlp_dim=mlp_dim,
-        BLOCK_N=BLOCK_N,
-        BLOCK_K=BLOCK_K,
+        BLOCK_N1=BLOCK_N1,
+        BLOCK_K1=BLOCK_K1,
+        BLOCK_N2=BLOCK_N2,
+        BLOCK_K2=BLOCK_K2,
+        num_warps=8,
     )
     return x
