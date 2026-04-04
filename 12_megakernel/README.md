@@ -89,13 +89,13 @@ Eager         | 401.03    |  32.71
 torch.compile | 162.57    |  80.70
 Triton v1     |  25.51    | 514.31
 
-5090 (400W)
+5090 (400W). PyTorch 2.11 (CUDA 13.0)
 
 Kernel        | Time (us) | Memory BW (GB/s)
 --------------|-----------|-----------------
-Eager         | 163.26    |  80.35
-torch.compile |  69.61    | 188.45
-Triton v1     |  22.70    | 577.97
+Eager         | 157.29    |  83.40
+torch.compile |  69.37    | 189.10
+Triton v1     |  18.60    | 705.18
 
 **kv_size=4096, dim=1024, num_heads=16, num_kv_heads=8**
 
@@ -107,10 +107,10 @@ Eager         | 402.88    |  72.90
 torch.compile | 178.22    | 164.81
 Triton v1     |  93.61    | 313.76
 
-5090 (400W)
+5090 (400W). PyTorch 2.11 (CUDA 13.0)
 
 Kernel        | Time (us) | Memory BW (GB/s)
 --------------|-----------|-----------------
-Eager         | 205.04    | 143.25
-torch.compile |  75.87    | 387.15
-Triton v1     |  93.34    | 314.68
+Eager         | 171.12    | 171.64
+torch.compile |  68.32    | 429.90
+Triton v1     |  59.43    | 494.24

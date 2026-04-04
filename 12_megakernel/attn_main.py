@@ -121,7 +121,7 @@ def benchmark(args: argparse.Namespace):
     SOL_COMPUTE, SOL_MEMORY = get_sol()
     min_memory_latency_ms = num_gb / SOL_MEMORY * 1e3
     min_latency_ms = min_memory_latency_ms
-    num_inputs = min(math.ceil(10 / min_latency_ms), 1000)
+    num_inputs = min(math.ceil(10 / min_latency_ms), 100)
 
     kernels_list = []
     kernels_list += ["eager", "inductor"]
