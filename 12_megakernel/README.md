@@ -14,13 +14,13 @@ To try interactive chat (only Qwen3-0.6B is supported at the moment)
 python chat.py
 ```
 
-The measurement is done with `chat.py`, which is not rigorous by any means. Reporting decode speed at various number of input tokens. Using Qwen3-0.6B.
+The measurement is done with `chat.py`, which is not rigorous by any means. Reporting decode speed at various number of input tokens. Using Qwen3-0.6B. HF eager and Ours use PyTorch 2.11 (CUDA 13.0), vLLM xx uses PyTorch 2.10.
 
-Implementation | 15 in toks | 1218 in tokens
+Implementation | 15 in toks | 1144 in tokens
 ---------------|------------|----------------
-HF eager       | 130 tok/s  | 130 tok/s
-vLLM           | 620 tok/s  | 615 tok/s
-Ours           | 820 tok/s  | 613 tok/s
+HF eager       | 135 tok/s  | 132 tok/s
+vLLM 0.19      | 629 tok/s  | 610 tok/s
+Ours           | 859 tok/s  | 664 tok/s
 
 ## MLP Benchmark results
 
