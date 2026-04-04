@@ -107,7 +107,10 @@ def main(args: argparse.Namespace):
             messages,
             add_generation_prompt=True,
             return_attention_mask=False,
-        )["input_ids"]
+        )
+        # tokenizer changes behavior after certain version
+        if not isinstance(token_ids, list):
+            token_ids = token_ids["input_ids"]
 
         stream = DecodeStream(skip_special_tokens=True)
         outputs = []
