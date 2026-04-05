@@ -11,7 +11,7 @@ Modal B200, BF16 matmul, A/B K-major, M=N=K=4096. PyTorch 2.10, CUDA 13.0.
 Kernel name                          | TFLOPS
 -------------------------------------|--------
 CuBLAS                               | 1358.69
-v0 (sm80)                            |  383.26
+v0 (sm80)                            |  409.06
 v1a (basic tcgen05 + 2D 16B TMA)     |  255.73
 v1b (3D 16B TMA)                     |  254.37
 v2a (2D 128B TMA)                    |  699.39

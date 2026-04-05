@@ -2,17 +2,13 @@
 
 #include <cuda_bf16.h>
 
-// NOTE: stride in bytes
+// STRIDE in bytes, col in the units of 16-byte
 template <int STRIDE>
 __device__ static
-int swizzle(int index) {
-  // no need swizzling
-  if constexpr (STRIDE == 16)
-    return index;
-
-  int row_idx = (index / STRIDE) % 8;
-  int bits_to_xor = row_idx / std::max(64 / STRIDE, 1);
-  return index ^ (bits_to_xor << 4);
+int swizzle(int row, int col) {
+  if constexpr (STRIDE >= 128)
+    col ^= (row % 8) / std::max(128 / STRIDE, 1);
+  return row * STRIDE + col * 16;
 }
 
 __device__
@@ -46,7 +42,7 @@ void gmem_to_smem(int dst, const T *src, int src_stride, int tid) {
     const int col = idx % WIDTH;
 
     // NOTE: perhaps we can move swizzle out of this loop as well
-    int dst_addr = swizzle<WIDTH * sizeof(T)>(dst + idx * sizeof(T));
+    int dst_addr = dst + swizzle<WIDTH * sizeof(T)>(row, col / num_elems);
     const T *src_addr = src + row * src_stride + col;
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(dst_addr), "l"(src_addr));
   }
@@ -59,17 +55,9 @@ void matmul_v0_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
   constexpr int MMA_M = 16;
   constexpr int MMA_N = 8;
   constexpr int MMA_K = 16;
-  static_assert(BLOCK_M % NUM_WARP_M == 0);
-  static_assert(BLOCK_N % NUM_WARP_N == 0);
-  static_assert(BLOCK_K % MMA_K == 0);
   constexpr int WARP_M = BLOCK_M / NUM_WARP_M;
   constexpr int WARP_N = BLOCK_N / NUM_WARP_N;
-  static_assert(WARP_M % MMA_M == 0);
-  static_assert(WARP_N % MMA_N == 0);
   constexpr int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;
-  constexpr int NUM_MMA_M = WARP_M / MMA_M;
-  constexpr int NUM_MMA_N = WARP_N / MMA_N;
-  constexpr int NUM_MMA_K = BLOCK_K / MMA_K;
 
   const int tid = threadIdx.x;
   const int bid = blockIdx.x;
@@ -80,61 +68,69 @@ void matmul_v0_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
   const int num_blocks_n = cdiv(N, BLOCK_N);
   const int bid_m = bid / num_blocks_n;
   const int bid_n = bid % num_blocks_n;
-  const int offset_m = bid_m * BLOCK_M;
-  const int offset_n = bid_n * BLOCK_N;
+  const int off_m = bid_m * BLOCK_M;
+  const int off_n = bid_n * BLOCK_N;
 
   const int warp_id_m = warp_id / NUM_WARP_N;
   const int warp_id_n = warp_id % NUM_WARP_N;
 
   // A is row-major, B is column-major, C is row-major
-  A += offset_m * K;
-  B += offset_n * K;
-  C += (offset_m + warp_id_m * WARP_M) * N + (offset_n + warp_id_n * WARP_N);
+  A += off_m * K;
+  B += off_n * K;
+  C += (off_m + warp_id_m * WARP_M) * N + (off_n + warp_id_n * WARP_N);
 
   // convert shared memory address to 32-bit from the start
-  extern __shared__ nv_bfloat16 smem[];
-  const int smem_u32 = static_cast<int>(__cvta_generic_to_shared(smem));
-  const int A_smem = smem_u32;
+  extern __shared__ nv_bfloat16 smem_ptr[];
+  const int smem = static_cast<int>(__cvta_generic_to_shared(smem_ptr));
+  const int A_smem = smem;
   const int B_smem = A_smem + BLOCK_M * BLOCK_K * sizeof(nv_bfloat16);
+  constexpr int AB_size = (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
 
-  int A_rmem[NUM_MMA_K][NUM_MMA_M][4];
-  int B_rmem[NUM_MMA_K][NUM_MMA_N][2];
-  float C_rmem[NUM_MMA_M][NUM_MMA_N][4] = {};
+  int A_rmem[BLOCK_K / MMA_K][WARP_M / MMA_M][4];
+  int B_rmem[BLOCK_K / MMA_K][WARP_N / MMA_N][2];
+  float acc[WARP_M / MMA_M][WARP_N / MMA_N][4] = {};
 
   // pre-compute address used for ldmatrix
   // also pre-compute swizzling
-  const int A_offm = (warp_id_m * WARP_M) + (lane_id % 16);
-  const int A_offk = (lane_id / 16) * 8;
-  const int A_smem_thread = swizzle<BLOCK_K * sizeof(nv_bfloat16)>(A_smem + (A_offm * BLOCK_K + A_offk) * sizeof(nv_bfloat16));
-
-  const int B_offn = (warp_id_n * WARP_N) + (lane_id % 8) + (lane_id / 16) * 8;
-  const int B_offk = ((lane_id % 16) / 8) * 8;
-  const int B_smem_thread = swizzle<BLOCK_K * sizeof(nv_bfloat16)>(B_smem + (B_offn * BLOCK_K + B_offk) * sizeof(nv_bfloat16));
-
-  // pre-compute the address for each stage
-  int A_buffers[NUM_STAGES];
-  int B_buffers[NUM_STAGES];
-  for (int stage = 0; stage < NUM_STAGES; stage++) {
-    A_buffers[stage] = A_smem_thread + stage * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
-    B_buffers[stage] = B_smem_thread + stage * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
-  }
+  const int A_smem_thr = A_smem + swizzle<BLOCK_K * sizeof(nv_bfloat16)>((warp_id_m * WARP_M) + (lane_id % 16), lane_id / 16);
+  const int B_smem_thr = B_smem + swizzle<BLOCK_K * sizeof(nv_bfloat16)>((warp_id_n * WARP_N) + (lane_id % 8) + (lane_id / 16) * 8, (lane_id % 16) / 8);
 
   const int num_k_iters = cdiv(K, BLOCK_K);
 
   auto load_AB = [&](int k_iter) {
-    if (k_iter < num_k_iters) {
-      // select the correct shared memory buffer
-      const int A_shared = A_smem + (k_iter % NUM_STAGES) * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
-      const int B_shared = B_smem + (k_iter % NUM_STAGES) * (BLOCK_M + BLOCK_N) * BLOCK_K * sizeof(nv_bfloat16);
+    // select the correct shared memory buffer
+    const int stage_id = k_iter % NUM_STAGES;
+    gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_smem + stage_id * AB_size, A, K, tid);
+    gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_smem + stage_id * AB_size, B, K, tid);
 
-      gmem_to_smem<BLOCK_M, BLOCK_K, TB_SIZE>(A_shared, A, K, tid);
-      gmem_to_smem<BLOCK_N, BLOCK_K, TB_SIZE>(B_shared, B, K, tid);
-
-      // A/B pointer tracks position for gmem->smem load
-      A += BLOCK_K;
-      B += BLOCK_K;
-    }
+    // A/B pointer tracks position for gmem->smem load
+    A += BLOCK_K;
+    B += BLOCK_K;
     asm volatile("cp.async.commit_group;");
+  };
+
+  auto compute = [&](int k_iter) {
+    const int stage_id = k_iter % NUM_STAGES;
+
+    // A shared->regs
+    for (int k = 0; k < BLOCK_K / MMA_K; k++)
+      for (int m = 0; m < WARP_M / MMA_M; m++) {
+        int A_addr = A_smem_thr + stage_id * AB_size + (m * MMA_M * BLOCK_K * sizeof(nv_bfloat16));
+        ldmatrix_x4(A_rmem[k][m], A_addr ^ (k * 32));
+      }
+
+    // B shared->regs
+    for (int k = 0; k < BLOCK_K / MMA_K; k++)
+      for (int n = 0; n < WARP_N / MMA_N; n += 2) {
+        int B_addr = B_smem_thr + stage_id * AB_size + (n * MMA_N * BLOCK_K * sizeof(nv_bfloat16));
+        ldmatrix_x4(B_rmem[k][n], B_addr ^ (k * 32));
+      }
+
+    // do MMA
+    for (int k = 0; k < BLOCK_K / MMA_K; k++)
+      for (int m = 0; m < WARP_M / MMA_M; m++)
+        for (int n = 0; n < WARP_N / MMA_N; n++)
+          mma_m16n8k16(A_rmem[k][m], B_rmem[k][n], acc[m][n]);
   };
 
   // initiate NUM_STAGES-1 stages
@@ -142,55 +138,32 @@ void matmul_v0_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
     load_AB(stage);
 
   // loop invariance: there is always NUM_STAGES - 1 prefetch stages in-flight
-  // thanks to pipelining, this loop now only has 1 __syncthreads()
-  for (int k_iter = 0; k_iter < num_k_iters; k_iter++) {
-    // wait for previous MMA to finish using the shared buffer
+  for (int k_iter = 0; k_iter < num_k_iters - (NUM_STAGES - 1); k_iter++) {
+    // cp.async prefetch
+    __syncthreads();  // wait MMA
+    load_AB(k_iter + NUM_STAGES - 1);  // cp.async
+
+    // MMA
+    asm volatile("cp.async.wait_group %0;" :: "n"(NUM_STAGES - 1));  // wait cp.async
     __syncthreads();
-
-    // prefetch the next stage. add 1 more stage to the pipeline
-    load_AB(k_iter + NUM_STAGES - 1);
-
-    // wait for the 1st stage to finish. remove 1 stage from the pipeline
-    // -> restore loop invariance
-    asm volatile("cp.async.wait_group %0;" :: "n"(NUM_STAGES - 1));
-    __syncthreads();
-
-    // A smem->rmem
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
-      for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++) {
-        int A_addr = A_buffers[k_iter % NUM_STAGES];
-        A_addr += mma_id_m * MMA_M * BLOCK_K * sizeof(nv_bfloat16);
-        A_addr ^= mma_id_k * MMA_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(A_rmem[mma_id_k][mma_id_m], A_addr);
-      }
-
-    // B smem->rmem
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
-      for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n += 2) {
-        int B_addr = B_buffers[k_iter % NUM_STAGES];
-        B_addr += mma_id_n * MMA_N * BLOCK_K * sizeof(nv_bfloat16);
-        B_addr ^= mma_id_k * MMA_K * sizeof(nv_bfloat16);
-        ldmatrix_x4(B_rmem[mma_id_k][mma_id_n], B_addr);
-      }
-
-    // do MMA. NUM_STAGES-1 prefetch stages are still on-going
-    for (int mma_id_k = 0; mma_id_k < NUM_MMA_K; mma_id_k++)
-      for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
-        for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++)
-          mma_m16n8k16(A_rmem[mma_id_k][mma_id_m],
-                       B_rmem[mma_id_k][mma_id_n],
-                       C_rmem[mma_id_m][mma_id_n]);
+    compute(k_iter);
   }
 
-  for (int mma_id_m = 0; mma_id_m < NUM_MMA_M; mma_id_m++)
-    for (int mma_id_n = 0; mma_id_n < NUM_MMA_N; mma_id_n++) {
-      const int row = mma_id_m * MMA_M + (lane_id / 4);
-      const int col = mma_id_n * MMA_N + (lane_id % 4) * 2;
-      nv_bfloat16 *C_local = C + row * N + col;
+  for (int k_iter = num_k_iters - (NUM_STAGES - 1); k_iter < num_k_iters; k_iter++) {
+    asm volatile("cp.async.commit_group;");  // preserve loop invariance
+    asm volatile("cp.async.wait_group %0;" :: "n"(NUM_STAGES - 1));  // wait cp.async
+    __syncthreads();
+    compute(k_iter);
+  }
 
-      float *regs = C_rmem[mma_id_m][mma_id_n];
-      reinterpret_cast<nv_bfloat162 *>(C_local)[0]         = __float22bfloat162_rn({regs[0], regs[1]});
-      reinterpret_cast<nv_bfloat162 *>(C_local + 8 * N)[0] = __float22bfloat162_rn({regs[2], regs[3]});
+  for (int m = 0; m < WARP_M / MMA_M; m++)
+    for (int n = 0; n < WARP_N / MMA_N; n++) {
+      const int row = m * MMA_M + (lane_id / 4);
+      const int col = n * MMA_N + (lane_id % 4) * 2;
+
+      float *regs = acc[m][n];
+      reinterpret_cast<nv_bfloat162 *>(C + ((row + 0) * N + col))[0] = __float22bfloat162_rn({regs[0], regs[1]});
+      reinterpret_cast<nv_bfloat162 *>(C + ((row + 8) * N + col))[0] = __float22bfloat162_rn({regs[2], regs[3]});
     }
 }
 
@@ -198,7 +171,7 @@ void matmul_v0(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M
   // 4 warps
   const int BLOCK_M = 128, BLOCK_N = 128, BLOCK_K = 64;
   const int NUM_WARP_M = 2, NUM_WARP_N = 2;
-  const int NUM_STAGES = 2;
+  const int NUM_STAGES = 3;
 
   const int grid_size = (M / BLOCK_M) * (N / BLOCK_N);
   const int TB_SIZE = NUM_WARP_M * NUM_WARP_N * WARP_SIZE;

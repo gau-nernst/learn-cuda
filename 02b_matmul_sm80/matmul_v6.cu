@@ -141,7 +141,6 @@ void matmul_v6_kernel(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C
     load_AB(stage);
 
   // loop invariance: there is always NUM_STAGES - 1 prefetch stages in-flight
-  // thanks to pipelining, this loop now only has 1 __syncthreads()
   for (int k_iter = 0; k_iter < num_k_iters - (NUM_STAGES - 1); k_iter++) {
     // wait for previous MMA to finish using the shared buffer
     __syncthreads();
