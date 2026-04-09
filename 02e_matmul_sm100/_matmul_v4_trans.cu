@@ -65,20 +65,15 @@ void matmul_v4_trans_kernel(
   __syncthreads();  // visible to all threads
   const int taddr = tmem_addr[0];  // this will be 0
 
-  int phase = 0;
-
   const int num_iters = K / BLOCK_K;
   if (warp_id == 0 && elect_sync()) {
     // TMA warp
+    int stage_id = 0;
+    int parity = 1;
+
     for (int iter_k = 0; iter_k < num_iters; iter_k++) {
       // wait for MMA
-      // the initial TMA phase is 0, and it is available. so we wait for 1 instead.
-      const int stage_id = iter_k % NUM_STAGES;
-      mbarrier_wait(mma_mbar_addr + stage_id * 8, phase ^ 1);
-
-      // flip phase when we have cycled through all TMA buffers
-      if (stage_id == NUM_STAGES - 1)
-        phase ^= 1;
+      mbarrier_wait(mma_mbar_addr + stage_id * 8, parity);
 
       const int mbar_addr = tma_mbar_addr + stage_id * 8;
       const int A_smem = smem + stage_id * (A_size + B_size);
@@ -91,10 +86,17 @@ void matmul_v4_trans_kernel(
       tma_4d_g2s(B_smem, &B_tmap, 0, 0, off_n / 64, off_k / 8, mbar_addr);
       asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
                   :: "r"(mbar_addr), "r"(A_size + B_size) : "memory");
+
+      stage_id = (stage_id + 1) % NUM_STAGES;
+      if (stage_id == 0)
+        parity ^= 1;
     }
   }
   else if (warp_id == 1 && elect_sync()) {
     // MMA warp
+    int stage_id = 0;
+    int parity = 0;
+
     // https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instruction-descriptor
     constexpr uint32_t i_desc = (1U << 4U)   // dtype=FP32
                               | (1U << 7U)   // atype=BF16
@@ -107,13 +109,8 @@ void matmul_v4_trans_kernel(
 
     for (int iter_k = 0; iter_k < num_iters; iter_k++) {
       // wait for TMA
-      const int stage_id = iter_k % NUM_STAGES;
-      mbarrier_wait(tma_mbar_addr + stage_id * 8, phase);
+      mbarrier_wait(tma_mbar_addr + stage_id * 8, parity);
       asm volatile("tcgen05.fence::after_thread_sync;");  // (why) do we need this? from DeepGEMM
-
-      // flip phase when we have cycled through all TMA buffers
-      if (stage_id == NUM_STAGES - 1)
-        phase ^= 1;
 
       const int A_smem = smem + stage_id * (A_size + B_size);
       const int B_smem = A_smem + A_size;
@@ -138,6 +135,10 @@ void matmul_v4_trans_kernel(
       }
       asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];"
                   :: "r"(mma_mbar_addr + stage_id * 8) : "memory");
+
+      stage_id = (stage_id + 1) % NUM_STAGES;
+      if (stage_id == 0)
+        parity ^= 1;
     }
 
     // signal when tcgen05 finishes with the main loop
