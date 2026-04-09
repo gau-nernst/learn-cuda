@@ -24,5 +24,7 @@ A = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
 B = torch.randn(N, K, device="cuda", dtype=torch.bfloat16).T
 
 out = torch.ops.my_matmul.matmul_tmem(A, B)
+torch.cuda.synchronize()
+
 out_ref = A @ B
 torch.testing.assert_close(out, out_ref)

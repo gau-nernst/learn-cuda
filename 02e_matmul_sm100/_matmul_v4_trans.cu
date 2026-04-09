@@ -80,10 +80,10 @@ void matmul_v4_trans_kernel(
       const int B_smem = A_smem + A_size;
 
       // original layout: [K, M]
-      // permute:         [K/8, M/64, 8, 64]
+      // permute:         [M/64, K, 64]
       const int off_k = iter_k * BLOCK_K;
-      tma_4d_g2s(A_smem, &A_tmap, 0, 0, off_m / 64, off_k / 8, mbar_addr);
-      tma_4d_g2s(B_smem, &B_tmap, 0, 0, off_n / 64, off_k / 8, mbar_addr);
+      tma_3d_g2s(A_smem, &A_tmap, 0, off_k, off_m / 64, mbar_addr);
+      tma_3d_g2s(B_smem, &B_tmap, 0, off_k, off_n / 64, mbar_addr);
       asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
                   :: "r"(mbar_addr), "r"(A_size + B_size) : "memory");
 
@@ -117,9 +117,9 @@ void matmul_v4_trans_kernel(
 
       // set up shared memory descriptors for A and B
       // https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-shared-memory-descriptor
-      auto make_desc = [](int addr, int BLOCK_MN) -> uint64_t {
-        const int LBO = 128 * 8;
-        const int SBO = BLOCK_MN * sizeof(nv_bfloat16) * 8;
+      auto make_desc = [](int addr) -> uint64_t {
+        const int SBO = 128 * 8;
+        const int LBO = BLOCK_K * 128;
         return desc_encode(addr)
               | (desc_encode(LBO) << 16ULL)
               | (desc_encode(SBO) << 32ULL)
@@ -127,10 +127,10 @@ void matmul_v4_trans_kernel(
               | (2ULL << 61ULL);
       };
 
-      tcgen05_mma_f16(taddr, make_desc(A_smem, BLOCK_M), make_desc(B_smem, BLOCK_N), i_desc, iter_k);
+      tcgen05_mma_f16(taddr, make_desc(A_smem), make_desc(B_smem), i_desc, iter_k);
       for (int k = 1; k < BLOCK_K / MMA_K; k++) {
-        uint64_t a_desc = make_desc(A_smem + k * MMA_K * BLOCK_M * sizeof(nv_bfloat16), BLOCK_M);
-        uint64_t b_desc = make_desc(B_smem + k * MMA_K * BLOCK_N * sizeof(nv_bfloat16), BLOCK_N);
+        uint64_t a_desc = make_desc(A_smem + k * MMA_K * 128);
+        uint64_t b_desc = make_desc(B_smem + k * MMA_K * 128);
         tcgen05_mma_f16(taddr, a_desc, b_desc, i_desc, 1);
       }
       asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];"
@@ -178,33 +178,6 @@ void matmul_v4_trans_kernel(
     asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" :: "r"(taddr), "r"(BLOCK_N));
 }
 
-inline
-void init_tmap_4d_trans_128B(
-  CUtensorMap *tmap,
-  const nv_bfloat16 *ptr,
-  uint64_t global_height, uint64_t global_width,
-  uint32_t shared_height, uint32_t shared_width
-) {
-  // original layout: [K, M]             : [M, 1]
-  // unflatten:       [K/8, 8, M/64, 64] : [M*8, M, 64, 1]
-  // permute:         [K/8, M/64, 8, 64] : [M*8, 64, M, 1]
-  constexpr uint32_t rank = 4;
-  uint64_t globalDim[rank]         = {64, 8, global_width / 64, global_height / 8};
-  uint64_t globalStrides[rank - 1] = {global_width * sizeof(nv_bfloat16), 128, global_width * 8 * sizeof(nv_bfloat16)};  // in bytes
-  uint32_t boxDim[rank]            = {64, 8, shared_width / 64, shared_height / 8};
-  uint32_t elementStrides[rank]    = {1, 1, 1, 1};
-
-  auto err = cuTensorMapEncodeTiled(
-    tmap, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, rank, (void *)ptr,
-    globalDim, globalStrides, boxDim, elementStrides,
-    CU_TENSOR_MAP_INTERLEAVE_NONE,
-    CU_TENSOR_MAP_SWIZZLE_128B,
-    CU_TENSOR_MAP_L2_PROMOTION_NONE,
-    CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
-  );
-  check_cu(err);
-}
-
 template <int BLOCK_N, int BLOCK_K, int NUM_STAGES>
 void matmul_v4_trans_launch(
   const nv_bfloat16 *A_ptr,
@@ -213,8 +186,8 @@ void matmul_v4_trans_launch(
   int M, int N, int K
 ) {
   CUtensorMap A_tmap, B_tmap;
-  init_tmap_4d_trans_128B(&A_tmap, A_ptr, K, M, BLOCK_K, BLOCK_M);
-  init_tmap_4d_trans_128B(&B_tmap, B_ptr, K, N, BLOCK_N, BLOCK_N);
+  init_tmap_3d_128B(&A_tmap, A_ptr, K, M, BLOCK_K, BLOCK_M);
+  init_tmap_3d_128B(&B_tmap, B_ptr, K, N, BLOCK_N, BLOCK_N);
 
   int grid = (M / BLOCK_M) * (N / BLOCK_N);
   int size_AB = (BLOCK_M + BLOCK_N) * BLOCK_K * NUM_STAGES;
