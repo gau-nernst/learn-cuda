@@ -7,10 +7,9 @@
 constexpr int NUM_WARPS = 4;
 constexpr int TB_SIZE = NUM_WARPS * WARP_SIZE;
 
-constexpr int BLOCK_M = 128;
 constexpr int MMA_K = 16;
 
-template <int BLOCK_N, int BLOCK_K>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K>
 __global__
 __launch_bounds__(TB_SIZE)
 void matmul_tmem_kernel(
@@ -73,8 +72,10 @@ void matmul_tmem_kernel(
     // load A from gmem->rmem->tmem
     // since A tile is [BLOCK_M, BLOCK_K], we will use BLOCK_K/2=32 tmem columns
     // each iteration loads 16 BF16 elems
+    // NOTE: we support both BLOCK_M=128 and BLOCK_M=64
+    // when BLOCK_M=64, higher half warp loads data for nothing.
     for (int i = 0; i < BLOCK_K / 16; i++) {
-      auto *src_gmem = A_ptr + (off_m + tid) * K + (off_k + i * 16);
+      auto *src_gmem = A_ptr + (off_m + warp_id * (BLOCK_M / 4) + lane_id) * K + (off_k + i * 16);
       int dst_tmem = ((warp_id * 32) << 16) | (a_tmem_base + i * 8);
       asm volatile(
         "{\n"
@@ -147,15 +148,18 @@ void matmul_tmem_kernel(
       out[i] = __float22bfloat162_rn({tmp[i * 2], tmp[i * 2 + 1]});
 
     // uncoalesced writes weeee
-    nv_bfloat16 *out_ptr = C_ptr + (off_m + tid) * N + (off_n + n * 8);
-    reinterpret_cast<int4 *>(out_ptr)[0] = reinterpret_cast<int4 *>(out)[0];
+    // NOTE: when BLOCK_M=64, only lower half warp will issue global stores
+    if (lane_id < BLOCK_M / 4) {
+      nv_bfloat16 *out_ptr = C_ptr + (off_m + warp_id * (BLOCK_M / 4) + lane_id) * N + (off_n + n * 8);
+      reinterpret_cast<int4 *>(out_ptr)[0] = reinterpret_cast<int4 *>(out)[0];
+    }
   }
   __syncthreads();  // all threads finish reading data from tmem
   if (warp_id == 0)  // deallocate tmem
     asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" :: "r"(0), "r"(512));
 }
 
-template <int BLOCK_N, int BLOCK_K>
+template <int BLOCK_M, int BLOCK_N, int BLOCK_K>
 void matmul_tmem_launch(
   const nv_bfloat16 *A_ptr,
   const nv_bfloat16 *B_ptr,
@@ -169,7 +173,7 @@ void matmul_tmem_launch(
   int smem_size = BLOCK_N * BLOCK_K * sizeof(nv_bfloat16);
   smem_size += 2 * 8 + 4;  // mbars and taddr
 
-  auto this_kernel = matmul_tmem_kernel<BLOCK_N, BLOCK_K>;
+  auto this_kernel = matmul_tmem_kernel<BLOCK_M, BLOCK_N, BLOCK_K>;
   if (smem_size > 48'000)
     cudaFuncSetAttribute(this_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
@@ -187,7 +191,8 @@ at::Tensor matmul_tmem(const at::Tensor& A, const at::Tensor& B) {
   auto *B_ptr = reinterpret_cast<nv_bfloat16 *>(B.data_ptr());
   auto *C_ptr = reinterpret_cast<nv_bfloat16 *>(C.data_ptr());
 
-  matmul_tmem_launch<128, 64>(A_ptr, B_ptr, C_ptr, M, N, K);
+  // try "weird" layout: BLOCK_M=64
+  matmul_tmem_launch<64, 128, 64>(A_ptr, B_ptr, C_ptr, M, N, K);
   return C;
 }
 
