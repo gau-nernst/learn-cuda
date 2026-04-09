@@ -117,6 +117,19 @@ void tcgen05_mma_f16(int taddr, uint64_t a_desc, uint64_t b_desc, uint32_t i_des
 
 template <int CTA_GROUP = 1>
 __device__ inline
+void tcgen05_mma_f16_tmem(int taddr, int a_tmem, uint64_t b_desc, uint32_t i_desc, int enable_input_d) {
+  asm volatile(
+    "{\n\t"
+    ".reg .pred p;\n\t"  // predicate register enable-input-d
+    "setp.ne.b32 p, %4, 0;\n\t"
+    "tcgen05.mma.cta_group::%5.kind::f16 [%0], [%1], %2, %3, p;\n\t"
+    "}"
+    :: "r"(taddr), "r"(a_tmem), "l"(b_desc), "r"(i_desc), "r"(enable_input_d), "n"(CTA_GROUP)
+  );
+}
+
+template <int CTA_GROUP = 1>
+__device__ inline
 void tcgen05_commit(int mbar_addr) {
   asm volatile("tcgen05.commit.cta_group::%2.mbarrier::arrive::one.shared::cluster.b64 [%0], %1;"
               :: "r"(mbar_addr), "n"(CTA_GROUP) : "memory");
@@ -162,18 +175,42 @@ void init_tmap_2d_simple(
   uint32_t elementStrides[rank]  = {1, 1};
 
   auto err = cuTensorMapEncodeTiled(
-    tmap,
-    CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-    rank,
-    (void *)ptr,
-    globalDim,
-    globalStrides,
-    boxDim,
-    elementStrides,
-    CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+    tmap, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, rank, (void *)ptr,
+    globalDim, globalStrides, boxDim, elementStrides,
+    CU_TENSOR_MAP_INTERLEAVE_NONE,
     swizzle,
-    CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-    CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+    CU_TENSOR_MAP_L2_PROMOTION_NONE,
+    CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+  );
+  check_cu(err);
+}
+
+inline
+void init_tmap_3d_128B(
+  CUtensorMap *tmap,
+  const nv_bfloat16 *ptr,
+  uint64_t global_height, uint64_t global_width,
+  uint32_t shared_height, uint32_t shared_width
+) {
+  // input layout for tcgen05: contiguous blocks of (MMA_M, 64)
+  // then we perform swizzling within this block
+  //
+  // original layout: [M, K]        : [K, 1]
+  // unflatten:       [M, K/64, 64] : [K, 64, 1]
+  // permute:         [K/64, M, 64] : [64, K, 1]
+  constexpr uint32_t rank = 3;
+  uint64_t globalDim[rank]         = {64, global_height, global_width / 64};
+  uint64_t globalStrides[rank - 1] = {global_width * sizeof(nv_bfloat16), 128};  // in bytes
+  uint32_t boxDim[rank]            = {64, shared_height, shared_width / 64};
+  uint32_t elementStrides[rank]    = {1, 1, 1};
+
+  auto err = cuTensorMapEncodeTiled(
+    tmap, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, rank, (void *)ptr,
+    globalDim, globalStrides, boxDim, elementStrides,
+    CU_TENSOR_MAP_INTERLEAVE_NONE,
+    CU_TENSOR_MAP_SWIZZLE_128B,
+    CU_TENSOR_MAP_L2_PROMOTION_NONE,
+    CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
   );
   check_cu(err);
 }

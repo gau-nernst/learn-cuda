@@ -7,7 +7,7 @@ CURRENT_DIR = Path(__file__).parent
 
 torch.utils.cpp_extension.load(
     "my_module",
-    sources=[str(CURRENT_DIR / "matmul_v4_trans.cu")],
+    sources=[str(CURRENT_DIR / "_matmul_v4_trans.cu")],
     extra_cuda_cflags=[
         "-O3",
         "-lineinfo",

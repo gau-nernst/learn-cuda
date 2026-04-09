@@ -192,35 +192,8 @@ void matmul_v4_launch(
   int M, int N, int K
 ) {
   CUtensorMap A_tmap, B_tmap;
-
-  // input layout for tcgen05: contiguous blocks of (MMA_M, 64)
-  // then we perform swizzling within this block
-  // 3D tensormap (WIDTH / 64, HEIGHT, 64) : (64, WIDTH, 1)
-  auto init_tmap_AB = [&](CUtensorMap *tmap, const nv_bfloat16 *ptr, uint64_t global_height, uint32_t shared_height) {
-    constexpr uint32_t rank = 3;
-    uint64_t globalDim[rank]       = {64, global_height, (uint64_t)K / 64};
-    uint64_t globalStrides[rank-1] = {(uint64_t)K * sizeof(nv_bfloat16), 128};  // in bytes
-    uint32_t boxDim[rank]          = {64, shared_height, (uint32_t)BLOCK_K / 64};
-    uint32_t elementStrides[rank]  = {1, 1, 1};
-
-    auto err = cuTensorMapEncodeTiled(
-      tmap,
-      CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-      rank,
-      (void *)ptr,
-      globalDim,
-      globalStrides,
-      boxDim,
-      elementStrides,
-      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
-      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
-    );
-    check_cu(err);
-  };
-  init_tmap_AB(&A_tmap, A_ptr, M, BLOCK_M);
-  init_tmap_AB(&B_tmap, B_ptr, N, BLOCK_N);
+  init_tmap_3d_128B(&A_tmap, A_ptr, M, K, BLOCK_M, BLOCK_K);
+  init_tmap_3d_128B(&B_tmap, B_ptr, N, K, BLOCK_N, BLOCK_K);
 
   int grid = (M / BLOCK_M) * (N / BLOCK_N);
   int size_AB = (BLOCK_M + BLOCK_N) * BLOCK_K * NUM_STAGES;

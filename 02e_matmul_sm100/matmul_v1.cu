@@ -172,26 +172,20 @@ void matmul_v1_launch(
       uint32_t elementStrides[rank]  = {1, 1, 1};
 
       auto err = cuTensorMapEncodeTiled(
-        tmap,
-        CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-        rank,
-        (void *)ptr,
-        globalDim,
-        globalStrides,
-        boxDim,
-        elementStrides,
-        CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-        CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
-        CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-        CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+        tmap, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, rank, (void *)ptr,
+        globalDim, globalStrides, boxDim, elementStrides,
+        CU_TENSOR_MAP_INTERLEAVE_NONE,
+        CU_TENSOR_MAP_SWIZZLE_NONE,
+        CU_TENSOR_MAP_L2_PROMOTION_NONE,
+        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
       );
       check_cu(err);
     };
     init_tmap_AB(&A_tmap, A_ptr, M, BLOCK_M);
     init_tmap_AB(&B_tmap, B_ptr, N, BLOCK_N);
   } else {
-    init_tmap_2d_simple(&A_tmap, A_ptr, M, K, BLOCK_M, 8, CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE);
-    init_tmap_2d_simple(&B_tmap, B_ptr, M, K, BLOCK_N, 8, CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE);
+    init_tmap_2d_simple(&A_tmap, A_ptr, M, K, BLOCK_M, 8, CU_TENSOR_MAP_SWIZZLE_NONE);
+    init_tmap_2d_simple(&B_tmap, B_ptr, M, K, BLOCK_N, 8, CU_TENSOR_MAP_SWIZZLE_NONE);
   }
 
   int grid = (M / BLOCK_M) * (N / BLOCK_N);

@@ -177,6 +177,33 @@ void matmul_v4_trans_kernel(
     asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" :: "r"(taddr), "r"(BLOCK_N));
 }
 
+inline
+void init_tmap_4d_trans_128B(
+  CUtensorMap *tmap,
+  const nv_bfloat16 *ptr,
+  uint64_t global_height, uint64_t global_width,
+  uint32_t shared_height, uint32_t shared_width
+) {
+  // original layout: [K, M]             : [M, 1]
+  // unflatten:       [K/8, 8, M/64, 64] : [M*8, M, 64, 1]
+  // permute:         [K/8, M/64, 8, 64] : [M*8, 64, M, 1]
+  constexpr uint32_t rank = 4;
+  uint64_t globalDim[rank]         = {64, 8, global_width / 64, global_height / 8};
+  uint64_t globalStrides[rank - 1] = {global_width * sizeof(nv_bfloat16), 128, global_width * 8 * sizeof(nv_bfloat16)};  // in bytes
+  uint32_t boxDim[rank]            = {64, 8, shared_width / 64, shared_height / 8};
+  uint32_t elementStrides[rank]    = {1, 1, 1, 1};
+
+  auto err = cuTensorMapEncodeTiled(
+    tmap, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, rank, (void *)ptr,
+    globalDim, globalStrides, boxDim, elementStrides,
+    CU_TENSOR_MAP_INTERLEAVE_NONE,
+    CU_TENSOR_MAP_SWIZZLE_128B,
+    CU_TENSOR_MAP_L2_PROMOTION_NONE,
+    CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+  );
+  check_cu(err);
+}
+
 template <int BLOCK_N, int BLOCK_K, int NUM_STAGES>
 void matmul_v4_trans_launch(
   const nv_bfloat16 *A_ptr,
@@ -185,35 +212,8 @@ void matmul_v4_trans_launch(
   int M, int N, int K
 ) {
   CUtensorMap A_tmap, B_tmap;
-
-  // original layout: [K, M] : [M, 1]
-  // unflatten:       [K/8, 8, M/64, 64] : [M*8, M, 64, 1]
-  // permute:         [K/8, M/64, 8, 64] : [M*8, 64, M, 1]
-  auto init_tmap_AB = [&](CUtensorMap *tmap, const nv_bfloat16 *ptr, uint64_t MN, uint32_t BLOCK_MN) {
-    constexpr uint32_t rank = 4;
-    uint64_t globalDim[rank]       = {64, 8, MN / 64, K / 8};
-    uint64_t globalStrides[rank-1] = {MN * sizeof(nv_bfloat16), 128, MN * 8 * sizeof(nv_bfloat16)};  // in bytes
-    uint32_t boxDim[rank]          = {64, 8, BLOCK_MN / 64, BLOCK_K / 8};
-    uint32_t elementStrides[rank]  = {1, 1, 1, 1};
-
-    auto err = cuTensorMapEncodeTiled(
-      tmap,
-      CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
-      rank,
-      (void *)ptr,
-      globalDim,
-      globalStrides,
-      boxDim,
-      elementStrides,
-      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
-      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
-    );
-    check_cu(err);
-  };
-  init_tmap_AB(&A_tmap, A_ptr, M, BLOCK_M);
-  init_tmap_AB(&B_tmap, B_ptr, N, BLOCK_N);
+  init_tmap_4d_trans_128B(&A_tmap, A_ptr, K, M, BLOCK_K, BLOCK_M);
+  init_tmap_4d_trans_128B(&B_tmap, B_ptr, K, N, BLOCK_N, BLOCK_N);
 
   int grid = (M / BLOCK_M) * (N / BLOCK_N);
   int size_AB = (BLOCK_M + BLOCK_N) * BLOCK_K * NUM_STAGES;
