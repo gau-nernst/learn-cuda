@@ -80,8 +80,8 @@ void matmul_v3_kernel(
       const int B_smem = A_smem + A_size;
 
       const int off_k = iter_k * BLOCK_K;
-      tma_3d_gmem2smem(A_smem, &A_tmap, 0, off_m, off_k / 64, mbar_addr);
-      tma_3d_gmem2smem(B_smem, &B_tmap, 0, off_n, off_k / 64, mbar_addr);
+      tma_3d_g2s(A_smem, &A_tmap, 0, off_m, off_k / 64, mbar_addr);
+      tma_3d_g2s(B_smem, &B_tmap, 0, off_n, off_k / 64, mbar_addr);
       asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
                   :: "r"(mbar_addr), "r"(A_size + B_size) : "memory");
     }

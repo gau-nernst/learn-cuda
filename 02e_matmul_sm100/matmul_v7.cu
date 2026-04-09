@@ -122,8 +122,8 @@ void matmul_v7_kernel_cutlass(
           if constexpr (DO_PROFILE) profiler.stop();
 
           if constexpr (DO_PROFILE) profiler.start(ProfilerTag::IssueTMA);
-          tma_3d_gmem2smem<CTA_GROUP>(A_smem, &A_tmap, 0, off_m, iter_k, mbar_addr);
-          tma_3d_gmem2smem<CTA_GROUP>(B_smem, &B_tmap, 0, off_n, iter_k, mbar_addr);
+          tma_3d_g2s<CTA_GROUP>(A_smem, &A_tmap, 0, off_m, iter_k, mbar_addr);
+          tma_3d_g2s<CTA_GROUP>(B_smem, &B_tmap, 0, off_n, iter_k, mbar_addr);
           mbarrier_arrive_expect_tx(mbar_addr, A_size + B_size);
           if constexpr (DO_PROFILE) profiler.stop();
 

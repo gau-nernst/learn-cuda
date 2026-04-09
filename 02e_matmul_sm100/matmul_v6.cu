@@ -120,8 +120,8 @@ void matmul_v6_kernel(
     const int off_m = bid_m * BLOCK_M;
     const int off_n = bid_n * BLOCK_N + cta_rank * (BLOCK_N / CTA_GROUP);
     const int off_k = iter_k * BLOCK_K;
-    tma_3d_gmem2smem<CTA_GROUP>(A_smem, &A_tmap, 0, off_m, off_k / 64, mbar_addr);
-    tma_3d_gmem2smem<CTA_GROUP>(B_smem, &B_tmap, 0, off_n, off_k / 64, mbar_addr);
+    tma_3d_g2s<CTA_GROUP>(A_smem, &A_tmap, 0, off_m, off_k / 64, mbar_addr);
+    tma_3d_g2s<CTA_GROUP>(B_smem, &B_tmap, 0, off_n, off_k / 64, mbar_addr);
 
     // NOTE: we are using .shared::cluster here
     mbarrier_arrive_expect_tx(mbar_addr, A_size + B_size);

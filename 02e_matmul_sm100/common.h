@@ -61,20 +61,29 @@ void mbarrier_arrive(int mbar_addr) {
 }
 
 __device__ inline
-void tma_2d_gmem2smem(int dst, const void *tmap_ptr, int x, int y, int mbar_addr) {
+void tma_2d_g2s(int dst, const void *tmap_ptr, int x, int y, int mbar_addr) {
   asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
               :: "r"(dst), "l"(tmap_ptr), "r"(x), "r"(y), "r"(mbar_addr) : "memory");
 }
 
 template <int CTA_GROUP = 1>
 __device__ inline
-void tma_3d_gmem2smem(int dst, const void *tmap_ptr, int x, int y, int z, int mbar_addr) {
+void tma_3d_g2s(int dst, const void *tmap_ptr, int x, int y, int z, int mbar_addr) {
   // when CTA_GROUP=1, we can use .shared::cta instead.
   // but .shared::cluster doesn't seem to be slower, so always use it unconditionally here.
   // .cta_group::2 allows mbar_addr and dst to be in different CTA's smem.
   asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::%6 "
               "[%0], [%1, {%2, %3, %4}], [%5];"
               :: "r"(dst), "l"(tmap_ptr), "r"(x), "r"(y), "r"(z), "r"(mbar_addr), "n"(CTA_GROUP)
+              : "memory");
+}
+
+template <int CTA_GROUP = 1>
+__device__ inline
+void tma_4d_g2s(int dst, const void *tmap_ptr, int x, int y, int z, int w, int mbar_addr) {
+  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes.cta_group::%7 "
+              "[%0], [%1, {%2, %3, %4, %5}], [%6];"
+              :: "r"(dst), "l"(tmap_ptr), "r"(x), "r"(y), "r"(z), "r"(w), "r"(mbar_addr), "n"(CTA_GROUP)
               : "memory");
 }
 

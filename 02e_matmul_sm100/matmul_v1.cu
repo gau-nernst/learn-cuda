@@ -74,14 +74,14 @@ void matmul_v1_kernel(
       if constexpr (TMAP_3D) {
         // 1 issue for each A and B
         const int off_k = iter_k * BLOCK_K;
-        tma_3d_gmem2smem(A_smem, &A_tmap, 0, off_m, off_k / 8, mbar_addr);
-        tma_3d_gmem2smem(B_smem, &B_tmap, 0, off_n, off_k / 8, mbar_addr);
+        tma_3d_g2s(A_smem, &A_tmap, 0, off_m, off_k / 8, mbar_addr);
+        tma_3d_g2s(B_smem, &B_tmap, 0, off_n, off_k / 8, mbar_addr);
       } else {
         // (BLOCK_K / 8) issues for each A and B.
         for (int k = 0; k < BLOCK_K / 8; k++) {
           const int off_k = iter_k * BLOCK_K + k * 8;
-          tma_2d_gmem2smem(A_smem + k * BLOCK_M * 16, &A_tmap, off_k, off_m, mbar_addr);
-          tma_2d_gmem2smem(B_smem + k * BLOCK_N * 16, &B_tmap, off_k, off_n, mbar_addr);
+          tma_2d_g2s(A_smem + k * BLOCK_M * 16, &A_tmap, off_k, off_m, mbar_addr);
+          tma_2d_g2s(B_smem + k * BLOCK_N * 16, &B_tmap, off_k, off_n, mbar_addr);
         }
       }
 

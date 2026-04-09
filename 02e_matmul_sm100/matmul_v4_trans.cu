@@ -1,6 +1,8 @@
 #include "common.h"
 
 #include <cuda_bf16.h>
+#include <torch/library.h>
+#include <ATen/ATen.h>
 
 constexpr int NUM_WARPS = 4;
 constexpr int TB_SIZE = NUM_WARPS * WARP_SIZE;
@@ -11,7 +13,7 @@ constexpr int MMA_K = 16;
 template <int BLOCK_N, int BLOCK_K, int NUM_STAGES>
 __global__
 __launch_bounds__(TB_SIZE)
-void matmul_v4_kernel(
+void matmul_v4_trans_kernel(
   const __grid_constant__ CUtensorMap A_tmap,
   const __grid_constant__ CUtensorMap B_tmap,
   nv_bfloat16 *C_ptr,
@@ -65,87 +67,78 @@ void matmul_v4_kernel(
 
   int phase = 0;
 
-  // https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instruction-descriptor
-  constexpr uint32_t i_desc = (1U << 4U)   // dtype=FP32
-                            | (1U << 7U)   // atype=BF16
-                            | (1U << 10U)  // btype=BF16
-                            | ((uint32_t)BLOCK_N >> 3U << 17U)  // MMA_N
-                            | ((uint32_t)BLOCK_M >> 4U << 24U)  // MMA_M
-                            ;
-
-  auto load = [&](int iter_k) {
-    // wait for MMA
-    // the initial TMA phase is 0, and it is available. so we wait for 1 instead.
-    const int stage_id = iter_k % NUM_STAGES;
-    mbarrier_wait(mma_mbar_addr + stage_id * 8, phase ^ 1);
-
-    // flip phase when we have cycled through all TMA buffers
-    if (stage_id == NUM_STAGES - 1)
-      phase ^= 1;
-
-    const int mbar_addr = tma_mbar_addr + stage_id * 8;
-    const int A_smem = smem + stage_id * (A_size + B_size);
-    const int B_smem = A_smem + A_size;
-
-    const int off_k = iter_k * BLOCK_K;
-    tma_3d_g2s(A_smem, &A_tmap, 0, off_m, off_k / 64, mbar_addr);
-    tma_3d_g2s(B_smem, &B_tmap, 0, off_n, off_k / 64, mbar_addr);
-    asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
-                :: "r"(mbar_addr), "r"(A_size + B_size) : "memory");
-  };
-
-  auto compute = [&](int iter_k) {
-    // wait for TMA
-    const int stage_id = iter_k % NUM_STAGES;
-    mbarrier_wait(tma_mbar_addr + stage_id * 8, phase);
-    asm volatile("tcgen05.fence::after_thread_sync;");  // (why) do we need this? from DeepGEMM
-
-    // flip phase when we have cycled through all TMA buffers
-    if (stage_id == NUM_STAGES - 1)
-      phase ^= 1;
-
-    const int A_smem = smem + stage_id * (A_size + B_size);
-    const int B_smem = A_smem + A_size;
-
-    // set up shared memory descriptors for A and B
-    // https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-shared-memory-descriptor
-    // 128-byte swizzling. LBO is implied to be 1.
-    auto make_desc = [](int addr) -> uint64_t {
-      const int SBO = 8 * 128;
-      return desc_encode(addr) | (desc_encode(SBO) << 32ULL) | (1ULL << 46ULL) | (2ULL << 61ULL);
-    };
-
-    // manually unroll 1st iteration to disable accumulation
-    {
-      tcgen05_mma_f16(taddr, make_desc(A_smem), make_desc(B_smem), i_desc, iter_k);
-      for (int k2 = 1; k2 < 64 / MMA_K; k2++) {
-        uint64_t a_desc = make_desc(A_smem + k2 * 32);
-        uint64_t b_desc = make_desc(B_smem + k2 * 32);
-        tcgen05_mma_f16(taddr, a_desc, b_desc, i_desc, 1);
-      }
-    }
-    // k1 selects the (BLOCK_M, 64) tile.
-    // k2 selects the (BLOCK_M, 16) tile, whose rows are swizzled.
-    for (int k1 = 1; k1 < BLOCK_K / 64; k1++)
-      for (int k2 = 0; k2 < 64 / MMA_K; k2++) {
-        uint64_t a_desc = make_desc(A_smem + k1 * BLOCK_M * 128 + k2 * 32);
-        uint64_t b_desc = make_desc(B_smem + k1 * BLOCK_N * 128 + k2 * 32);
-        tcgen05_mma_f16(taddr, a_desc, b_desc, i_desc, 1);
-      }
-    asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];"
-                :: "r"(mma_mbar_addr + stage_id * 8) : "memory");
-  };
-
   const int num_iters = K / BLOCK_K;
   if (warp_id == 0 && elect_sync()) {
     // TMA warp
-    for (int iter_k = 0; iter_k < num_iters; iter_k++)
-      load(iter_k);
+    for (int iter_k = 0; iter_k < num_iters; iter_k++) {
+      // wait for MMA
+      // the initial TMA phase is 0, and it is available. so we wait for 1 instead.
+      const int stage_id = iter_k % NUM_STAGES;
+      mbarrier_wait(mma_mbar_addr + stage_id * 8, phase ^ 1);
+
+      // flip phase when we have cycled through all TMA buffers
+      if (stage_id == NUM_STAGES - 1)
+        phase ^= 1;
+
+      const int mbar_addr = tma_mbar_addr + stage_id * 8;
+      const int A_smem = smem + stage_id * (A_size + B_size);
+      const int B_smem = A_smem + A_size;
+
+      // original layout: [K, M]
+      // permute:         [K/8, M/64, 8, 64]
+      const int off_k = iter_k * BLOCK_K;
+      tma_4d_g2s(A_smem, &A_tmap, 0, 0, off_m / 64, off_k / 8, mbar_addr);
+      tma_4d_g2s(B_smem, &B_tmap, 0, 0, off_n / 64, off_k / 8, mbar_addr);
+      asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
+                  :: "r"(mbar_addr), "r"(A_size + B_size) : "memory");
+    }
   }
   else if (warp_id == 1 && elect_sync()) {
     // MMA warp
-    for (int iter_k = 0; iter_k < num_iters; iter_k++)
-      compute(iter_k);
+    // https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-instruction-descriptor
+    constexpr uint32_t i_desc = (1U << 4U)   // dtype=FP32
+                              | (1U << 7U)   // atype=BF16
+                              | (1U << 10U)  // btype=BF16
+                              | ((uint32_t)BLOCK_N >> 3U << 17U)  // MMA_N
+                              | ((uint32_t)BLOCK_M >> 4U << 24U)  // MMA_M
+                              | (1U << 15U)  // trans A
+                              | (1U << 16U)  // trans B
+                              ;
+
+    for (int iter_k = 0; iter_k < num_iters; iter_k++) {
+      // wait for TMA
+      const int stage_id = iter_k % NUM_STAGES;
+      mbarrier_wait(tma_mbar_addr + stage_id * 8, phase);
+      asm volatile("tcgen05.fence::after_thread_sync;");  // (why) do we need this? from DeepGEMM
+
+      // flip phase when we have cycled through all TMA buffers
+      if (stage_id == NUM_STAGES - 1)
+        phase ^= 1;
+
+      const int A_smem = smem + stage_id * (A_size + B_size);
+      const int B_smem = A_smem + A_size;
+
+      // set up shared memory descriptors for A and B
+      // https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-shared-memory-descriptor
+      auto make_desc = [](int addr, int BLOCK_MN) -> uint64_t {
+        const int LBO = 128 * 8;
+        const int SBO = BLOCK_MN * sizeof(nv_bfloat16) * 8;
+        return desc_encode(addr)
+              | (desc_encode(LBO) << 16ULL)
+              | (desc_encode(SBO) << 32ULL)
+              | (1ULL << 46ULL)
+              | (2ULL << 61ULL);
+      };
+
+      tcgen05_mma_f16(taddr, make_desc(A_smem, BLOCK_M), make_desc(B_smem, BLOCK_N), i_desc, iter_k);
+      for (int k = 1; k < BLOCK_K / MMA_K; k++) {
+        uint64_t a_desc = make_desc(A_smem + k * MMA_K * BLOCK_M * sizeof(nv_bfloat16), BLOCK_M);
+        uint64_t b_desc = make_desc(B_smem + k * MMA_K * BLOCK_N * sizeof(nv_bfloat16), BLOCK_N);
+        tcgen05_mma_f16(taddr, a_desc, b_desc, i_desc, 1);
+      }
+      asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];"
+                  :: "r"(mma_mbar_addr + stage_id * 8) : "memory");
+    }
 
     // signal when tcgen05 finishes with the main loop
     asm volatile("tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];"
@@ -185,7 +178,7 @@ void matmul_v4_kernel(
 }
 
 template <int BLOCK_N, int BLOCK_K, int NUM_STAGES>
-void matmul_v4_launch(
+void matmul_v4_trans_launch(
   const nv_bfloat16 *A_ptr,
   const nv_bfloat16 *B_ptr,
         nv_bfloat16 *C_ptr,
@@ -193,15 +186,15 @@ void matmul_v4_launch(
 ) {
   CUtensorMap A_tmap, B_tmap;
 
-  // input layout for tcgen05: contiguous blocks of (MMA_M, 64)
-  // then we perform swizzling within this block
-  // 3D tensormap (WIDTH / 64, HEIGHT, 64) : (64, WIDTH, 1)
-  auto init_tmap_AB = [&](CUtensorMap *tmap, const nv_bfloat16 *ptr, uint64_t global_height, uint32_t shared_height) {
-    constexpr uint32_t rank = 3;
-    uint64_t globalDim[rank]       = {64, global_height, (uint64_t)K / 64};
-    uint64_t globalStrides[rank-1] = {(uint64_t)K * sizeof(nv_bfloat16), 128};  // in bytes
-    uint32_t boxDim[rank]          = {64, shared_height, (uint32_t)BLOCK_K / 64};
-    uint32_t elementStrides[rank]  = {1, 1, 1};
+  // original layout: [K, M] : [M, 1]
+  // unflatten:       [K/8, 8, M/64, 64] : [M*8, M, 64, 1]
+  // permute:         [K/8, M/64, 8, 64] : [M*8, 64, M, 1]
+  auto init_tmap_AB = [&](CUtensorMap *tmap, const nv_bfloat16 *ptr, uint64_t MN, uint32_t BLOCK_MN) {
+    constexpr uint32_t rank = 4;
+    uint64_t globalDim[rank]       = {64, 8, MN / 64, K / 8};
+    uint64_t globalStrides[rank-1] = {MN * sizeof(nv_bfloat16), 128, MN * 8 * sizeof(nv_bfloat16)};  // in bytes
+    uint32_t boxDim[rank]          = {64, 8, BLOCK_MN / 64, BLOCK_K / 8};
+    uint32_t elementStrides[rank]  = {1, 1, 1, 1};
 
     auto err = cuTensorMapEncodeTiled(
       tmap,
@@ -226,18 +219,28 @@ void matmul_v4_launch(
   int size_AB = (BLOCK_M + BLOCK_N) * BLOCK_K * NUM_STAGES;
   int smem_size = size_AB * sizeof(nv_bfloat16);
 
-  auto this_kernel = matmul_v4_kernel<BLOCK_N, BLOCK_K, NUM_STAGES>;
+  auto this_kernel = matmul_v4_trans_kernel<BLOCK_N, BLOCK_K, NUM_STAGES>;
   if (smem_size > 48'000)
     cudaFuncSetAttribute(this_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
   this_kernel<<<grid, TB_SIZE, smem_size>>>(A_tmap, B_tmap, C_ptr, M, N, K);
 }
 
-void matmul_v4(
-  const nv_bfloat16 *A_ptr,
-  const nv_bfloat16 *B_ptr,
-        nv_bfloat16 *C_ptr,
-  int M, int N, int K
-) {
-  matmul_v4_launch<128, 64, 7>(A_ptr, B_ptr, C_ptr, M, N, K);
+at::Tensor matmul_v4_trans(const at::Tensor& A, const at::Tensor& B) {
+  int M = A.size(0);
+  int K = A.size(1);
+  int N = B.size(1);
+  auto C = at::empty({M, N}, A.options());
+  // auto C = at::zeros({M, N}, A.options());  // for correctness check, use this
+
+  auto *A_ptr = reinterpret_cast<nv_bfloat16 *>(A.data_ptr());
+  auto *B_ptr = reinterpret_cast<nv_bfloat16 *>(B.data_ptr());
+  auto *C_ptr = reinterpret_cast<nv_bfloat16 *>(C.data_ptr());
+
+  matmul_v4_trans_launch<128, 128, 3>(A_ptr, B_ptr, C_ptr, M, N, K);
+  return C;
+}
+
+TORCH_LIBRARY(my_matmul, m) {
+  m.def("matmul_v4_trans(Tensor A, Tensor B) -> Tensor", &matmul_v4_trans);
 }
