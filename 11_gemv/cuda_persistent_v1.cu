@@ -24,7 +24,7 @@ void cuda_persistent_v1_kernel(
 #endif
 
   // each warp handle WARP_N rows per iteration
-  for (int off_n = (bid * NUM_WARPS + warp_id) * WARP_N; off_n < N; off_n += gridDim.x * WARP_N) {
+  for (int off_n = (bid * NUM_WARPS + warp_id) * WARP_N; off_n < N; off_n += gridDim.x * NUM_WARPS * WARP_N) {
     float acc[WARP_N][2] = {};
     constexpr int NUM = VEC_SIZE * 2;
 
@@ -33,9 +33,9 @@ void cuda_persistent_v1_kernel(
       int x[VEC_SIZE], w[WARP_N][VEC_SIZE];
       float x_f32[NUM], w_f32[WARP_N][NUM];
 
-      ldg_b32<VEC_SIZE>(x, x_ptr + col);
       for (int n = 0; n < WARP_N; n++)
         ldg_b32_fast<VEC_SIZE>(w[n], w_ptr + ((off_n + n) * K + col));
+      ldg_b32<VEC_SIZE>(x, x_ptr + col);
 
       for (int j = 0; j < VEC_SIZE; j++) {
         bf16x2_to_fp32x2(x_f32 + j * 2, x[j]);

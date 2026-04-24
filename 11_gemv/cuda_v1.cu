@@ -33,12 +33,12 @@ void cuda_v1_kernel(
     int x[NUM / 2], w[NUM / 2];
     float x_f32[NUM], w_f32[NUM];
 
-    ldg_b32<NUM / 2>(x, x_ptr + col);
     ldg_b32_fast<NUM / 2>(w, w_ptr + (row * K + col));
+    ldg_b32<NUM / 2>(x, x_ptr + col);
 
     for (int j = 0; j < NUM / 2; j++) {
-      bf16x2_to_fp32x2(x_f32 + j * 2, x[j]);
       bf16x2_to_fp32x2(w_f32 + j * 2, w[j]);
+      bf16x2_to_fp32x2(x_f32 + j * 2, x[j]);
 
 #if __CUDA_ARCH__ == 1000
       fma_f32x2(acc, x_f32 + j * 2, w_f32 + j * 2, acc);
