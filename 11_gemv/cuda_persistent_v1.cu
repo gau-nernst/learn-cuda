@@ -80,7 +80,7 @@ void cuda_persistent_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 
   cudaGetDeviceProperties(&prop, 0);
   const int num_sms = prop.multiProcessorCount;
 
-  constexpr int NUM_WARPS = 4;
+  constexpr int NUM_WARPS = 8;
   constexpr int WARP_N = 4;
 
 #define DISPATCH(K_) else if (K == K_) { \
