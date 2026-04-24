@@ -1,42 +1,137 @@
 import argparse
-import time
+import importlib
+import math
+from typing import TYPE_CHECKING
 
 import torch
-from triton.testing import do_bench
-from triton_v1 import triton_v1
+
+if TYPE_CHECKING:
+    import cuda.bench
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--profile")
-    parser.add_argument("--shape", type=int, nargs="+", default=[4096, 4096])
-    args = parser.parse_args()
+def get_membw():
+    prop = torch.cuda.get_device_properties()
+    print(f"Memory bus width: {prop.memory_bus_width}-bit")
+    print(f"Memory clock: {prop.memory_clock_rate / 1e3} kHz")
+    return prop.memory_bus_width * prop.memory_clock_rate / 8.0 * 2
+
+
+def get_kernel(name: str):
+    if name == "eager":
+        f = torch.mm
+    elif name == "inductor":
+        # torch._inductor.config.max_autotune_gemm_backends = "TRITON"
+        # torch._inductor.utils.is_big_gpu = lambda _: True
+        f = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
+    else:
+        f = getattr(importlib.import_module(name), name)
+    return f
+
+
+def to_torch_stream(s: "cuda.bench.CudaStream", device: int | None):
+    return torch.cuda.ExternalStream(stream_ptr=s.addressof(), device=device)
+
+
+def torch_bench(state: "cuda.bench.State") -> None:
+    # state.set_throttle_threshold(0.25)
+    device = state.get_device()
+
+    # select kernel
+    f = get_kernel(state.get_string("kernel"))
 
     M = 1
-    N, K = args.shape
-    A = torch.randn(M, K).bfloat16().cuda()
-    B = torch.randn(N, K).bfloat16().cuda().T
-    inductor_mm = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
+    N, K = [int(x) for x in state.get_string("shape").split(",")]
 
-    SOL_LOOKUP = {
-        "NVIDIA GeForce RTX 5090": 1792,
-    }
-    sol = SOL_LOOKUP.get(torch.cuda.get_device_name(), float("inf"))
+    stream = to_torch_stream(state.get_stream(), device)
+    with torch.cuda.stream(stream):
+        scale = K**-0.5  # make sure output doesn't explode
+        A = torch.randn(M, K, device=device).mul(scale).bfloat16()
+        B = torch.randn(N, K, device=device).mul(scale).bfloat16().T
 
-    def bench_and_print(f, name):
-        time.sleep(1)  # sleep to stabilize thermal
-        latency_ms = do_bench(lambda: f(A, B), return_mode="median")
-        achieved_bw = 2 * (M * K + N * K + M * N) / 1e9 / (latency_ms / 1e3)
-        pct_sol = achieved_bw / sol * 100
-        print(f"{name}:\t{latency_ms:.4f} ms\t{achieved_bw:.2f} GB/s\t{pct_sol:.2f}% SOL")
+        # correctness check
+        # compute in FP32 to avoid split-K
+        out_ref = torch.mm(A.float(), B.float()).bfloat16()
+        out = f(A, B)
+        torch.testing.assert_close(out, out_ref)
 
-    out_ref = torch.mm(A.float(), B.float()).bfloat16()
-    bench_and_print(torch.mm, "CuBLAS")
-    bench_and_print(inductor_mm, "Inductor")
+        inputs_list = []
+        for _ in range(state.get_int64("num_inputs")):
+            A = torch.randn(M, K, device=device).mul(scale).bfloat16()
+            B = torch.randn(N, K, device=device).mul(scale).bfloat16().T
+            inputs_list.append((A, B))
 
-    torch.testing.assert_close(triton_v1(A, B), out_ref)
-    bench_and_print(triton_v1, "triton_v1")
+    def launcher(launch: "cuda.bench.Launch") -> None:
+        stream = to_torch_stream(launch.get_stream(), device)
+        with torch.cuda.stream(stream):
+            for A, B in inputs_list:
+                f(A, B)
+
+    state.exec(launcher, sync=True)
+
+
+def benchmark(shape: str):
+    import cuda.bench
+    import pandas as pd
+
+    print(f"{torch.__version__=}")
+    print(f"{torch.version.cuda=}")
+
+    M = 1
+    N, K = map(int, shape.split(","))
+
+    # duplicate inputs to make sure each measurement is at least 10ms
+    membw = get_membw()
+    min_latency_ms = (M * K + N * K + M * N) * 2 / membw * 1e3
+    num_inputs = math.ceil(10 / min_latency_ms)
+
+    kernels_list = []
+    kernels_list += ["eager", "inductor"]
+    kernels_list += ["triton_v1"]
+
+    bench = cuda.bench.register(torch_bench)
+    bench.add_string_axis("kernel", kernels_list)
+    bench.add_string_axis("shape", [shape])
+    bench.add_int64_axis("num_inputs", [num_inputs])
+
+    result_path = "/tmp/result.csv"
+    cuda.bench.run_all_benchmarks(["--csv", result_path])
+
+    df = pd.read_csv(result_path)
+    df["GPU Time (sec)"] /= num_inputs  # rescale
+    df["latency (us)"] = df["GPU Time (sec)"] * 1e6
+    df["GB/s"] = (M * K + N * K + M * N) * 2 / df["GPU Time (sec)"] * 1e-9
+
+    # apply formatting
+    df["latency (us)"] = df["latency (us)"].map("{:.2f}".format)
+    df["GB/s"] = df["GB/s"].map("{:.2f}".format)
+    df["Noise"] = df["Noise"].map("{:.2%}".format)
+
+    print()
+    print(df[["kernel", "latency (us)", "Noise", "GB/s"]].to_markdown(index=False))
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile")
+    parser.add_argument("--shape", default="4096,4096")
+    parser.add_argument("--modal")
+    args = parser.parse_args()
+
+    if args.modal is not None:
+        import modal
+
+        image = (
+            modal.Image.from_registry("nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04", add_python="3.12")
+            .entrypoint([])  # remove verbose logging by base image on entry
+            .uv_pip_install("torch==2.11.0")
+            .uv_pip_install("ninja", "pandas", "tabulate", "cuda-bench[cu13]")
+            .add_local_python_source("triton_v1")
+        )
+        app = modal.App("gemv", image=image)
+        modal_benchmark = app.function(gpu=args.modal)(benchmark)
+
+        with modal.enable_output(), app.run():
+            modal_benchmark.remote(args.shape)
+
+    else:
+        benchmark(args.shape)
