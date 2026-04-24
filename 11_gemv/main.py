@@ -1,12 +1,17 @@
 import argparse
 import importlib
 import math
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
+from torch.utils.cpp_extension import load
 
 if TYPE_CHECKING:
     import cuda.bench
+
+
+CURRENT_DIR = Path(__file__).parent
 
 
 def get_membw():
@@ -23,6 +28,17 @@ def get_kernel(name: str):
         # torch._inductor.config.max_autotune_gemm_backends = "TRITON"
         # torch._inductor.utils.is_big_gpu = lambda _: True
         f = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
+    elif name.startswith("cuda_"):
+        sources = [str(CURRENT_DIR / "gemv.cpp")]
+        sources.extend(str(x) for x in CURRENT_DIR.glob("cuda_*.cu"))
+        load(
+            "my_gemv",
+            sources,
+            extra_cflags=["-O3"],
+            extra_cuda_cflags=["-O3"],
+            is_python_module=False,
+        )
+        f = getattr(torch.ops.my_gemv, name)
     else:
         f = getattr(importlib.import_module(name), name)
     return f
@@ -87,6 +103,7 @@ def benchmark(shape: str):
     kernels_list = []
     kernels_list += ["eager", "inductor"]
     kernels_list += ["triton_v1"]
+    kernels_list += ["cuda_v1"]
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("kernel", kernels_list)
@@ -125,7 +142,9 @@ if __name__ == "__main__":
             .entrypoint([])  # remove verbose logging by base image on entry
             .uv_pip_install("torch==2.11.0")
             .uv_pip_install("ninja", "pandas", "tabulate", "cuda-bench[cu13]")
+            .workdir("/workspace")
             .add_local_python_source("triton_v1")
+            .add_local_dir(CURRENT_DIR, remote_path="/workspace")
         )
         app = modal.App("gemv", image=image)
         modal_benchmark = app.function(gpu=args.modal)(benchmark)
