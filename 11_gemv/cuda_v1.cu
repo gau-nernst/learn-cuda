@@ -68,7 +68,11 @@ void cuda_v1(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int N, 
 }
 
   if (false) {}
+  DISPATCH(1024)
+  DISPATCH(2048)
+  DISPATCH(2560)
   DISPATCH(4096)
+  DISPATCH(5120)
 
 #undef DISPATCH
 }
