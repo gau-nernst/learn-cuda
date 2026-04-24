@@ -5,6 +5,7 @@
 typedef void GemvFn(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int N, int K);
 
 GemvFn cuda_v1;
+GemvFn cuda_persistent_v1;
 
 template <GemvFn gemv_fn>
 at::Tensor gemv(const at::Tensor& A, const at::Tensor& B) {
@@ -24,4 +25,5 @@ at::Tensor gemv(const at::Tensor& A, const at::Tensor& B) {
 
 TORCH_LIBRARY(my_gemv, m) {
   m.def("cuda_v1(Tensor A, Tensor B) -> Tensor", &gemv<cuda_v1>);
+  m.def("cuda_persistent_v1(Tensor A, Tensor B) -> Tensor", &gemv<cuda_persistent_v1>);
 }

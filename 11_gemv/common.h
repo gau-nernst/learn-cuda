@@ -42,6 +42,14 @@ template <int VEC>
 __device__ inline
 void ldg_b32_fast(void *data_, const void *ptr) {
   int *data = reinterpret_cast<int *>(data_);
+  if constexpr (VEC == 1)
+    asm volatile("ld.global.relaxed.cta.L1::no_allocate.b32 %0, [%1];"
+                : "=r"(data[0])
+                : "l"(ptr));
+  if constexpr (VEC == 2)
+    asm volatile("ld.global.relaxed.cta.L1::no_allocate.v2.b32 {%0, %1}, [%2];"
+                : "=r"(data[0]), "=r"(data[1])
+                : "l"(ptr));
   if constexpr (VEC == 4)
     asm volatile("ld.global.relaxed.cta.L1::no_allocate.v4.b32 {%0, %1, %2, %3}, [%4];"
                 : "=r"(data[0]), "=r"(data[1]), "=r"(data[2]), "=r"(data[3])
@@ -51,6 +59,52 @@ void ldg_b32_fast(void *data_, const void *ptr) {
                 : "=r"(data[0]), "=r"(data[1]), "=r"(data[2]), "=r"(data[3]),
                   "=r"(data[4]), "=r"(data[5]), "=r"(data[6]), "=r"(data[7])
                 : "l"(ptr));
+}
+
+template <int VEC>
+__device__ inline
+void stg_b32(void *ptr, const void *data_) {
+  const int *data = reinterpret_cast<const int *>(data_);
+  if constexpr (VEC == 1)
+    asm volatile("st.global.b32 [%0], %1;"
+                :: "l"(ptr),
+                "r"(data[0]));
+  if constexpr (VEC == 2)
+    asm volatile("st.global.v2.b32 [%0], {%1, %2};"
+                :: "l"(ptr),
+                "r"(data[0]), "r"(data[1]));
+  if constexpr (VEC == 4)
+    asm volatile("st.global.v4.b32 [%0], {%1, %2, %3, %4};"
+                :: "l"(ptr),
+                "r"(data[0]), "r"(data[1]), "r"(data[2]), "r"(data[3]));
+  if constexpr (VEC == 8)
+    asm volatile("st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                :: "l"(ptr),
+                "r"(data[0]), "r"(data[1]), "r"(data[2]), "r"(data[3]),
+                "r"(data[4]), "r"(data[5]), "r"(data[6]), "r"(data[7]));
+}
+
+template <int VEC>
+__device__ inline
+void stg_b32_fast(void *ptr, const void *data_) {
+  const int *data = reinterpret_cast<const int *>(data_);
+  if constexpr (VEC == 1)
+    asm volatile("st.global.relaxed.cta.L1::no_allocate.b32 [%0], %1;"
+                :: "l"(ptr),
+                "r"(data[0]));
+  if constexpr (VEC == 2)
+    asm volatile("st.global.relaxed.cta.L1::no_allocate.v2.b32 [%0], {%1, %2};"
+                :: "l"(ptr),
+                "r"(data[0]), "r"(data[1]));
+  if constexpr (VEC == 4)
+    asm volatile("st.global.relaxed.cta.L1::no_allocate.v4.b32 [%0], {%1, %2, %3, %4};"
+                :: "l"(ptr),
+                "r"(data[0]), "r"(data[1]), "r"(data[2]), "r"(data[3]));
+  if constexpr (VEC == 8)
+    asm volatile("st.global.relaxed.cta.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                :: "l"(ptr),
+                "r"(data[0]), "r"(data[1]), "r"(data[2]), "r"(data[3]),
+                "r"(data[4]), "r"(data[5]), "r"(data[6]), "r"(data[7]));
 }
 
 __device__ inline

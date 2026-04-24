@@ -56,7 +56,7 @@ def torch_bench(state: "cuda.bench.State") -> None:
     f = get_kernel(state.get_string("kernel"))
 
     M = 1
-    N, K = [int(x) for x in state.get_string("shape").split(",")]
+    N, K = [int(x) for x in state.get_string("shape").split("_")]
 
     stream = to_torch_stream(state.get_stream(), device)
     with torch.cuda.stream(stream):
@@ -93,7 +93,7 @@ def benchmark(shape: str):
     print(f"{torch.version.cuda=}")
 
     M = 1
-    N, K = map(int, shape.split(","))
+    N, K = map(int, shape.split("_"))
 
     # duplicate inputs to make sure each measurement is at least 10ms
     membw = get_membw()
@@ -102,8 +102,8 @@ def benchmark(shape: str):
 
     kernels_list = []
     kernels_list += ["eager", "inductor"]
-    kernels_list += ["triton_v1"]
     kernels_list += ["cuda_v1"]
+    kernels_list += ["cuda_persistent_v1"]
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("kernel", kernels_list)
@@ -130,7 +130,7 @@ def benchmark(shape: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile")
-    parser.add_argument("--shape", default="4096,4096")
+    parser.add_argument("--shape", default="4096_4096")
     parser.add_argument("--modal")
     args = parser.parse_args()
 
