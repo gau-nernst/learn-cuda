@@ -162,7 +162,6 @@ if __name__ == "__main__":
             .uv_pip_install("torch==2.11.0")
             .uv_pip_install("transformers", "ninja", "pandas", "tabulate", "cuda-bench[cu13]")
             .workdir("/workspace")
-            .add_local_python_source("reference", "mlp_triton_v1", "mlp_gemv_triton_v1")
             .add_local_dir(CURRENT_DIR, remote_path="/workspace")
         )
         app = modal.App("megakernel-mlp", image=image)

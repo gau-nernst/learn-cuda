@@ -3,6 +3,7 @@
 import argparse
 import importlib
 import math
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -11,6 +12,9 @@ from reference import _precompute_rope, attn_ref, get_sol
 
 if TYPE_CHECKING:
     import cuda.bench
+
+
+CURRENT_DIR = Path(__file__).parent
 
 
 def get_kernel(name: str):
@@ -125,7 +129,7 @@ def benchmark(args: argparse.Namespace):
 
     kernels_list = []
     kernels_list += ["eager", "inductor"]
-    kernels_list += ["attn_triton_v1.attn_triton_v1"]
+    kernels_list += ["attn_triton_v1.attn_triton_v1", "attn_triton_v2.attn_triton_v2"]
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("kernel", kernels_list)
@@ -172,9 +176,10 @@ if __name__ == "__main__":
         image = (
             modal.Image.from_registry("nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04", add_python="3.12")
             .entrypoint([])  # remove verbose logging by base image on entry
-            .uv_pip_install("torch==2.10.0", index_url="https://download.pytorch.org/whl/cu130")
+            .uv_pip_install("torch==2.11.0")
             .uv_pip_install("transformers", "ninja", "pandas", "tabulate", "cuda-bench[cu13]")
-            .add_local_python_source("reference", "attn_triton_v1")
+            .workdir("/workspace")
+            .add_local_dir(CURRENT_DIR, remote_path="/workspace")
         )
         app = modal.App("megakernel-mlp", image=image)
         modal_main = app.function(image=image, gpu=args.modal)(benchmark)
