@@ -33,17 +33,18 @@ Note:
 
 **M=1, N=3072, K=1024**
 
-Modal H200
+PyTorch 2.11 (CUDA 13.0)
 
-Kernel                 | Time (us) | TFLOPS | Memory BW (GB/s)
------------------------|-----------|--------|-----------------
-Eager                  | 56.19     | 0.43   | 336.32
-torch.compile          | 50.93     | 0.46   | 371.03
-Triton v1 fused MLP    | 30.34     | 0.73   | 622.79
-Triton v1 2-kernel MLP | 54.06     | 0.52   | 349.57
-Triton v2              | 21.31     | 0.89   | 886.75
+Kernel                 | H200 (Modal)
+-----------------------|-----------------------
+Eager                  | 62.61us /  301.84 GB/s
+torch.compile          | 62.23us /  303.68 GB/s
+Triton v1 fused MLP    | 31.19us /  605.82 GB/s
+Triton v1 2-kernel MLP | 55.70us /  339.26 GB/s
+GEMV Triton v1         | 22.61us /  835.71 GB/s
+GEMV CUDA v1           | 11.65us / 1621.78 GB/s
 
-5090 (400W). PyTorch 2.11 (CUDA 13.0)
+5090 (400W). PyTorch 2.11 (CUDA 13.0) - to be updated
 
 Kernel                 | Time (us) | TFLOPS | Memory BW (GB/s)
 -----------------------|-----------|--------|-----------------
@@ -51,18 +52,18 @@ Eager                  | 22.28     | 0.85   |  848.01
 torch.compile          | 22.51     | 0.84   |  839.47
 Triton v1 fused MLP    | 17.73     | 1.06   | 1065.63
 Triton v1 2-kernel MLP | 21.70     | 0.87   |  870.94
-Triton v2              | 15.87     | 1.19   | 1190.96
+GEMV Triton v1         | 15.87     | 1.19   | 1190.96
 
 **M=256, N=3072, K=1024**
 
-Modal H200
+PyTorch 2.11 (CUDA 13.0)
 
-Kernel                 | Time (us) | TFLOPS | Memory BW (GB/s)
------------------------|-----------|--------|-----------------
-Eager                  | 58.79     |  82.19 | 410.28
-torch.compile          | 72.73     |  66.43 | 331.61
-Triton v1 fused MLP    | 32.64     | 148.05 | 739.04
-Triton v1 2-kernel MLP | 54.57     |  88.54 | 441.97
+Kernel                 | H200 (Modal)
+-----------------------|---------------------------------------
+Eager                  | 56.53us /  85.47 TFLOPS / 426.63 GB/s
+torch.compile          | 79.42us /  60.84 TFLOPS / 303.68 GB/s
+Triton v1 fused MLP    | 32.67us / 147.90 TFLOPS / 738.29 GB/s
+Triton v1 2-kernel MLP | 54.55us /  88.58 TFLOPS / 442.18 GB/s
 
 5090 (400W). PyTorch 2.11 (CUDA 13.0)
 

@@ -1,14 +1,19 @@
 import argparse
 import importlib
 import math
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pandas as pd
 import torch
 from reference import get_sol, mlp_ref
+from torch.utils.cpp_extension import load
 
 if TYPE_CHECKING:
     import cuda.bench
+
+
+CURRENT_DIR = Path(__file__).parent
 
 
 def get_kernel(name: str):
@@ -17,6 +22,17 @@ def get_kernel(name: str):
     elif name == "inductor":
         # torch._inductor.config.max_autotune_gemm_backends = "TRITON"
         f = torch.compile(mlp_ref, mode="max-autotune-no-cudagraphs", dynamic=False, fullgraph=True)
+    elif "cuda" in name:
+        sources = [str(CURRENT_DIR / "mlp_cuda.cpp")]
+        sources.extend(str(x) for x in CURRENT_DIR.glob("mlp_*.cu"))
+        load(
+            "my_mlp",
+            sources,
+            extra_cflags=["-O3"],
+            extra_cuda_cflags=["-O3"],
+            is_python_module=False,
+        )
+        f = getattr(torch.ops.my_mlp, name)
     else:
         m_name, f_name = name.split(".")
         f = getattr(importlib.import_module(m_name), f_name)
@@ -97,7 +113,8 @@ def benchmark(shape: list[int]):
     kernels_list += ["eager", "inductor"]
     kernels_list += ["mlp_triton_v1.mlp_triton_v1", "mlp_triton_v1.mlp_triton_v1_2stage"]
     if M == 1:
-        kernels_list += ["mlp_triton_v2.mlp_triton_v2"]
+        kernels_list += ["mlp_gemv_triton_v1.mlp_gemv_triton_v1"]
+        kernels_list += ["mlp_gemv_cuda_v1"]
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("kernel", kernels_list)
@@ -142,9 +159,11 @@ if __name__ == "__main__":
         image = (
             modal.Image.from_registry("nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04", add_python="3.12")
             .entrypoint([])  # remove verbose logging by base image on entry
-            .uv_pip_install("torch==2.10.0", index_url="https://download.pytorch.org/whl/cu130")
+            .uv_pip_install("torch==2.11.0")
             .uv_pip_install("transformers", "ninja", "pandas", "tabulate", "cuda-bench[cu13]")
-            .add_local_python_source("reference", "mlp_triton_v1", "mlp_triton_v2")
+            .workdir("/workspace")
+            .add_local_python_source("reference", "mlp_triton_v1", "mlp_gemv_triton_v1")
+            .add_local_dir(CURRENT_DIR, remote_path="/workspace")
         )
         app = modal.App("megakernel-mlp", image=image)
         modal_main = app.function(image=image, gpu=args.modal)(benchmark)

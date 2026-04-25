@@ -8,7 +8,7 @@ from triton_utils import _grid_sync, _rms_norm, _spin_wait
 
 
 @triton.jit
-def mlp_triton_v2_kernel(
+def mlp_gemv_triton_v1_kernel(
     x_ptr,  # (hidden_dim)
     norm_ptr,  # (hidden_dim)
     w13_ptr,  # (mlp_dim * 2, hidden_dim)
@@ -103,7 +103,7 @@ def mlp_triton_v2_kernel(
 _FLAG: Tensor | None = None
 
 
-def mlp_triton_v2(x: Tensor, norm: Tensor, w13: Tensor, w2: Tensor):
+def mlp_gemv_triton_v1(x: Tensor, norm: Tensor, w13: Tensor, w2: Tensor):
     # lazily init _FLAG
     # NOTE: since this flag is shared module-wide, this function is not thread-safe
     global _FLAG
@@ -123,7 +123,7 @@ def mlp_triton_v2(x: Tensor, norm: Tensor, w13: Tensor, w2: Tensor):
     BLOCK_N2 = 8
     BLOCK_K2 = 512
 
-    mlp_triton_v2_kernel[(num_sms,)](
+    mlp_gemv_triton_v1_kernel[(num_sms,)](
         x,
         norm,
         w13,
