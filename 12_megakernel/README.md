@@ -20,7 +20,7 @@ Implementation           | 15 in toks | 1144 in tokens
 -------------------------|------------|----------------
 HF eager                 | 127 tok/s  | 132 tok/s
 vLLM 0.19 (PyTorch 2.10) | 616 tok/s  | 599 tok/s
-Ours                     | 796 tok/s  | 778 tok/s
+Ours                     | 815 tok/s  | 795 tok/s
 
 ## MLP Benchmark results
 

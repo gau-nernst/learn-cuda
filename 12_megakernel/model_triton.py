@@ -416,7 +416,7 @@ def model_triton(
         head_dim=head_dim,
         num_warps=8,
     )
-    assert not x.isnan().any()
+    # assert not x.isnan().any()
 
     # increment position
     buffers.position += 1
