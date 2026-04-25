@@ -50,8 +50,8 @@ def attn_triton_v1_kernel(
         acc = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
 
         for _ in range(dim // BLOCK_K):
-            x_normed = tl.load(tmp_ptrs)
-            wqkv = tl.load(wqkv_ptrs)  # [BLOCK_N, BLOCK_K]
+            x_normed = tl.load(tmp_ptrs).to(tl.float32)
+            wqkv = tl.load(wqkv_ptrs).to(tl.float32)  # [BLOCK_N, BLOCK_K]
             acc += x_normed * wqkv
             tmp_ptrs += BLOCK_K
             wqkv_ptrs += BLOCK_K
@@ -95,8 +95,8 @@ def attn_triton_v1_kernel(
         cos = tl.load(cos_ptr + offs_half).to(tl.float32)
         sin = tl.load(sin_ptr + offs_half).to(tl.float32)
 
-        q_normed = tl.load(q_ptr + (head_id * head_dim + offs_hdim))
-        k_normed = tl.load(k_ptr + (kv_head_id * head_dim + offs_hdim))
+        q_normed = tl.load(q_ptr + (head_id * head_dim + offs_hdim)).to(tl.float32)
+        k_normed = tl.load(k_ptr + (kv_head_id * head_dim + offs_hdim)).to(tl.float32)
 
         q1, q2 = tl.split(tl.reshape(q_normed, (2, head_dim // 2)).T)  # [head_dim/2] each
         k1, k2 = tl.split(tl.reshape(k_normed, (2, head_dim // 2)).T)
@@ -130,8 +130,8 @@ def attn_triton_v1_kernel(
         # unroll the last tile so that we don't do masking here
         num_iters = tl.cdiv(position + 1, BLOCK_ATTN) - 1
         for _ in range(num_iters):
-            k_block = tl.load(k_cache_ptrs)  # [BLOCK_K, head_dim]
-            v_block = tl.load(v_cache_ptrs)  # [head_dim, BLOCK_K]
+            k_block = tl.load(k_cache_ptrs).to(tl.float32)  # [BLOCK_K, head_dim]
+            v_block = tl.load(v_cache_ptrs).to(tl.float32)  # [head_dim, BLOCK_K]
 
             s = tl.sum(q_new * k_block, axis=1)  # [BLOCK_K]
             new_max_s = tl.maximum(max_s, tl.max(s, axis=0))
@@ -147,8 +147,8 @@ def attn_triton_v1_kernel(
 
         # last tile w/ masking
         mask = offs_len < position + 1 - num_iters * BLOCK_ATTN
-        k_block = tl.load(k_cache_ptrs)  # [BLOCK_K, head_dim]
-        v_block = tl.load(v_cache_ptrs, mask=mask, other=0.0)  # [head_dim, BLOCK_K]
+        k_block = tl.load(k_cache_ptrs).to(tl.float32)  # [BLOCK_K, head_dim]
+        v_block = tl.load(v_cache_ptrs, mask=mask, other=0.0).to(tl.float32)  # [head_dim, BLOCK_K]
 
         s = tl.sum(q_new * k_block, axis=1)  # [BLOCK_K]
         s = tl.where(mask, s, float("-inf"))
@@ -180,8 +180,8 @@ def attn_triton_v1_kernel(
         acc = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
 
         for _ in range(q_dim // BLOCK_K):
-            o = tl.load(o_ptrs)  # [BLOCK_K]
-            wo = tl.load(wo_ptrs)  # [BLOCK_N, BLOCK_K]
+            o = tl.load(o_ptrs).to(tl.float32)  # [BLOCK_K]
+            wo = tl.load(wo_ptrs).to(tl.float32)  # [BLOCK_N, BLOCK_K]
             acc += o * wo
             o_ptrs += BLOCK_K
             wo_ptrs += BLOCK_K
@@ -189,7 +189,7 @@ def attn_triton_v1_kernel(
         acc = tl.sum(acc, axis=1)  # [BLOCK_N]
 
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        acc += tl.load(x_ptr + offs_n)
+        acc += tl.load(x_ptr + offs_n).to(tl.float32)
         tl.store(x_ptr + offs_n, acc)
 
     # signal done. last pid issues reset.

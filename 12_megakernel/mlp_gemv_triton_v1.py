@@ -44,20 +44,18 @@ def mlp_gemv_triton_v1_kernel(
         offs_k = tl.arange(0, BLOCK_K1)
 
         tmp_ptrs = tmp_ptr + offs_k
-        w1_ptrs = w1_ptr + (offs_n[:, None] * hidden_dim + offs_k[None, :])
-        w3_ptrs = w3_ptr + (offs_n[:, None] * hidden_dim + offs_k[None, :])
+        w1_ptrs = w1_ptr + (offs_n[:, None] * hidden_dim + offs_k)
+        w3_ptrs = w3_ptr + (offs_n[:, None] * hidden_dim + offs_k)
 
         acc1 = tl.zeros((BLOCK_N1, BLOCK_K1), dtype=tl.float32)
         acc3 = tl.zeros((BLOCK_N1, BLOCK_K1), dtype=tl.float32)
 
         for _ in range(hidden_dim // BLOCK_K1):
-            x_normed = tl.load(tmp_ptrs)
-            w1 = tl.load(w1_ptrs, eviction_policy="evict_first")  # [BLOCK_N, BLOCK_K]
-            w3 = tl.load(w3_ptrs, eviction_policy="evict_first")
-
+            x_normed = tl.load(tmp_ptrs).to(tl.float32)
+            w1 = tl.load(w1_ptrs, eviction_policy="evict_first").to(tl.float32)  # [BLOCK_N, BLOCK_K]
+            w3 = tl.load(w3_ptrs, eviction_policy="evict_first").to(tl.float32)
             acc1 += x_normed * w1
             acc3 += x_normed * w3
-
             tmp_ptrs += BLOCK_K1
             w1_ptrs += BLOCK_K1
             w3_ptrs += BLOCK_K1
@@ -75,22 +73,21 @@ def mlp_gemv_triton_v1_kernel(
         offs_k = tl.arange(0, BLOCK_K2)
 
         tmp_ptrs = tmp_ptr + (hidden_dim + offs_k)
-        w2_ptrs = w2_ptr + (offs_n[:, None] * mlp_dim + offs_k[None, :])
+        w2_ptrs = w2_ptr + (offs_n[:, None] * mlp_dim + offs_k)
 
         acc = tl.zeros((BLOCK_N2, BLOCK_K2), dtype=tl.float32)
 
         for _ in range(mlp_dim // BLOCK_K2):
-            TMP = tl.load(tmp_ptrs)  # [BLOCK_K]
-            W2 = tl.load(w2_ptrs, eviction_policy="evict_first")  # [BLOCK_N, BLOCK_K]
+            TMP = tl.load(tmp_ptrs).to(tl.float32)  # [BLOCK_K]
+            W2 = tl.load(w2_ptrs, eviction_policy="evict_first").to(tl.float32)  # [BLOCK_N, BLOCK_K]
             acc += TMP * W2
-
             tmp_ptrs += BLOCK_K2
             w2_ptrs += BLOCK_K2
 
         acc = tl.sum(acc, axis=1)  # [BLOCK_N]
 
         offs_n = pid_n * BLOCK_N2 + tl.arange(0, BLOCK_N2)
-        acc += tl.load(x_ptr + offs_n)
+        acc += tl.load(x_ptr + offs_n).to(tl.float32)
         tl.store(x_ptr + offs_n, acc)
 
     # signal done. last pid issues reset.

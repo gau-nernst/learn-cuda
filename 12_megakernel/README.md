@@ -14,13 +14,13 @@ To try interactive chat (only Qwen3-0.6B is supported at the moment)
 python chat.py
 ```
 
-The measurement is done with `chat.py`, which is not rigorous by any means. Reporting decode speed at various number of input tokens. Using Qwen3-0.6B. HF eager and Ours use PyTorch 2.11 (CUDA 13.0), vLLM xx uses PyTorch 2.10.
+The measurement is done with `chat.py`, which is not rigorous by any means. Reporting decode speed at various number of input tokens. Using Qwen3-0.6B. HF eager and Ours use PyTorch 2.11 (CUDA 13.0).
 
-Implementation | 15 in toks | 1144 in tokens
----------------|------------|----------------
-HF eager       | 135 tok/s  | 132 tok/s
-vLLM 0.19      | 629 tok/s  | 610 tok/s
-Ours           | 859 tok/s  | 664 tok/s
+Implementation           | 15 in toks | 1144 in tokens
+-------------------------|------------|----------------
+HF eager                 | 135 tok/s  | 132 tok/s
+vLLM 0.19 (PyTorch 2.10) | 629 tok/s  | 610 tok/s
+Ours                     | 850 tok/s  | 814 tok/s
 
 ## MLP Benchmark results
 
@@ -69,8 +69,8 @@ Kernel        | 5090 (400W)            | H200 (Modal)
 --------------|------------------------|-----------------------
 Eager         | 157.10us /  83.50 GB/s | 361.64us /  36.27 GB/s
 torch.compile |  69.08us / 189.90 GB/s | 170.58us /  76.91 GB/s
-Triton v1     |  18.60us / 705.36 GB/s |  25.83us / 507.81 GB/s
-Triton v2     |  19.29us / 679.96 GB/s |  29.06us / 451.44 GB/s
+Triton v1     |  19.15us / 685.06 GB/s |  25.83us / 507.81 GB/s
+Triton v2     |  19.27us / 680.84 GB/s |  29.06us / 451.44 GB/s
 
 **kv_size=4096, dim=1024, num_heads=16, num_kv_heads=8**
 
@@ -80,5 +80,5 @@ Kernel        | 5090 (400W)             | H200 (Modal)
 --------------|-------------------------|-----------------------
 Eager         | 171.03us /  171.74 GB/s | 366.52us /  80.13 GB/s
 torch.compile |  67.72us /  433.70 GB/s | 175.89us / 166.99 GB/s
-Triton v1     |  59.28us /  495.48 GB/s |  81.41us / 360.80 GB/s
-Triton v2     |  28.72us / 1022.75 GB/s |  30.30us / 969.44 GB/s
+Triton v1     |  68.45us /  429.08 GB/s |  81.41us / 360.80 GB/s
+Triton v2     |  28.67us / 1024.62 GB/s |  30.30us / 969.44 GB/s
