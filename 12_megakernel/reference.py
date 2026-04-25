@@ -197,7 +197,7 @@ def attn_ref(
     return x + o.flatten(-2) @ wo.T
 
 
-def model_ref(input_ids: Tensor, params: ModelParams, buffers: ModelBuffers):
+def model_ref(input_ids: Tensor, params: ModelParams, buffers: ModelBuffers, temperature: float = 1.0):
     num_tokens = input_ids.shape[0]
     position = buffers.position
 
@@ -222,10 +222,13 @@ def model_ref(input_ids: Tensor, params: ModelParams, buffers: ModelBuffers):
     buffers.position += num_tokens
 
     # LM head for the last token only
-    x = _rms_norm(x[-1], params.norm)
+    x = _rms_norm(x[-1:], params.norm)
     lm_head = params.lm_head if params.lm_head is not None else params.input_embeds
-    logits = x @ lm_head.T
-    return logits.argmax(-1)
+    logits = torch.mm(x, lm_head.T, out_dtype=torch.float32) / temperature
+
+    # gumbel-max
+    exp = torch.empty_like(logits).exponential_()
+    return (logits - exp.log()).argmax(dim=-1)
 
 
 def load_hf_state_dict(repo_id: str):

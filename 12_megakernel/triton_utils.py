@@ -20,18 +20,20 @@ def _rms_norm(x_ptr, norm_ptr, out_ptr, dim: tl.constexpr, BLOCK_SIZE: tl.conste
 
         for k in range(tl.cdiv(dim, BLOCK_SIZE)):
             offs = k * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            x = tl.load(x_ptr + offs, mask=offs < dim).to(tl.float32)
+            mask = offs < dim
+            x = tl.load(x_ptr + offs, mask, other=0.0).to(tl.float32)
             sum_sq += x * x
 
         inv_rms = tl.rsqrt(tl.sum(sum_sq, axis=0) * (1 / dim) + 1e-6)
 
         for k in range(tl.cdiv(dim, BLOCK_SIZE)):
             offs = k * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            x = tl.load(x_ptr + offs, mask=offs < dim).to(tl.float32)
-            norm = tl.load(norm_ptr + offs, mask=offs < dim).to(tl.float32)
+            mask = offs < dim
+            x = tl.load(x_ptr + offs, mask, other=0.0).to(tl.float32)
+            norm = tl.load(norm_ptr + offs, mask, other=0.0).to(tl.float32)
 
             x = x * inv_rms * norm
-            tl.store(out_ptr + offs, x, mask=offs < dim)
+            tl.store(out_ptr + offs, x, mask)
 
 
 @triton.jit

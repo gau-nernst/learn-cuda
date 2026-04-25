@@ -18,9 +18,9 @@ The measurement is done with `chat.py`, which is not rigorous by any means. Repo
 
 Implementation           | 15 in toks | 1144 in tokens
 -------------------------|------------|----------------
-HF eager                 | 135 tok/s  | 132 tok/s
-vLLM 0.19 (PyTorch 2.10) | 629 tok/s  | 610 tok/s
-Ours                     | 850 tok/s  | 814 tok/s
+HF eager                 | 127 tok/s  | 132 tok/s
+vLLM 0.19 (PyTorch 2.10) | 616 tok/s  | 599 tok/s
+Ours                     | 796 tok/s  | 778 tok/s
 
 ## MLP Benchmark results
 

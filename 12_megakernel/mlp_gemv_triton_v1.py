@@ -31,6 +31,7 @@ def mlp_gemv_triton_v1_kernel(
     # can see the rms norm result in L2 cache.
     if raw_pid == 0:
         _rms_norm(x_ptr, norm_ptr, tmp_ptr, hidden_dim)
+        tl.debug_barrier()
         tl.atomic_add(flag_ptr, 1, sem="release", scope="gpu")
     else:
         _spin_wait(flag_ptr, 1)

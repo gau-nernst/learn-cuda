@@ -14,13 +14,17 @@ class HFGenerator:
         self.eos_token_id = AutoTokenizer.from_pretrained(model_id).eos_token_id
 
     @torch.no_grad()
-    def generate(self, token_ids: list[int], max_tokens: int = 1024):
+    def generate(self, token_ids: list[int], max_tokens: int = 1024, temperature: float = 1.0):
         input_ids = torch.tensor(token_ids, device="cuda")
         kv_cache = DynamicCache()
 
         for _ in range(max_tokens):
             logits = self.model(input_ids.unsqueeze(0), past_key_values=kv_cache).logits.squeeze(0)
-            input_ids = logits[-1].argmax(dim=0, keepdim=True)
+            logits = logits[-1].float() / temperature
+
+            # gumbel-max
+            exp = torch.empty_like(logits).exponential_()
+            input_ids = (logits - exp.log()).argmax(dim=0, keepdim=True)
             token = input_ids.item()
             yield token
 
@@ -41,12 +45,12 @@ class MyGenerator:
             kv_dtype=embeds.dtype,
         )
 
-    def generate(self, token_ids: list[int], max_tokens: int = 1024):
+    def generate(self, token_ids: list[int], max_tokens: int = 1024, temperature: float = 1.0):
         input_ids = torch.tensor(token_ids, device="cuda")
         self.buffers.position = 0
 
         # prefill
-        input_ids = model_ref(input_ids, self.params, self.buffers).unsqueeze(0)
+        input_ids = model_ref(input_ids, self.params, self.buffers, temperature)
         token = input_ids.item()
         yield token
 
@@ -55,7 +59,8 @@ class MyGenerator:
 
         # decode
         for _ in range(max_tokens - 1):
-            input_ids = model_triton(input_ids, self.params, self.buffers).unsqueeze(0)
+            # input_ids = model_ref(input_ids, self.params, self.buffers, temperature)
+            input_ids = model_triton(input_ids, self.params, self.buffers, temperature)
             token = input_ids.item()
             yield token
 
@@ -69,13 +74,13 @@ class VllmGenerator:
 
         self.llm = LLMEngine.from_engine_args(EngineArgs(model_id))
 
-    def generate(self, token_ids: list[int], max_tokens: int = 1024):
+    def generate(self, token_ids: list[int], max_tokens: int = 1024, temperature: float = 1.0):
         from vllm import SamplingParams, TokensPrompt
         from vllm.sampling_params import RequestOutputKind
 
         llm = self.llm
         sampling_params = SamplingParams(
-            temperature=0,
+            temperature=temperature,
             max_tokens=max_tokens,
             output_kind=RequestOutputKind.DELTA,
             detokenize=False,

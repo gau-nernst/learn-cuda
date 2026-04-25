@@ -54,9 +54,12 @@ def attn_triton_v2_kernel(
 
     if raw_pid == 0:
         _rms_norm(x_ptr, norm_ptr, tmp_ptr, dim)
+        tl.debug_barrier()
         tl.atomic_add(flag_ptr, 1, sem="release", scope="gpu")
     else:
         _spin_wait(flag_ptr, 1)
+
+    q_tmp_ptr = tmp_ptr + dim
 
     # QKV projection
     qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
@@ -83,7 +86,7 @@ def attn_triton_v2_kernel(
 
         # write q to tmp buffer
         if pid_n * BLOCK_N < q_dim:
-            tl.store(tmp_ptr + (dim + offs_n), acc)  # [BLOCK_N]
+            tl.store(q_tmp_ptr + offs_n, acc)  # [BLOCK_N]
 
         # write k to cache
         elif pid_n * BLOCK_N < q_dim + kv_dim:
@@ -96,8 +99,6 @@ def attn_triton_v2_kernel(
             tl.store(kv_cache_ptr + offset, acc)
 
     _grid_sync(flag_ptr + 1, num_pids)
-
-    q_tmp_ptr = tmp_ptr + dim
 
     # QK norm
     if raw_pid < num_heads:
@@ -136,12 +137,12 @@ def attn_triton_v2_kernel(
         # handle last tile first, with masking
         if raw_pid // num_heads == num_pids_per_head - 1:
             kv_block = num_kv_blocks - 1
-            offs_len = (kv_block * BLOCK_ATTN + tl.arange(0, BLOCK_ATTN)) % (position + 1)
+            offs_len = kv_block * BLOCK_ATTN + tl.arange(0, BLOCK_ATTN)
             mask = offs_len < position + 1
             k_cache_ptrs = k_cache_ptr + (offs_len[:, None] * num_kv_heads * head_dim + offs_hdim)
             v_cache_ptrs = v_cache_ptr + (offs_len * num_kv_heads * head_dim + offs_hdim[:, None])
-            k_block = tl.load(k_cache_ptrs).to(tl.float32)  # [BLOCK_ATTN, head_dim]
-            v_block = tl.load(v_cache_ptrs, mask=mask, other=0.0).to(tl.float32)  # [head_dim, BLOCK_ATTN]
+            k_block = tl.load(k_cache_ptrs, mask[:, None], other=0.0).to(tl.float32)  # [BLOCK_ATTN, head_dim]
+            v_block = tl.load(v_cache_ptrs, mask, other=0.0).to(tl.float32)  # [head_dim, BLOCK_ATTN]
 
             s = tl.sum(q * k_block, axis=1)  # [BLOCK_ATTN]
             s = tl.where(mask, s, float("-inf"))

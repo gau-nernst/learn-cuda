@@ -37,10 +37,10 @@ def model_triton_kernel(
     norm_ptr,  # (dim)
     flag_ptr,
     dim: tl.constexpr,
+    mlp_dim: tl.constexpr,
     num_heads: tl.constexpr,
     num_kv_heads: tl.constexpr,
     num_pids_per_head: tl.constexpr,
-    mlp_dim: tl.constexpr,
     #
     BLOCK_N_ATTN: tl.constexpr,
     BLOCK_K_ATTN: tl.constexpr,
@@ -66,14 +66,20 @@ def model_triton_kernel(
     tl.debug_barrier()
 
     for layer_id in range(num_layers):
+        qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
+        q_dim: tl.constexpr = num_heads * head_dim
+        kv_dim: tl.constexpr = num_kv_heads * head_dim
+
         if raw_pid == 0:
             _rms_norm(x_ptr, attn_norm_ptr, attn_tmp_ptr, dim)
+            tl.debug_barrier()
             tl.atomic_add(flag_ptr + layer_id * 9, 1, sem="release", scope="gpu")
         else:
             _spin_wait(flag_ptr + layer_id * 9, 1)
 
+        q_tmp_ptr = attn_tmp_ptr + dim
+
         # QKV projection
-        qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
         for pid_n in range(raw_pid, qkv_dim // BLOCK_N_ATTN, num_pids):
             offs_n = pid_n * BLOCK_N_ATTN + tl.arange(0, BLOCK_N_ATTN)
             offs_k = tl.arange(0, BLOCK_K_ATTN)
@@ -92,12 +98,9 @@ def model_triton_kernel(
 
             acc = tl.sum(acc, axis=1)
 
-            q_dim: tl.constexpr = num_heads * head_dim
-            kv_dim: tl.constexpr = num_kv_heads * head_dim
-
             # write q to tmp buffer
             if pid_n * BLOCK_N_ATTN < q_dim:
-                tl.store(attn_tmp_ptr + (dim + offs_n), acc)  # [BLOCK_N]
+                tl.store(q_tmp_ptr + offs_n, acc)  # [BLOCK_N]
 
             # write k to cache
             elif pid_n * BLOCK_N_ATTN < q_dim + kv_dim:
@@ -110,8 +113,6 @@ def model_triton_kernel(
                 tl.store(kv_cache_ptr + offset, acc)
 
         _grid_sync(flag_ptr + (layer_id * 9 + 1), num_pids)
-
-        q_tmp_ptr = attn_tmp_ptr + dim
 
         # QK norm
         if raw_pid < num_heads:
@@ -150,11 +151,11 @@ def model_triton_kernel(
             # handle last tile first, with masking
             if raw_pid // num_heads == num_pids_per_head - 1:
                 kv_block = num_kv_blocks - 1
-                offs_len = (kv_block * BLOCK_ATTN + tl.arange(0, BLOCK_ATTN)) % (position + 1)
+                offs_len = kv_block * BLOCK_ATTN + tl.arange(0, BLOCK_ATTN)
                 mask = offs_len < position + 1
                 k_cache_ptrs = k_cache_ptr + (offs_len[:, None] * num_kv_heads * head_dim + offs_hdim)
                 v_cache_ptrs = v_cache_ptr + (offs_len * num_kv_heads * head_dim + offs_hdim[:, None])
-                k_block = tl.load(k_cache_ptrs).to(tl.float32)  # [BLOCK_ATTN, head_dim]
+                k_block = tl.load(k_cache_ptrs, mask[:, None], other=0.0).to(tl.float32)  # [BLOCK_ATTN, head_dim]
                 v_block = tl.load(v_cache_ptrs, mask, other=0.0).to(tl.float32)  # [head_dim, BLOCK_ATTN]
 
                 s = tl.sum(q * k_block, axis=1)  # [BLOCK_ATTN]
@@ -225,7 +226,6 @@ def model_triton_kernel(
         _spin_wait(flag_ptr + (layer_id * 9 + 4), num_heads)
 
         # output projection
-        q_dim: tl.constexpr = num_heads * head_dim
         for pid_n in range(raw_pid, dim // BLOCK_N_ATTN, num_pids):
             offs_n = pid_n * BLOCK_N_ATTN + tl.arange(0, BLOCK_N_ATTN)
             offs_k = tl.arange(0, BLOCK_K_ATTN)
@@ -253,6 +253,7 @@ def model_triton_kernel(
         # start of MLP
         if raw_pid == 0:
             _rms_norm(x_ptr, mlp_norm_ptr, mlp_tmp_ptr, dim)
+            tl.debug_barrier()
             tl.atomic_add(flag_ptr + (layer_id * 9 + 6), 1, sem="release", scope="gpu")
         else:
             _spin_wait(flag_ptr + (layer_id * 9 + 6), 1)
@@ -261,6 +262,7 @@ def model_triton_kernel(
         w1_ptr = w13_ptr
         w3_ptr = w1_ptr + mlp_dim * dim
 
+        tl.static_assert(mlp_dim % BLOCK_N_W13 == 0)
         for pid_n in range(raw_pid, mlp_dim // BLOCK_N_W13, num_pids):
             offs_n = pid_n * BLOCK_N_W13 + tl.arange(0, BLOCK_N_W13)
             offs_k = tl.arange(0, BLOCK_K_W13)
@@ -272,6 +274,7 @@ def model_triton_kernel(
             acc1 = tl.zeros((BLOCK_N_W13, BLOCK_K_W13), dtype=tl.float32)
             acc3 = tl.zeros((BLOCK_N_W13, BLOCK_K_W13), dtype=tl.float32)
 
+            tl.static_assert(dim % BLOCK_K_W13 == 0)
             for _ in range(dim // BLOCK_K_W13):
                 x_normed = tl.load(tmp_ptrs).to(tl.float32)
                 w1 = tl.load(w1_ptrs, eviction_policy="evict_first").to(tl.float32)  # [BLOCK_N, BLOCK_K]
@@ -290,6 +293,7 @@ def model_triton_kernel(
         _grid_sync(flag_ptr + (layer_id * 9 + 7), num_pids)
 
         # persistent kernel
+        tl.static_assert(dim % BLOCK_N_W2 == 0)
         for pid_n in range(raw_pid, dim // BLOCK_N_W2, num_pids):
             offs_n = pid_n * BLOCK_N_W2 + tl.arange(0, BLOCK_N_W2)
             offs_k = tl.arange(0, BLOCK_K_W2)
@@ -299,6 +303,7 @@ def model_triton_kernel(
 
             acc = tl.zeros((BLOCK_N_W2, BLOCK_K_W2), dtype=tl.float32)
 
+            tl.static_assert(mlp_dim % BLOCK_K_W2 == 0)
             for _ in range(mlp_dim // BLOCK_K_W2):
                 TMP = tl.load(mlp_tmp_ptrs).to(tl.float32)  # [BLOCK_K]
                 W2 = tl.load(w2_ptrs, eviction_policy="evict_first").to(tl.float32)  # [BLOCK_N, BLOCK_K]
@@ -339,7 +344,9 @@ def model_triton_kernel(
 _FLAG: Tensor | None = None
 
 
-def model_triton(input_ids: Tensor, params: reference.ModelParams, buffers: reference.ModelBuffers):
+def model_triton(
+    input_ids: Tensor, params: reference.ModelParams, buffers: reference.ModelBuffers, temperature: float = 1.0
+):
     # lazily init _FLAG
     # NOTE: since this flag is shared module-wide, this function is not thread-safe
     global _FLAG
@@ -360,9 +367,9 @@ def model_triton(input_ids: Tensor, params: reference.ModelParams, buffers: refe
 
     input_embeds = params.input_embeds
     x = input_embeds.new_empty(batch_size, dim)
-    attn_tmp = input_embeds.new_empty(batch_size, dim + num_heads * head_dim)
-    attn_tmp2 = input_embeds.new_empty(batch_size, num_pids_per_head, num_heads, head_dim + 2, dtype=torch.float)
-    mlp_tmp = input_embeds.new_empty(batch_size, dim + mlp_dim)
+    attn_tmp = x.new_empty(batch_size, dim + num_heads * head_dim)
+    attn_tmp2 = x.new_empty(batch_size, num_pids_per_head, num_heads, head_dim + 2, dtype=torch.float)
+    mlp_tmp = x.new_empty(batch_size, dim + mlp_dim)
 
     BLOCK_N_ATTN, BLOCK_K_ATTN = 16, 512
     BLOCK_ATTN = 128
@@ -395,10 +402,10 @@ def model_triton(input_ids: Tensor, params: reference.ModelParams, buffers: refe
         params.norm,
         flag_ptr=_FLAG,
         dim=dim,
+        mlp_dim=mlp_dim,
         num_heads=params.num_heads,
         num_kv_heads=params.num_kv_heads,
         num_pids_per_head=num_pids_per_head,
-        mlp_dim=mlp_dim,
         BLOCK_N_ATTN=BLOCK_N_ATTN,
         BLOCK_K_ATTN=BLOCK_K_ATTN,
         BLOCK_ATTN=BLOCK_ATTN,
@@ -409,6 +416,7 @@ def model_triton(input_ids: Tensor, params: reference.ModelParams, buffers: refe
         head_dim=head_dim,
         num_warps=8,
     )
+    assert not x.isnan().any()
 
     # increment position
     buffers.position += 1
@@ -416,5 +424,8 @@ def model_triton(input_ids: Tensor, params: reference.ModelParams, buffers: refe
     # NOTE: right now it's much faster to do LM head separately
     # (or perhaps i need a better way to write this in triton)
     lm_head = params.lm_head if params.lm_head is not None else params.input_embeds
-    logits = x @ lm_head.T
-    return logits.argmax(-1)
+    logits = torch.mm(x, lm_head.T, out_dtype=torch.float32) / temperature
+
+    # gumbel-max
+    exp = torch.empty_like(logits).exponential_()
+    return (logits - exp.log()).argmax(dim=-1)
