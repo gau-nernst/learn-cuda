@@ -69,7 +69,7 @@ Kernel        | 5090 (400W)            | H200 (Modal)
 --------------|------------------------|-----------------------
 Eager         | 157.10us /  83.50 GB/s | 361.64us /  36.27 GB/s
 torch.compile |  69.08us / 189.90 GB/s | 170.58us /  76.91 GB/s
-Triton v1     |  19.15us / 685.06 GB/s |  25.83us / 507.81 GB/s
+Triton v1     |  18.42us / 712.32 GB/s |  25.83us / 507.81 GB/s
 Triton v2     |  19.27us / 680.84 GB/s |  29.06us / 451.44 GB/s
 
 **kv_size=4096, dim=1024, num_heads=16, num_kv_heads=8**
@@ -78,7 +78,7 @@ PyTorch 2.11 (CUDA 13.0)
 
 Kernel        | 5090 (400W)             | H200 (Modal)
 --------------|-------------------------|-----------------------
-Eager         | 171.03us /  171.74 GB/s | 366.52us /  80.13 GB/s
-torch.compile |  67.72us /  433.70 GB/s | 175.89us / 166.99 GB/s
-Triton v1     |  68.45us /  429.08 GB/s |  81.41us / 360.80 GB/s
-Triton v2     |  28.67us / 1024.62 GB/s |  30.30us / 969.44 GB/s
+Eager         | 171.03us /  171.74 GB/s | 358.15us /  82.01 GB/s
+torch.compile |  67.72us /  433.70 GB/s | 166.86us / 176.02 GB/s
+Triton v1     |  59.41us /  494.38 GB/s |  69.25us / 424.11 GB/s
+Triton v2     |  28.67us / 1024.62 GB/s |  29.76us / 986.82 GB/s

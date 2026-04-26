@@ -179,7 +179,7 @@ if __name__ == "__main__":
             .uv_pip_install("torch==2.11.0")
             .uv_pip_install("transformers", "ninja", "pandas", "tabulate", "cuda-bench[cu13]")
             .workdir("/workspace")
-            .add_local_dir(CURRENT_DIR, remote_path="/workspace")
+            .add_local_dir(CURRENT_DIR, remote_path="/workspace", ignore=["*.venv"])
         )
         app = modal.App("megakernel-mlp", image=image)
         modal_main = app.function(image=image, gpu=args.modal)(benchmark)

@@ -32,6 +32,10 @@ def attn_triton_v1_kernel(
     raw_pid = tl.program_id(0)
     num_pids = tl.num_programs(0)
 
+    qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
+    q_dim: tl.constexpr = num_heads * head_dim
+    kv_dim: tl.constexpr = num_kv_heads * head_dim
+
     if raw_pid == 0:
         _rms_norm(x_ptr, norm_ptr, tmp_ptr, dim)
         tl.debug_barrier()
@@ -40,7 +44,6 @@ def attn_triton_v1_kernel(
         _spin_wait(flag_ptr, 1)
 
     # QKV projection
-    qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
     for pid_n in range(raw_pid, qkv_dim // BLOCK_N, num_pids):
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         offs_k = tl.arange(0, BLOCK_K)
@@ -63,8 +66,8 @@ def attn_triton_v1_kernel(
     _grid_sync(flag_ptr + 1, num_pids)
 
     q_ptr = tmp_ptr + dim
-    k_ptr = q_ptr + num_heads * head_dim
-    v_ptr = k_ptr + num_kv_heads * head_dim
+    k_ptr = q_ptr + q_dim
+    v_ptr = k_ptr + kv_dim
 
     # QK norm
     if raw_pid < num_heads:
@@ -109,30 +112,27 @@ def attn_triton_v1_kernel(
         q_new *= 1.4426950408889634 * (head_dim**-0.5)
 
         # update KV cache
-        k_cache_ptr = kv_cache_ptr
-        v_cache_ptr = kv_cache_ptr + max_context * num_kv_heads * head_dim
-
-        kv_offsets = (position * num_kv_heads + kv_head_id) * head_dim + offs_hdim
-        tl.store(k_cache_ptr + kv_offsets, k_new)
-        tl.store(v_cache_ptr + kv_offsets, v)
+        k_cache_ptr = kv_cache_ptr + kv_head_id * head_dim
+        v_cache_ptr = kv_cache_ptr + max_context * kv_dim + kv_head_id * head_dim
+        tl.store(k_cache_ptr + (position * kv_dim + offs_hdim), k_new)
+        tl.store(v_cache_ptr + (position * kv_dim + offs_hdim), v)
 
         # iterate over KV cache
         offs_hdim = tl.arange(0, head_dim)
         offs_len = tl.arange(0, BLOCK_ATTN)
-
-        k_cache_ptrs = k_cache_ptr + (offs_len[:, None] * num_kv_heads * head_dim + kv_head_id * head_dim + offs_hdim)
-        v_cache_ptrs = v_cache_ptr + (offs_len * num_kv_heads * head_dim + kv_head_id * head_dim + offs_hdim[:, None])
+        k_cache_ptrs = k_cache_ptr + (offs_len[:, None] * kv_dim + offs_hdim)
+        v_cache_ptrs = v_cache_ptr + (offs_len[:, None] * kv_dim + offs_hdim)
 
         # attention w/ online softmax
         max_s = tl.full((1,), float("-inf"), dtype=tl.float32)
         sum_exp = tl.zeros((BLOCK_ATTN,), dtype=tl.float32)
-        o = tl.zeros((head_dim, BLOCK_ATTN), dtype=tl.float32)
+        o = tl.zeros((BLOCK_ATTN, head_dim), dtype=tl.float32)
 
         # unroll the last tile so that we don't do masking here
         num_iters = tl.cdiv(position + 1, BLOCK_ATTN) - 1
         for _ in range(num_iters):
             k_block = tl.load(k_cache_ptrs).to(tl.float32)  # [BLOCK_K, head_dim]
-            v_block = tl.load(v_cache_ptrs).to(tl.float32)  # [head_dim, BLOCK_K]
+            v_block = tl.load(v_cache_ptrs).to(tl.float32)  # [BLOCK_K, head_dim]
 
             s = tl.sum(q_new * k_block, axis=1)  # [BLOCK_K]
             new_max_s = tl.maximum(max_s, tl.max(s, axis=0))
@@ -140,16 +140,16 @@ def attn_triton_v1_kernel(
 
             p = tl.exp2(s - new_max_s)  # [BLOCK_K]
             sum_exp = sum_exp * rescale + p
-            o = o * rescale + p * v_block
+            o = o * rescale + p[:, None] * v_block
             max_s = new_max_s
 
-            k_cache_ptrs += BLOCK_ATTN * num_kv_heads * head_dim
-            v_cache_ptrs += BLOCK_ATTN * num_kv_heads * head_dim
+            k_cache_ptrs += BLOCK_ATTN * kv_dim
+            v_cache_ptrs += BLOCK_ATTN * kv_dim
 
         # last tile w/ masking
         mask = offs_len < position + 1 - num_iters * BLOCK_ATTN
-        k_block = tl.load(k_cache_ptrs).to(tl.float32)  # [BLOCK_K, head_dim]
-        v_block = tl.load(v_cache_ptrs, mask=mask, other=0.0).to(tl.float32)  # [head_dim, BLOCK_K]
+        k_block = tl.load(k_cache_ptrs, mask[:, None], other=0.0).to(tl.float32)  # [BLOCK_K, head_dim]
+        v_block = tl.load(v_cache_ptrs, mask[:, None], other=0.0).to(tl.float32)  # [BLOCK_K, head_dim]
 
         s = tl.sum(q_new * k_block, axis=1)  # [BLOCK_K]
         s = tl.where(mask, s, float("-inf"))
@@ -158,10 +158,10 @@ def attn_triton_v1_kernel(
 
         p = tl.exp2(s - new_max_s)  # [BLOCK_K]
         sum_exp = sum_exp * rescale + p
-        o = o * rescale + p * v_block
+        o = o * rescale + p[:, None] * v_block
 
         # store to the same tmp memory for query
-        o = tl.sum(o, axis=1) / tl.sum(sum_exp)  # [head_dim]
+        o = tl.sum(o, axis=0) / tl.sum(sum_exp)  # [head_dim]
         offs_hdim = tl.arange(0, head_dim)
         tl.store(q_ptr + head_id * head_dim + offs_hdim, o)
 
@@ -170,7 +170,6 @@ def attn_triton_v1_kernel(
     _spin_wait(flag_ptr + 3, num_heads)
 
     # output projection
-    q_dim: tl.constexpr = num_heads * head_dim
     for pid_n in range(raw_pid, dim // BLOCK_N, num_pids):
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         offs_k = tl.arange(0, BLOCK_K)

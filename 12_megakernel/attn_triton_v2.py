@@ -8,7 +8,7 @@ from triton_utils import _grid_sync, _rms_norm, _spin_wait
 
 
 @triton.jit
-def qk_norm(x_ptr, norm_ptr, rope_ptr, head_dim: tl.constexpr):
+def qk_norm_rope(x_ptr, norm_ptr, rope_ptr, head_dim: tl.constexpr):
     offs = tl.arange(0, head_dim)
     x = tl.load(x_ptr + offs).to(tl.float32)
     norm = tl.load(norm_ptr + offs).to(tl.float32)
@@ -97,13 +97,13 @@ def attn_triton_v2_kernel(
     # QK norm
     if raw_pid < num_heads:
         q_head_ptr = q_tmp_ptr + raw_pid * head_dim
-        qk_norm(q_head_ptr, q_norm_ptr, rope_ptr, head_dim)
+        qk_norm_rope(q_head_ptr, q_norm_ptr, rope_ptr, head_dim)
         tl.atomic_add(flag_ptr + 2, 1, sem="release", scope="gpu")
 
     elif raw_pid < num_heads + num_kv_heads:
         k_head_id = raw_pid - num_heads
         k_head_ptr = kv_cache_ptr + (position * num_kv_heads + k_head_id) * head_dim
-        qk_norm(k_head_ptr, k_norm_ptr, rope_ptr, head_dim)
+        qk_norm_rope(k_head_ptr, k_norm_ptr, rope_ptr, head_dim)
         tl.atomic_add(flag_ptr + 2, 1, sem="release", scope="gpu")
 
     _spin_wait(flag_ptr + 2, num_heads + num_kv_heads)
@@ -123,7 +123,7 @@ def attn_triton_v2_kernel(
         # attention w/ online softmax
         max_s = tl.full((), float("-inf"), dtype=tl.float32)
         sum_exp = tl.zeros((BLOCK_ATTN,), dtype=tl.float32)
-        o = tl.zeros((head_dim, BLOCK_ATTN), dtype=tl.float32)
+        o = tl.zeros((BLOCK_ATTN, head_dim), dtype=tl.float32)
 
         # iterate over KV cache
         num_kv_blocks = tl.cdiv(position + 1, BLOCK_ATTN)
@@ -134,9 +134,10 @@ def attn_triton_v2_kernel(
             offs_len = kv_block * BLOCK_ATTN + tl.arange(0, BLOCK_ATTN)
             mask = offs_len < position + 1
             k_cache_ptrs = k_cache_ptr + (offs_len[:, None] * kv_dim + offs_hdim)
-            v_cache_ptrs = v_cache_ptr + (offs_len * kv_dim + offs_hdim[:, None])
+            v_cache_ptrs = v_cache_ptr + (offs_len[:, None] * kv_dim + offs_hdim)
+
             k_block = tl.load(k_cache_ptrs, mask[:, None], other=0.0).to(tl.float32)  # [BLOCK_ATTN, head_dim]
-            v_block = tl.load(v_cache_ptrs, mask, other=0.0).to(tl.float32)  # [head_dim, BLOCK_ATTN]
+            v_block = tl.load(v_cache_ptrs, mask[:, None], other=0.0).to(tl.float32)  # [BLOCK_ATTN, head_dim]
 
             s = tl.sum(q * k_block, axis=1)  # [BLOCK_ATTN]
             s = tl.where(mask, s, float("-inf"))
@@ -145,17 +146,17 @@ def attn_triton_v2_kernel(
 
             p = tl.exp2(s - new_max_s)  # [BLOCK_ATTN]
             sum_exp = sum_exp * rescale + p
-            o = o * rescale + p * v_block
+            o = o * rescale + p[:, None] * v_block
             max_s = new_max_s
 
         # handle the remaining, no masking
         for kv_block in range(raw_pid // num_heads, num_kv_blocks - 1, num_pids_per_head):
             offs_len = kv_block * BLOCK_ATTN + tl.arange(0, BLOCK_ATTN)
             k_cache_ptrs = k_cache_ptr + (offs_len[:, None] * kv_dim + offs_hdim)
-            v_cache_ptrs = v_cache_ptr + (offs_len * kv_dim + offs_hdim[:, None])
+            v_cache_ptrs = v_cache_ptr + (offs_len[:, None] * kv_dim + offs_hdim)
 
             k_block = tl.load(k_cache_ptrs).to(tl.float32)  # [BLOCK_ATTN, head_dim]
-            v_block = tl.load(v_cache_ptrs).to(tl.float32)  # [head_dim, BLOCK_ATTN]
+            v_block = tl.load(v_cache_ptrs).to(tl.float32)  # [BLOCK_ATTN, head_dim]
 
             s = tl.sum(q * k_block, axis=1)  # [BLOCK_ATTN]
             new_max_s = tl.maximum(max_s, tl.max(s))
@@ -163,12 +164,12 @@ def attn_triton_v2_kernel(
 
             p = tl.exp2(s - new_max_s)  # [BLOCK_ATTN]
             sum_exp = sum_exp * rescale + p
-            o = o * rescale + p * v_block
+            o = o * rescale + p[:, None] * v_block
             max_s = new_max_s
 
         # final reduction. store to tmp buffer
         sum_exp = tl.sum(sum_exp)  # [1]
-        o = tl.sum(o, axis=1)  # [head_dim]
+        o = tl.sum(o, axis=0)  # [head_dim]
 
         o_tmp_ptr = attn_tmp_ptr  # size: [num_pids_per_head, num_heads, head_dim]
         other_ptr = o_tmp_ptr + num_pids_per_head * num_heads * head_dim  # size: [num_pids_per_head, num_heads, 2]
