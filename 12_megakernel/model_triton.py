@@ -63,6 +63,10 @@ def model_triton_kernel(
     raw_pid = tl.program_id(0)
     num_pids = tl.num_programs(0)
 
+    qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
+    q_dim: tl.constexpr = num_heads * head_dim
+    kv_dim: tl.constexpr = num_kv_heads * head_dim
+
     # load input embedding on all threadblocks to avoid grid-wide sync
     input_id = tl.load(input_ids_ptr)
     for k in range(tl.cdiv(dim, 1024)):
@@ -71,19 +75,15 @@ def model_triton_kernel(
         tl.store(x_ptr + offs, x, mask=offs < dim)
     tl.debug_barrier()
 
-    for layer_id in range(num_layers):
-        qkv_dim: tl.constexpr = (num_heads + num_kv_heads * 2) * head_dim
-        q_dim: tl.constexpr = num_heads * head_dim
-        kv_dim: tl.constexpr = num_kv_heads * head_dim
+    q_tmp_ptr = attn_tmp_ptr + dim
 
+    for layer_id in range(num_layers):
         if raw_pid == 0:
             _rms_norm(x_ptr, attn_norm_ptr, attn_tmp_ptr, dim)
             tl.debug_barrier()
             tl.atomic_add(flag_ptr + layer_id * 9, 1, sem="release", scope="gpu")
         else:
             _spin_wait(flag_ptr + layer_id * 9, 1)
-
-        q_tmp_ptr = attn_tmp_ptr + dim
 
         # QKV projection
         for pid_n in range(raw_pid, qkv_dim // BLOCK_N_ATTN, num_pids):
@@ -104,19 +104,13 @@ def model_triton_kernel(
 
             acc = tl.sum(acc, axis=1)
 
-            # write q to tmp buffer
+            # write q to tmp buffer, kv to KV cache
             if pid_n * BLOCK_N_ATTN < q_dim:
-                tl.store(q_tmp_ptr + offs_n, acc)  # [BLOCK_N]
-
-            # write k to cache
+                tl.store(q_tmp_ptr + offs_n, acc)
             elif pid_n * BLOCK_N_ATTN < q_dim + kv_dim:
-                offset = position * num_kv_heads * head_dim + (offs_n - q_dim)
-                tl.store(kv_cache_ptr + offset, acc)
-
-            # write v to cache
+                tl.store(kv_cache_ptr + (position * kv_dim + (offs_n - q_dim)), acc)
             else:
-                offset = (max_context + position) * num_kv_heads * head_dim + (offs_n - (q_dim + kv_dim))
-                tl.store(kv_cache_ptr + offset, acc)
+                tl.store(kv_cache_ptr + ((max_context + position) * kv_dim + (offs_n - (q_dim + kv_dim))), acc)
 
         _grid_sync(flag_ptr + (layer_id * 9 + 1), num_pids)
 
@@ -159,8 +153,8 @@ def model_triton_kernel(
                 kv_block = num_kv_blocks - 1
                 offs_len = kv_block * BLOCK_ATTN + tl.arange(0, BLOCK_ATTN)
                 mask = offs_len < position + 1
-                k_cache_ptrs = k_cache_ptr + (offs_len[:, None] * num_kv_heads * head_dim + offs_hdim)
-                v_cache_ptrs = v_cache_ptr + (offs_len * num_kv_heads * head_dim + offs_hdim[:, None])
+                k_cache_ptrs = k_cache_ptr + (offs_len[:, None] * kv_dim + offs_hdim)
+                v_cache_ptrs = v_cache_ptr + (offs_len * kv_dim + offs_hdim[:, None])
                 k_block = tl.load(k_cache_ptrs, mask[:, None], other=0.0).to(tl.float32)  # [BLOCK_ATTN, head_dim]
                 v_block = tl.load(v_cache_ptrs, mask, other=0.0).to(tl.float32)  # [head_dim, BLOCK_ATTN]
 
@@ -177,8 +171,8 @@ def model_triton_kernel(
             # handle the remaining, no masking
             for kv_block in range(raw_pid // num_heads, num_kv_blocks - 1, num_pids_per_head):
                 offs_len = kv_block * BLOCK_ATTN + tl.arange(0, BLOCK_ATTN)
-                k_cache_ptrs = k_cache_ptr + (offs_len[:, None] * num_kv_heads * head_dim + offs_hdim)
-                v_cache_ptrs = v_cache_ptr + (offs_len * num_kv_heads * head_dim + offs_hdim[:, None])
+                k_cache_ptrs = k_cache_ptr + (offs_len[:, None] * kv_dim + offs_hdim)
+                v_cache_ptrs = v_cache_ptr + (offs_len * kv_dim + offs_hdim[:, None])
 
                 k_block = tl.load(k_cache_ptrs).to(tl.float32)  # [BLOCK_ATTN, head_dim]
                 v_block = tl.load(v_cache_ptrs).to(tl.float32)  # [head_dim, BLOCK_ATTN]
@@ -325,7 +319,7 @@ def model_triton_kernel(
 
         # increment layer
         attn_norm_ptr += dim
-        kv_cache_ptr += 2 * max_context * num_kv_heads * head_dim
+        kv_cache_ptr += 2 * max_context * kv_dim
         wqkv_ptr += qkv_dim * dim
         q_norm_ptr += head_dim
         k_norm_ptr += head_dim
