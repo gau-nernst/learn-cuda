@@ -1,3 +1,5 @@
+#pragma once
+
 constexpr int WARP_SIZE = 32;
 
 __device__ inline
