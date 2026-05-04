@@ -10,7 +10,7 @@ from functools import cache
 
 import cutlass
 import torch
-from cutlass import cute
+from cutlass import BFloat16, Boolean, Float32, Int32, Int64, Uint32, Uint64, cute
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, nvvm
 from cutlass.cute.nvgpu import cpasync, tcgen05
@@ -35,14 +35,14 @@ def tcgen05_mma_f16(
         nvvm.Tcgen05GroupKind.CTA_1,
         llvm.inttoptr(
             llvm.PointerType.get(cute.AddressSpace.tmem.value),
-            cutlass.Int32(d_tmem).ir_value(loc=loc, ip=ip),
+            Int32(d_tmem).ir_value(loc=loc, ip=ip),
             loc=loc,
             ip=ip,
         ),
-        cutlass.Uint64(a_desc).ir_value(loc=loc, ip=ip),
-        cutlass.Uint64(b_desc).ir_value(loc=loc, ip=ip),
-        cutlass.Int32(idesc & 0xFFFF_FFFF).ir_value(loc=loc, ip=ip),
-        cutlass.Boolean(accumulate).ir_value(loc=loc, ip=ip),
+        Uint64(a_desc).ir_value(loc=loc, ip=ip),
+        Uint64(b_desc).ir_value(loc=loc, ip=ip),
+        Int32(idesc & 0xFFFF_FFFF).ir_value(loc=loc, ip=ip),
+        Boolean(accumulate).ir_value(loc=loc, ip=ip),
         loc=loc,
         ip=ip,
     )
@@ -59,53 +59,28 @@ def tcgen05_ld(taddr, shape, num, *, loc=None, ip=None):
     else:
         raise ValueError
 
-    tmem_ptr = llvm.inttoptr(
-        llvm.PointerType.get(cute.AddressSpace.tmem.value),
-        cutlass.Int32(taddr).ir_value(loc=loc, ip=ip),
-        loc=loc,
-        ip=ip,
-    )
+    tmem_ptr_ty = llvm.PointerType.get(cute.AddressSpace.tmem.value)
+    tmem_ptr = llvm.inttoptr(tmem_ptr_ty, Int32(taddr).ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
 
     if num_regs == 1:
-        reg = nvvm.tcgen05_ld(
-            cutlass.Int32.mlir_type,
-            shape,
-            num,
-            tmem_ptr,
-            loc=loc,
-            ip=ip,
-        )
-        reg_f32 = llvm.bitcast(cutlass.Float32.mlir_type, reg, loc=loc, ip=ip)
-        return cutlass.Float32(reg_f32)
+        reg = nvvm.tcgen05_ld(Int32.mlir_type, shape, num, tmem_ptr, loc=loc, ip=ip)
+        reg_f32 = llvm.bitcast(Float32.mlir_type, reg, loc=loc, ip=ip)
+        return Float32(reg_f32)
 
     else:
-        regs = nvvm.tcgen05_ld(
-            ir.VectorType.get([num_regs], cutlass.Int32.mlir_type, loc=loc),
-            shape,
-            num,
-            tmem_ptr,
-            loc=loc,
-            ip=ip,
-        )
-        regs_f32 = llvm.bitcast(
-            ir.VectorType.get([num_regs], cutlass.Float32.mlir_type, loc=loc),
-            regs,
-            loc=loc,
-            ip=ip,
-        )
-        return cute.TensorSSA(regs_f32, (num_regs,), cutlass.Float32)
+        vec_i32_ty = ir.VectorType.get([num_regs], Int32.mlir_type, loc=loc)
+        vec_f32_ty = ir.VectorType.get([num_regs], Float32.mlir_type, loc=loc)
+        regs = nvvm.tcgen05_ld(vec_i32_ty, shape, num, tmem_ptr, loc=loc, ip=ip)
+        regs_f32 = llvm.bitcast(vec_f32_ty, regs, loc=loc, ip=ip)
+        return cute.TensorSSA(regs_f32, (num_regs,), Float32)
 
 
 @dsl_user_op
 def tcgen05_dealloc(*, loc=None, ip=None) -> None:
+    tmem_ptr_ty = llvm.PointerType.get(cute.AddressSpace.tmem.value)
     nvvm.tcgen05_dealloc(
-        llvm.inttoptr(
-            llvm.PointerType.get(cute.AddressSpace.tmem.value),
-            cutlass.Int32(0).ir_value(loc=loc, ip=ip),
-            loc=loc,
-            ip=ip,
-        ),
-        cutlass.Int32(512).ir_value(loc=loc, ip=ip),
+        llvm.inttoptr(tmem_ptr_ty, Int32(0).ir_value(loc=loc, ip=ip), loc=loc, ip=ip),
+        Int32(512).ir_value(loc=loc, ip=ip),
         group=nvvm.Tcgen05GroupKind.CTA_1,
         loc=loc,
         ip=ip,
@@ -113,19 +88,18 @@ def tcgen05_dealloc(*, loc=None, ip=None) -> None:
 
 
 @dsl_user_op
-def _fp32x2_to_bf16x2(a: cutlass.Float32, b: cutlass.Float32, *, loc=None, ip=None) -> cutlass.Uint32:
-    return cutlass.Uint32(
+def _fp32x2_to_bf16x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint32:
+    return Uint32(
         llvm.inline_asm(
             T.i32(),
             [
-                cutlass.Float32(a).ir_value(loc=loc, ip=ip),
-                cutlass.Float32(b).ir_value(loc=loc, ip=ip),
+                Float32(a).ir_value(loc=loc, ip=ip),
+                Float32(b).ir_value(loc=loc, ip=ip),
             ],
             "cvt.rn.bf16x2.f32 $0, $2, $1;",
             "=r,f,f",
             has_side_effects=False,
             is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
         )
     )
 
@@ -145,13 +119,12 @@ def _stg_u32xN(
     value_operands = ", ".join(f"${i + 1}" for i in range(vec_size))
     llvm.inline_asm(
         None,
-        [cutlass.Int64(base_ptr).ir_value(loc=loc, ip=ip)]
-        + [cutlass.Uint32(values[i]).ir_value(loc=loc, ip=ip) for i in range(vec_size)],
+        [Int64(base_ptr).ir_value(loc=loc, ip=ip)]
+        + [Uint32(values[i]).ir_value(loc=loc, ip=ip) for i in range(vec_size)],
         f"st.global{modifier}.v{vec_size}.u32 [$0], {{{value_operands}}};",
         ",".join(["l"] + ["r"] * vec_size),
         has_side_effects=True,
         is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
     )
 
 
@@ -206,22 +179,12 @@ class MatmulKernel:
 
         # allocate smem
         smem = cutlass.utils.SmemAllocator()
-        sA = smem.allocate_tensor(
-            cutlass.BFloat16,
-            sA_layout.outer,
-            byte_alignment=128,
-            swizzle=sA_layout.inner,
-        )
-        sB = smem.allocate_tensor(
-            cutlass.BFloat16,
-            sB_layout.outer,
-            byte_alignment=128,
-            swizzle=sB_layout.inner,
-        )
-        tma_full_mbar = smem.allocate_array(cutlass.Int64, self.num_stages)
-        tma_empty_mbar = smem.allocate_array(cutlass.Int64, self.num_stages)
-        tmem_full_mbar = smem.allocate(cutlass.Int64, 8)
-        taddr = smem.allocate(cutlass.Int32, 4)
+        sA = smem.allocate_tensor(BFloat16, sA_layout.outer, byte_alignment=128, swizzle=sA_layout.inner)
+        sB = smem.allocate_tensor(BFloat16, sB_layout.outer, byte_alignment=128, swizzle=sB_layout.inner)
+        tma_full_mbar = smem.allocate_array(Int64, self.num_stages)
+        tma_empty_mbar = smem.allocate_array(Int64, self.num_stages)
+        tmem_full_mbar = smem.allocate(Int64, 8)
+        taddr = smem.allocate(Int32, 4)
 
         M, K = A_tma_tensor.shape
 
@@ -320,7 +283,7 @@ class MatmulKernel:
                 nvvm.tcgen05_wait(nvvm.Tcgen05WaitKind.LOAD)
 
                 for j in cutlass.range_constexpr(WIDTH // 16):
-                    tmp = cute.make_rmem_tensor(8, cutlass.Uint32)
+                    tmp = cute.make_rmem_tensor(8, Uint32)
                     for k in cutlass.range_constexpr(8):
                         tmp[k] = _fp32x2_to_bf16x2(regs[j * 16 + k * 2], regs[j * 16 + k * 2 + 1])
 
@@ -337,9 +300,9 @@ class MatmulKernel:
         M = cute.sym_int()
         N = cute.sym_int()
         K = cute.sym_int()
-        A = cute.runtime.make_fake_tensor(cutlass.BFloat16, (M, K), (K, 1), assumed_align=8)
-        B = cute.runtime.make_fake_tensor(cutlass.BFloat16, (N, K), (K, 1), assumed_align=8)
-        C = cute.runtime.make_fake_tensor(cutlass.BFloat16, (M, N), (N, 1), assumed_align=16)
+        A = cute.runtime.make_fake_tensor(BFloat16, (M, K), (K, 1), assumed_align=8)
+        B = cute.runtime.make_fake_tensor(BFloat16, (N, K), (K, 1), assumed_align=8)
+        C = cute.runtime.make_fake_tensor(BFloat16, (M, N), (N, 1), assumed_align=16)
         kernel = MatmulKernel(BN)
         return cute.compile(kernel, A, B, C, options="--enable-tvm-ffi")
 
