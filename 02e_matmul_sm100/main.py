@@ -3,6 +3,7 @@
 #   python main.py --action benchmark --modal  # run on Modal
 
 import argparse
+import importlib
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,7 +16,6 @@ if TYPE_CHECKING:
 
 
 CURRENT_DIR = Path(__file__).parent
-REMOTE_DIR = Path("/my_extension")
 
 
 MY_KERNELS = [
@@ -31,13 +31,14 @@ MY_KERNELS = [
     "matmul_v7a",
     "matmul_v7b",
     "matmul_v7c",
+    # "cutedsl_v1",
 ]
 
 
-def get_module(src_dir: str):
+def get_module():
     torch.utils.cpp_extension.load(
         "module",
-        sources=list(Path(src_dir).glob("matmul*")),
+        sources=list(CURRENT_DIR.glob("matmul*")),
         extra_cuda_cflags=[
             "-O3",
             "-lineinfo",
@@ -51,11 +52,13 @@ def get_module(src_dir: str):
     return torch.ops.my_matmul
 
 
-def get_kernel(name: str, src_dir: str):
+def get_kernel(name: str):
     if name == "cublas":
         f = torch.mm
+    elif name.startswith("cutedsl_"):
+        f = getattr(importlib.import_module(name), name)
     else:
-        f = getattr(get_module(src_dir), name)
+        f = getattr(get_module(), name)
     return f
 
 
@@ -68,7 +71,7 @@ def torch_bench(state: "cuda.bench.State") -> None:
     device = state.get_device()
 
     # select kernel
-    f = get_kernel(state.get_string("kernel"), state.get_string("src_dir"))
+    f = get_kernel(state.get_string("kernel"))
 
     # problem shape
     M = state.get_int64("M")
@@ -102,7 +105,7 @@ def torch_bench(state: "cuda.bench.State") -> None:
     state.exec(launcher, sync=True)
 
 
-def benchmark(shape: str, src_dir: str):
+def benchmark(shape: str):
     import cuda.bench
     import pandas as pd
 
@@ -122,7 +125,6 @@ def benchmark(shape: str, src_dir: str):
 
     bench = cuda.bench.register(torch_bench)
     bench.add_string_axis("kernel", kernels_list)
-    bench.add_string_axis("src_dir", [src_dir])
     bench.add_int64_axis("M", [M])
     bench.add_int64_axis("N", [N])
     bench.add_int64_axis("K", [K])
@@ -145,7 +147,7 @@ def benchmark(shape: str, src_dir: str):
     print(df[["kernel", "latency (us)", "Noise", "TFLOPS"]].to_markdown(index=False))
 
 
-def profile(shape: str, src_dir: str):
+def profile(shape: str):
     # this must match what's defined in profiler.h
     TAGS = [
         "SETUP",
@@ -158,7 +160,7 @@ def profile(shape: str, src_dir: str):
         "EPILOGUE",
     ]
 
-    my_matmul = get_module(src_dir)
+    my_matmul = get_module()
 
     M, N, K = map(int, shape.split(","))
     print(f"{M=}, {N=}, {K=}")
@@ -212,23 +214,22 @@ if __name__ == "__main__":
         image = (
             modal.Image.from_registry("nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04", add_python="3.12")
             .entrypoint([])  # remove verbose logging by base image on entry
-            .uv_pip_install("torch==2.10.0", index_url="https://download.pytorch.org/whl/cu130")
-            .uv_pip_install("ninja", "pandas", "tabulate", "cuda-bench[cu13]")
-            .add_local_dir(CURRENT_DIR, remote_path=REMOTE_DIR)
+            .uv_pip_install("torch==2.11.0")
+            .uv_pip_install("ninja", "pandas", "tabulate", "nvidia-cutlass-dsl", "apache-tvm-ffi", "cuda-bench[cu13]")
+            .workdir("/workspace")
+            .add_local_dir(CURRENT_DIR, remote_path="/workspace", ignore=["*.venv"])
         )
         app = modal.App("sm100-matmul", image=image)
         modal_benchmark = app.function(gpu="B200")(benchmark)
         modal_profile = app.function(gpu="B200")(profile)
 
-    src_dir = str(REMOTE_DIR if args.modal else CURRENT_DIR)
-
     # dispatch action
     if args.action == "benchmark":
         if args.modal:
             with modal.enable_output(), app.run():
-                modal_benchmark.remote(args.shape, src_dir)
+                modal_benchmark.remote(args.shape)
         else:
-            benchmark(args.shape, src_dir)
+            benchmark(args.shape)
 
     elif args.action == "profile":
         import gzip
@@ -236,9 +237,9 @@ if __name__ == "__main__":
 
         if args.modal:
             with modal.enable_output(), app.run():
-                events = modal_profile.remote(args.shape, src_dir)
+                events = modal_profile.remote(args.shape)
         else:
-            events = profile(args.shape, src_dir)
+            events = profile(args.shape)
 
         trace = dict(traceEvents=events)
         gzip.open("trace.json.gz", "w").write(json.dumps(trace).encode("utf-8"))

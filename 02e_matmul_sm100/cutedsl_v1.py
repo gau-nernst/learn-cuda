@@ -10,6 +10,7 @@ from functools import cache
 
 import cutlass
 import torch
+from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Boolean, Float32, Int32, Int64, Uint32, Uint64, cute
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, nvvm
@@ -21,11 +22,11 @@ from triton.testing import do_bench
 
 @dsl_user_op
 def tcgen05_mma_f16(
-    d_tmem,  # 32-bit TMEM accumulator address from the alloc holding slot
-    a_desc,  # SMEM descriptor ir.Value, or TMEM addr for TS form
-    b_desc,  # SMEM descriptor ir.Value
+    d_tmem,
+    a_desc,
+    b_desc,
     idesc: cutlass.Constexpr,
-    accumulate,  # bool / Boolean
+    enable_input_d,
     *,
     loc=None,
     ip=None,
@@ -42,7 +43,7 @@ def tcgen05_mma_f16(
         Uint64(a_desc).ir_value(loc=loc, ip=ip),
         Uint64(b_desc).ir_value(loc=loc, ip=ip),
         Int32(idesc & 0xFFFF_FFFF).ir_value(loc=loc, ip=ip),
-        Boolean(accumulate).ir_value(loc=loc, ip=ip),
+        Boolean(enable_input_d).ir_value(loc=loc, ip=ip),
         loc=loc,
         ip=ip,
     )
@@ -151,7 +152,7 @@ class MatmulKernel:
         return tma_atom, tma_tensor, s_layout
 
     @cute.jit
-    def __call__(self, A: cute.Tensor, B: cute.Tensor, C: cute.Tensor):
+    def __call__(self, A: cute.Tensor, B: cute.Tensor, C: cute.Tensor, stream: CUstream):
         BM, BN, BK = self.cta_tile
         A_args = self.prepare_AB(A, BM, BK)
         B_args = self.prepare_AB(B, BN, BK)
@@ -160,7 +161,11 @@ class MatmulKernel:
         N, _ = B.shape
         grid_m = cute.ceil_div(M, BM)
         grid_n = cute.ceil_div(N, BN)
-        self.kernel(A_args, B_args, C).launch(grid=(grid_m, grid_n), block=(6 * 32, 1, 1))
+        self.kernel(A_args, B_args, C).launch(
+            grid=(grid_m, grid_n),
+            block=(6 * 32, 1, 1),
+            stream=stream,
+        )
 
     @cute.kernel
     def kernel(
@@ -303,8 +308,15 @@ class MatmulKernel:
         A = cute.runtime.make_fake_tensor(BFloat16, (M, K), (K, 1), assumed_align=8)
         B = cute.runtime.make_fake_tensor(BFloat16, (N, K), (K, 1), assumed_align=8)
         C = cute.runtime.make_fake_tensor(BFloat16, (M, N), (N, 1), assumed_align=16)
+        stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         kernel = MatmulKernel(BN)
-        return cute.compile(kernel, A, B, C, options="--enable-tvm-ffi")
+        return cute.compile(kernel, A, B, C, stream, options="--enable-tvm-ffi")
+
+
+def cutedsl_v1(A: torch.Tensor, B: torch.Tensor):
+    C = A.new_empty(A.shape[0], B.shape[1])
+    MatmulKernel.compile(256)(A, B.T, C)
+    return C
 
 
 def main():
