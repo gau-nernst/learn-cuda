@@ -2,6 +2,7 @@ import cutlass
 from cutlass import Boolean, Float32, Int32, Uint32, Uint64, cute
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, nvvm
+from cutlass.cute.nvgpu import cpasync
 from cutlass.cutlass_dsl import dsl_user_op
 
 NVVM_CTA_GROUP_MAP = [
@@ -9,6 +10,20 @@ NVVM_CTA_GROUP_MAP = [
     nvvm.Tcgen05GroupKind.CTA_1,
     nvvm.Tcgen05GroupKind.CTA_2,
 ]
+
+
+def simple_tma_g2s(atom, src, dst, mbar):
+    """A simple helper that wraps group_modes() and tma_partition()
+    NOTE: this should be called WITHOUT cute.elect_one()
+    """
+    s_part, g_part = cpasync.tma_partition(
+        atom,
+        0,
+        cute.make_layout(1),
+        cute.group_modes(dst, 0),
+        cute.group_modes(src, 0),
+    )
+    cute.copy(atom, g_part, s_part, tma_bar_ptr=mbar)
 
 
 def _make_tmem_llvm_ptr(taddr, *, loc=None, ip=None):

@@ -11,11 +11,11 @@ from functools import cache
 import cutlass
 import torch
 from cuda.bindings.driver import CUstream
-from cute_utils import _tcgen05
+from cute_utils import _tcgen05, simple_tma_g2s
 from cutlass import BFloat16, Int32, Int64, cute
 from cutlass._mlir.dialects import nvvm
 from cutlass.cute.nvgpu import cpasync
-from cutlass.utils import block_copy, get_smem_capacity_in_bytes
+from cutlass.utils import get_smem_capacity_in_bytes
 from triton.testing import do_bench
 
 
@@ -100,12 +100,6 @@ class MatmulV1Kernel:
             gA_tile = cute.local_tile(A_tma_tensor, (BM, BK), (bid_m, None))  # [BM, BK, K/BK]
             gB_tile = cute.local_tile(B_tma_tensor, (BN, BK), (bid_n, None))  # [BN, BK, K/BK]
 
-            # cute.copy() / block_copy() requires 1st mode to cover the whole TMA tile
-            gA_ = cute.group_modes(gA_tile, 0, 2)  # [(BM, BK), K/BK]
-            gB_ = cute.group_modes(gB_tile, 0, 2)  # [(BN, BK), K/BK]
-            sA_ = cute.group_modes(sA, 0, 2)  # [(BM, BK), num_stages]
-            sB_ = cute.group_modes(sB, 0, 2)  # [(BN, BK), num_stages]
-
             tma_stage = 0
             empty_phase = 1
 
@@ -115,8 +109,8 @@ class MatmulV1Kernel:
                 mbar = tma_full_mbar + tma_stage
                 with cute.arch.elect_one():
                     cute.arch.mbarrier_arrive_and_expect_tx(mbar, self.stage_size)
-                block_copy(A_tma_atom, gA_[None, iter_k], sA_[None, tma_stage], tma_bar_ptr=mbar)
-                block_copy(B_tma_atom, gB_[None, iter_k], sB_[None, tma_stage], tma_bar_ptr=mbar)
+                simple_tma_g2s(A_tma_atom, gA_tile[None, None, iter_k], sA[None, None, tma_stage], mbar)
+                simple_tma_g2s(B_tma_atom, gB_tile[None, None, iter_k], sB[None, None, tma_stage], mbar)
 
                 tma_stage = (tma_stage + 1) % self.num_stages
                 if tma_stage == 0:
