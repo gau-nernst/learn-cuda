@@ -248,7 +248,7 @@ class MatmulV1Kernel(NamedTuple):
             write_stage = read_stage
             read_stage = (read_stage + 1) % self.num_stages
 
-        cute.arch.cp_async_bulk_wait_group(0)
+        cute.arch.cp_async_wait_group(0)
         cute.arch.sync_threads()
 
         # r2s

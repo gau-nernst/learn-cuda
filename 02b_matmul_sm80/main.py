@@ -1,4 +1,5 @@
 import argparse
+import importlib
 import math
 import multiprocessing as mp
 import subprocess
@@ -46,6 +47,9 @@ def get_kernel(name: str, source_dir: str):
     elif name == "inductor":
         torch._inductor.config.max_autotune_gemm_backends = "TRITON"
         f = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
+    elif name.startswith("cutedsl_"):
+        mod = importlib.import_module(name)
+        f = getattr(mod, name)
     else:
         module = get_module(source_dir)
         f = getattr(module, name)
@@ -97,8 +101,9 @@ def torch_bench(state: cuda.bench.State) -> None:
 def run_nvbench(M: int, N: int, K: int, source_dir: str):
     kernels_list = []
     kernels_list += ["cublas", "inductor"]
-    kernels_list += [f"matmul_v{i}" for i in ["1", "2", "3", "4", "5"]]
+    # kernels_list += [f"matmul_v{i}" for i in ["1", "2", "3", "4", "5"]]
     kernels_list += [f"matmul_v{i}" for i in ["6", "6b"]]
+    kernels_list += ["cutedsl_v1", "cutedsl_v2"]
 
     # duplicate inputs to make sure each measurement is at least 10ms
     SOL = get_sol()
@@ -183,8 +188,15 @@ if __name__ == "__main__":
         image = (
             modal.Image.from_registry("nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04", add_python="3.12")
             .entrypoint([])  # remove verbose logging by base image on entry
-            .uv_pip_install("torch==2.10.0", index_url="https://download.pytorch.org/whl/cu130")
-            .uv_pip_install("ninja", "pandas", "tabulate", "cuda-bench[cu13]")
+            .uv_pip_install(
+                "torch==2.11.0",
+                "ninja",
+                "pandas",
+                "tabulate",
+                "cuda-bench[cu13]",
+                "nvidia-cutlass-dsl[cu13]",
+                "apache-tvm-ffi",
+            )
             .add_local_dir(CURRENT_DIR, remote_path=REMOTE_DIR)
         )
         app = modal.App("sm80-matmul", image=image)
