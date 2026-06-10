@@ -145,3 +145,29 @@ class _tcgen05:
     @staticmethod
     def fence_before_thread_sync(*, loc=None, ip=None):
         nvvm.tcgen05_fence(nvvm.Tcgen05FenceKind.BEFORE_THREAD_SYNC, loc=loc, ip=ip)
+
+    @dsl_user_op
+        @staticmethod
+        def st(taddr, regs, shape: str, num: int, *, loc=None, ip=None):
+                    if shape == "32x32b":
+                                    nvvm_shape = nvvm.Tcgen05LdStShape.SHAPE_32X32B
+elif shape == "16x128b":
+            nvvm_shape = nvvm.Tcgen05LdStShape.SHAPE_16X128B
+elif shape == "16x256b":
+            nvvm_shape = nvvm.Tcgen05LdStShape.SHAPE_16X256B
+else:
+            raise ValueError(f"Unknown shape {shape}")
+
+        tmem_ptr = _make_tmem_llvm_ptr(taddr, loc=loc, ip=ip)
+        nvvm.tcgen05_st(regs.ir_value(loc=loc, ip=ip), nvvm_shape, num, tmem_ptr, loc=loc, ip=ip)
+
+    @dsl_user_op
+    @staticmethod
+    def wait_ld(cta_group: int = 1, *, loc=None, ip=None):
+                nvvm.tcgen05_wait(nvvm.Tcgen05WaitKind.LOAD, NVVM_CTA_GROUP_MAP[cta_group], loc=loc, ip=ip)
+
+    @dsl_user_op
+    @staticmethod
+    def wait_st(cta_group: int = 1, *, loc=None, ip=None):
+                nvvm.tcgen05_wait(nvvm.Tcgen05WaitKind.STORE, NVVM_CTA_GROUP_MAP[cta_group], loc=loc, ip=ip)
+        
