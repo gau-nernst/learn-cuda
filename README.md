@@ -10,18 +10,18 @@ Resources:
 Name | Description
 -----|-------------
 01\. [Vector addition](01_vector_addition/) | Simple example to get everything working.
-02a\. [Matrix multiplication SIMT](02a_matmul_simt/) | Block tiling, thread tiling, warp tiling.
-02b\. [Matrix multiplication SM80](02b_matmul_sm80/) | Inline PTX, `cvta`, `ldmatrix`, `mma`.
-02c\. [Matrix multiplication SM120](02c_matmul_sm120/)
-02d\. [Matrix multiplication CDNA3](02d_matmul_cdna3/)
-02e\. [Matrix multiplication SM100](02e_matmul_sm100/) | tcgen05
+02\. [Matrix multiplication SIMT](02_matmul_simt/) | Block tiling, thread tiling, warp tiling.
+02\. [Matrix multiplication SM80](02_matmul_sm80/) | Inline PTX, `cvta`, `ldmatrix`, `mma`.
+02\. [Matrix multiplication SM100](02_matmul_sm100/) | tcgen05
+02\. [Matrix multiplication SM120](02_matmul_sm120/)
+02\. [Matrix multiplication CDNA3](02_matmul_cdna3/)
 03\. [Sum](03_sum/) | Reduction in general.  Prepare for softmax (max and sum).
 04\. [Softmax](04_softmax/) | Naive (safe) softmax, online softmax. `atomicCAS()`. Single-block and multi-block per row.
 05\. [FP6](05_fp6/) | FP6 primitives (FP32/FP16/BF16<->FP6).
 06\. [Box blur](06_box_blur/) | 2D CUDA blocks/threads. TODO: optimize with separable filters, moving average.
 07\. [Attention](07_attention/) | Flash attention
 08\. [Row-scaled matmul](08_row_scaled_mm/) | Simple epilogue
-09\. [Block-scaled matmul](09_block_scaled_mm/) | MXFP8
+09\. [Block-scaled matmul](09_block_scaled_mm_sm120/) | MXFP8
 
 ```bash
 # profile a CUDA kernel
