@@ -3,6 +3,7 @@ import math
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
+from flydsl.expr import rocdl
 from torch import Tensor
 
 
@@ -26,10 +27,10 @@ def build_matmul_v0():
         m = fx.block_idx.x
 
         # [M,K] -> [K,M]
-        A = fx.make_view(fx.get_iter(A), fx.select(A.layout, indices=[1, 0]))
+        A = fx.make_view(A.iter, fx.select(A.layout, indices=[1, 0]))
 
-        A_buf = fx.rocdl.make_buffer_tensor(A)
-        B_buf = fx.rocdl.make_buffer_tensor(B)
+        A_buf = rocdl.make_buffer_tensor(A)
+        B_buf = rocdl.make_buffer_tensor(B)
         A_slices = fx.zipped_divide(A_buf, (8, vec_a))  # (8,vec),(K/8,M/vec)
         B_slices = fx.zipped_divide(B_buf, (8, vec_b))  # (8,vec),(K/8,N/vec)
 

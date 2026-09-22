@@ -11,3 +11,8 @@ Resources:
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.14
 uv pip install flydsl
 ```
+
+Learnings
+- There are scalar (SGPRs) and vector (VGPRs) registers. Scalar means wave-uniform (same value across all lanes), vector means lane-private data. This is analogous to NVIDIA's uniform and normal registers.
+- For global memory accesses, there are `BUFFER_LOAD_*` and `GLOBAL_LOAD_*`. The former has built-in bounds check, hence it is preferred if we need bounds check i.e. save registers and avoid complicated control flow.
+- To use buffer load instructions, we have to create a **buffer resource descriptor**, which is a 128-bit value held in 4 SGPRs.
