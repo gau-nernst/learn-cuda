@@ -10,6 +10,10 @@ Resources:
 ```bash
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.14
 uv pip install flydsl
+
+# profile
+uv pip install -r /opt/rocm/libexec/rocprofiler-compute/requirements.txt
+rocprof-compute profile -n matmul_v1 -k matmul_v1 -- python main.py --profile 1
 ```
 
 Benchmark using Triton's `do_bench`

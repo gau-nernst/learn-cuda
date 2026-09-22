@@ -7,13 +7,29 @@ os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = str(CURRENT_DIR / ".flydsl/cache")
 os.environ["FLYDSL_DUMP_DIR"] = str(CURRENT_DIR / ".flydsl/debug")
 # os.environ["FLYDSL_DUMP_IR"] = "1"
 
+import argparse
+
 import torch
 from matmul_v0 import matmul_v0
 from matmul_v1 import matmul_v1
 from triton.testing import do_bench
 
 
-def main():
+def main(args: argparse.Namespace):
+    if args.profile is not None:
+        size = 8192
+
+        scale = size**-0.5
+        A = torch.randn(size, size, device="cuda").mul(scale).bfloat16()
+        B = torch.randn(size, size, device="cuda").mul(scale).bfloat16().T
+
+        f = {
+            "1": matmul_v1,
+        }[args.profile]
+
+        f(A, B)
+        return
+
     for size in (4096, 8192, 16384):
         print(f"M=N=K={size}")
 
@@ -41,4 +57,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile")
+    args = parser.parse_args()
+
+    main(args)
