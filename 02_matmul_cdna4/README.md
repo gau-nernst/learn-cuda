@@ -27,6 +27,7 @@ Kernel name                  | 4096    | 8192    | 16384
 PyTorch (2.14.0+rocm7.14)    | 1450.22 | 1589.08 | 1267.29
 v0 - Basic FlyDSL, FMA       |   53.97 |   29.31 |   22.37
 v1 - Buffer DMA, MFMA layout |  835.61 | 1016.57 |  949.97
+v2 - LDS swizzle             | 1103.81 | 1276.01 | 1190.64
 
 Learnings
 - There are scalar (SGPRs) and vector (VGPRs) registers. Scalar means wave-uniform (same value across all lanes), vector means lane-private data. This is analogous to NVIDIA's uniform and normal registers.
