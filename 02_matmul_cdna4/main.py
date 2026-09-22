@@ -12,6 +12,8 @@ import argparse
 import torch
 from matmul_v0 import matmul_v0
 from matmul_v1 import matmul_v1
+from matmul_v2 import matmul_v2
+from matmul_v3 import matmul_v3
 
 
 def main(args: argparse.Namespace):
@@ -24,6 +26,8 @@ def main(args: argparse.Namespace):
 
         f = {
             "1": matmul_v1,
+            "2": matmul_v2,
+            "3": matmul_v3,
         }[args.profile]
 
         f(A, B)
@@ -54,6 +58,8 @@ def main(args: argparse.Namespace):
         benchmark(torch.mm, "PyTorch")
         benchmark(matmul_v0, "v0")
         benchmark(matmul_v1, "v1")
+        benchmark(matmul_v2, "v2")
+        benchmark(matmul_v3, "v3")
 
         print()
 
