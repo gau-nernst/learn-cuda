@@ -12,7 +12,7 @@ def local_tile(x, tiler, coord):
 
 
 def build_matmul_v1():
-    BLOCK_M = 128
+    BLOCK_M = 256
     BLOCK_N = 128
     BLOCK_K = 64
     num_wave_m = 2
@@ -20,6 +20,9 @@ def build_matmul_v1():
 
     WAVE_M = BLOCK_M // num_wave_m
     WAVE_N = BLOCK_N // num_wave_n
+    MFMA_M = 16
+    MFMA_N = 16
+    MFMA_K = 32
 
     num_waves = num_wave_m * num_wave_n
     block_size = num_waves * 64
@@ -39,9 +42,15 @@ def build_matmul_v1():
         N: fx.Int32,
         K: fx.Constexpr[int],
     ):
+        f32x4 = fx.Vector.make_type(4, fx.Float32)
+        bf16x8 = fx.Vector.make_type(8, fx.BFloat16)
+
         tid = fx.thread_idx.x
         wave_id = rocdl.readfirstlane(T.i32, tid // 64)  # wave-uniform
         lane_id = fx.lane_id()
+
+        wave_id_n = wave_id % num_wave_n
+        wave_id_m = wave_id // num_wave_n
 
         bid_n = fx.block_idx.x
         bid_m = fx.block_idx.y
@@ -57,9 +66,10 @@ def build_matmul_v1():
         NUM_A_DMA = BLOCK_M * BLOCK_K * 2 // (block_size * 16)
         NUM_B_DMA = BLOCK_N * BLOCK_K * 2 // (block_size * 16)
 
-        NUM_ACC_REGS = BLOCK_M * BLOCK_N // block_size
-        acc = fx.make_rmem_tensor(NUM_ACC_REGS, fx.Float32)
-        acc.fill(0.0)
+        acc = [
+            [fx.Vector.filled(4, 0.0, fx.Float32) for _ in fx.range_constexpr(WAVE_N // MFMA_N)]
+            for _ in fx.range_constexpr(WAVE_M // MFMA_M)
+        ]
 
         for iter_k in range(K // BLOCK_K):
             fx.gpu.barrier()  # everyone finishes
@@ -70,6 +80,9 @@ def build_matmul_v1():
                 row = idx // BLOCK_K
                 voffset = (row * K + iter_k * BLOCK_K + col) * 2
 
+                # NOTE: gmem source contains lane-dependent offset, specified as voffset.
+                # but LDS destination is a wave-uniform address, where per-lane offset
+                # is added automatically.
                 dst = lds.a.ptr + (i * block_size + wave_id * 64) * 8  # wave-uniform
                 rocdl.buffer_load_to_lds(A_buf, dst.llvm_ptr, voffset, size_bytes=16)
 
@@ -84,21 +97,58 @@ def build_matmul_v1():
 
             fx.gpu.barrier()  # cross-wave visibility
 
-            for i in fx.range_constexpr(NUM_ACC_REGS):
-                idx = i * block_size + tid
-                n = idx % BLOCK_N
-                m = idx // BLOCK_N
+            # target 16x16x32 BF16 MFMA instruction
+            # Input layout
+            #   K_L = K / (64 / (M * B)) = 8 elems = 16B
+            #   A[m,k] is held by lane (k/8) * 16 + m, item (k%8)-th
+            #
+            #     |--lane  0--||--lane 16--||--lane 32--||--lane 48--|
+            #     |--lane  1--||--lane 17--||--lane 33--||--lane 49--|
+            #     |--  ...  --||--  ...  --||--  ...  --||--  ...  --|
+            #     |--lane 15--||--lane 31--||--lane 47--||--lane 63--|
+            #
+            # Output layout
+            #   H = 4
+            #   B_I = ceil(64 / (N * M / H)) = 1
+            #   M_I = (64 / B_I) / N = 4
+            #   G = M / (H * M_I) = 1
+            #   D[m,n] is held by lane (m/4) * 16 + n, item (m%4)-th
+            #
+            #   |lane  0|lane  1| ... |lane 15|
+            #   |lane  0|lane  1| ... |lane 15|x3
+            #   |lane 16|lane 17| ... |lane 31|
+            #   |lane 16|lane 17| ... |lane 31|x3
+            #   |lane 32|lane 33| ... |lane 47|
+            #   |lane 32|lane 33| ... |lane 47|x3
+            #   |lane 48|lane 49| ... |lane 63|
+            #   |lane 48|lane 49| ... |lane 63|x3
 
-                for k in fx.range_constexpr(BLOCK_K):
-                    rA = lds.a[m * BLOCK_K + k].to(fx.Float32)
-                    rB = lds.b[n * BLOCK_K + k].to(fx.Float32)
-                    acc[i] = fx.fma(rA, rB, acc[i])
+            for k in fx.range_constexpr(BLOCK_K // MFMA_K):
+                off_am = wave_id_m * WAVE_M + (lane_id % 16)
+                off_bn = wave_id_n * WAVE_N + (lane_id % 16)
+                off_k = k * MFMA_K + (lane_id // 16) * 8
 
-        for i in fx.range_constexpr(NUM_ACC_REGS):
-            idx = i * block_size + tid
-            n = bid_n * BLOCK_N + idx % BLOCK_N
-            m = bid_m * BLOCK_M + idx // BLOCK_N
-            gC[m, n] = acc[i].to(fx.BFloat16)
+                # load A and B from LDS to registers
+                rA = [
+                    (lds.a.ptr + ((off_am + m * MFMA_M) * BLOCK_K + off_k)).load(bf16x8)
+                    for m in fx.range_constexpr(WAVE_M // MFMA_M)
+                ]
+                rB = [
+                    (lds.b.ptr + ((off_bn + n * MFMA_N) * BLOCK_K + off_k)).load(bf16x8)
+                    for n in fx.range_constexpr(WAVE_N // MFMA_N)
+                ]
+
+                for m in fx.range_constexpr(WAVE_M // MFMA_M):
+                    for n in fx.range_constexpr(WAVE_N // MFMA_N):
+                        # swap A and B, so output is N-contiguous
+                        acc[m][n] = rocdl.mfma_f32_16x16x32_bf16(f32x4, [rB[n], rA[m], acc[m][n], 0, 0, 0])
+
+        for m in fx.range_constexpr(WAVE_M // MFMA_M):
+            for n in fx.range_constexpr(WAVE_N // MFMA_N):
+                off_m = bid_m * BLOCK_M + wave_id_m * WAVE_M + m * MFMA_M + (lane_id % 16)
+                off_n = bid_n * BLOCK_N + wave_id_n * WAVE_N + n * MFMA_N + (lane_id // 16) * 4
+                dst = fx.get_iter(gC) + gC.layout(off_m, off_n)
+                dst.store(acc[m][n].to(fx.BFloat16))  # bf16x4
 
     @flyc.jit
     def launch(
