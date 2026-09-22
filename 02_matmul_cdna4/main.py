@@ -9,6 +9,7 @@ os.environ["FLYDSL_DUMP_DIR"] = str(CURRENT_DIR / ".flydsl/debug")
 
 import torch
 from matmul_v0 import matmul_v0
+from matmul_v1 import matmul_v1
 from triton.testing import do_bench
 
 
@@ -34,6 +35,7 @@ def main():
 
         benchmark(torch.mm, "PyTorch")
         benchmark(matmul_v0, "v0")
+        benchmark(matmul_v1, "v1")
 
         print()
 

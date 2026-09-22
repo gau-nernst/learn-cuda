@@ -15,8 +15,8 @@ def build_matmul_v0():
 
     @flyc.kernel(name="matmul_v0")
     def kernel(
-        A: fx.Tensor,
-        B: fx.Tensor,
+        gA: fx.Tensor,
+        gB: fx.Tensor,
         C: fx.Tensor,
         M: fx.Int32,
         N: fx.Int32,
@@ -27,10 +27,10 @@ def build_matmul_v0():
         m = fx.block_idx.x
 
         # [M,K] -> [K,M]
-        A = fx.make_view(A.iter, fx.select(A.layout, indices=[1, 0]))
+        gA = fx.make_view(fx.get_iter(gA), fx.select(gA.layout, indices=[1, 0]))
 
-        A_buf = rocdl.make_buffer_tensor(A)
-        B_buf = rocdl.make_buffer_tensor(B)
+        A_buf = rocdl.make_buffer_tensor(gA)
+        B_buf = rocdl.make_buffer_tensor(gB)
         A_slices = fx.zipped_divide(A_buf, (8, vec_a))  # (8,vec),(K/8,M/vec)
         B_slices = fx.zipped_divide(B_buf, (8, vec_b))  # (8,vec),(K/8,N/vec)
 
