@@ -12,8 +12,12 @@ uv pip install torch torchvision --index-url https://download.pytorch.org/whl/ro
 uv pip install flydsl
 
 # profile
-uv pip install -r /opt/rocm/libexec/rocprofiler-compute/requirements.txt
-rocprof-compute profile -n matmul_v1 -k matmul_v1 -- python main.py --profile 1
+# view with https://github.com/ROCm/rocprof-compute-viewer/releases
+rocprofv3 --att --kernel-include-regex matmul_v1 -d profile/matmul_v1 -- python main.py --profile 1
+
+# measure bank conflicts
+rocprof-compute profile -n matmul_banks -k matmul_v1 -b 12.2.9 --no-roof -- python main.py --profile 1
+rocprof-compute analyze -p workloads/matmul_banks/MI355 -b 12.2.9
 ```
 
 Benchmark using Triton's `do_bench`
@@ -29,3 +33,4 @@ Learnings
 - For global memory accesses, there are `BUFFER_LOAD_*` and `GLOBAL_LOAD_*`. The former has built-in bounds check, hence it is preferred if we need bounds check i.e. save registers and avoid complicated control flow.
 - To use buffer load instructions, we have to create a **buffer resource descriptor**, which is a 128-bit value held in 4 SGPRs.
 - MFMA layout: see `matmul_v1.py` for illustration.
+- There are 4 SIMDs per CU, hence we need at least 4 waves to saturate the execution units.

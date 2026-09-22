@@ -12,7 +12,6 @@ import argparse
 import torch
 from matmul_v0 import matmul_v0
 from matmul_v1 import matmul_v1
-from triton.testing import do_bench
 
 
 def main(args: argparse.Namespace):
@@ -29,6 +28,9 @@ def main(args: argparse.Namespace):
 
         f(A, B)
         return
+
+    # rocprof will crash if we import this under profiling context
+    from triton.testing import do_bench
 
     for size in (4096, 8192, 16384):
         print(f"M=N=K={size}")
