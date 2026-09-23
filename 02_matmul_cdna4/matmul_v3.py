@@ -136,7 +136,7 @@ def build_matmul_v3():
                 for m in fx.range_constexpr(WAVE_M // MFMA_M):
                     for n in fx.range_constexpr(WAVE_N // MFMA_N):
                         # swap A and B, so output is N-contiguous
-                        acc[m][n] = rocdl.mfma_f32_16x16x32_bf16(f32x4, [rB[n], rA[m], acc[m][n], 0, 0, 0])
+                        acc[m][n] = rocdl.mfma_f32_16x16x32_bf16(f32x4, [rB[n], rA[m], acc[m][n]])
 
             return acc
 

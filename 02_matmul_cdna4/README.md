@@ -5,7 +5,11 @@ Resources:
 - https://rocm.blogs.amd.com/software-tools-optimization/porting-hip-flydsl/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
 - https://rocm.blogs.amd.com/software-tools-optimization/4wave-fp8gemm/README.html
-- https://github.com/ROCm/gfx950-gluon-tutorials/blob/main/kernels/gemm/README.md
+- https://github.com/ROCm/gfx950-gluon-tutorials/blob/main/kernels/gemm/README.md: general GEMM design
+  - https://github.com/ROCm/gfx950-gluon-tutorials/tree/main/kernels/gemm/intra_wave/a16w16: hill-climb
+  - https://github.com/ROCm/gfx950-gluon-tutorials/tree/main/kernels/gemm/inter_wave/a16w16: modified to inter-wave
+  - https://github.com/ROCm/gfx950-gluon-tutorials/blob/main/docs/lds_throughput.md: mental modal of LDS performance
+- https://rocm.docs.amd.com/projects/FlyDSL/en/latest/kernel_tuning_guide.html
 
 ```bash
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.14
