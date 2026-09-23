@@ -32,6 +32,7 @@ PyTorch (2.14.0+rocm7.14)    | 1450.22 | 1589.08 | 1267.29
 v0 - Basic FlyDSL, FMA       |   53.97 |   29.31 |   22.37
 v1 - Buffer DMA, MFMA layout |  835.61 | 1016.57 |  949.97
 v2 - LDS swizzle             | 1103.81 | 1276.01 | 1190.64
+v3 - Double buffer G2S       | 1048.60 | 1085.61 | 1007.87
 
 Learnings
 - There are scalar (SGPRs) and vector (VGPRs) registers. Scalar means wave-uniform (same value across all lanes), vector means lane-private data. This is analogous to NVIDIA's uniform and normal registers.
@@ -39,3 +40,4 @@ Learnings
 - To use buffer load instructions, we have to create a **buffer resource descriptor**, which is a 128-bit value held in 4 SGPRs.
 - MFMA layout: see `matmul_v1.py` for illustration.
 - There are 4 SIMDs per CU, hence we need at least 4 waves to saturate the execution units.
+- Use async version of DMA buffer load to implement double buffering. The async API (`asyncmark()` and `wait_asyncmark()`) is compiler helpers: the compiler tracks number of DMA issues and inserts `s_waitcnt vmcnt(X)` accordingly.

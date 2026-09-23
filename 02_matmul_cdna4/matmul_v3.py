@@ -28,7 +28,7 @@ def build_matmul_v3():
     BLOCK_K = 64
     num_wave_m = 2
     num_wave_n = 2
-    num_stages = 2
+    num_stages = 3
 
     WAVE_M = BLOCK_M // num_wave_m
     WAVE_N = BLOCK_N // num_wave_n
