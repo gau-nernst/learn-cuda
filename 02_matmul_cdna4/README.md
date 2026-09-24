@@ -3,8 +3,10 @@
 Resources:
 - https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
 - https://rocm.blogs.amd.com/software-tools-optimization/porting-hip-flydsl/README.html
-- https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
-- https://rocm.blogs.amd.com/software-tools-optimization/4wave-fp8gemm/README.html
+- 8-wave ping-pong vs 4-wave interleave:
+  - https://hazyresearch.stanford.edu/blog/2025-11-09-amd-brr
+  - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+  - https://rocm.blogs.amd.com/software-tools-optimization/4wave-fp8gemm/README.html
 - https://github.com/ROCm/gfx950-gluon-tutorials/blob/main/kernels/gemm/README.md: general GEMM design
   - https://github.com/ROCm/gfx950-gluon-tutorials/tree/main/kernels/gemm/intra_wave/a16w16: hill-climb
   - https://github.com/ROCm/gfx950-gluon-tutorials/tree/main/kernels/gemm/inter_wave/a16w16: modified to inter-wave
