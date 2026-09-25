@@ -55,9 +55,6 @@ def build_matmul_v3():
         N: fx.Int32,
         K: fx.Constexpr[int],
     ):
-        f32x4 = fx.Vector.make_type(4, fx.Float32)
-        bf16x8 = fx.Vector.make_type(8, fx.BFloat16)
-
         tid = fx.thread_idx.x
         wave_id = rocdl.readfirstlane(T.i32, tid // 64)  # wave-uniform
         lane_id = fx.lane_id()
@@ -123,18 +120,18 @@ def build_matmul_v3():
 
                 # load A and B from LDS to registers
                 rA = [
-                    (lds.a.ptr + mfma_stage * A_SIZE + ((off_am + m * MFMA_M) * BLOCK_K + off_k)).load(bf16x8)
+                    (lds.a.ptr + mfma_stage * A_SIZE + ((off_am + m * MFMA_M) * BLOCK_K + off_k)).load(T.bf16x8)
                     for m in fx.range_constexpr(WAVE_M // MFMA_M)
                 ]
                 rB = [
-                    (lds.b.ptr + mfma_stage * B_SIZE + ((off_bn + n * MFMA_N) * BLOCK_K + off_k)).load(bf16x8)
+                    (lds.b.ptr + mfma_stage * B_SIZE + ((off_bn + n * MFMA_N) * BLOCK_K + off_k)).load(T.bf16x8)
                     for n in fx.range_constexpr(WAVE_N // MFMA_N)
                 ]
 
                 for m in fx.range_constexpr(WAVE_M // MFMA_M):
                     for n in fx.range_constexpr(WAVE_N // MFMA_N):
                         # swap A and B, so output is N-contiguous
-                        acc[m][n] = rocdl.mfma_f32_16x16x32_bf16(f32x4, [rB[n], rA[m], acc[m][n]])
+                        acc[m][n] = rocdl.mfma_f32_16x16x32_bf16(T.f32x4, [rB[n], rA[m], acc[m][n]])
 
             return acc
 
