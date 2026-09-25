@@ -8,11 +8,13 @@ os.environ["FLYDSL_DUMP_DIR"] = str(CURRENT_DIR / ".flydsl/debug")
 # os.environ["FLYDSL_DUMP_IR"] = "1"
 
 import argparse
+import time
 
 import torch
 from matmul_v0 import matmul_v0
 from matmul_v1 import matmul_v1
 from matmul_v2 import matmul_v2
+from matmul_v2b import matmul_v2b
 from matmul_v3 import matmul_v3
 
 
@@ -27,6 +29,7 @@ def main(args: argparse.Namespace):
         f = {
             "1": matmul_v1,
             "2": matmul_v2,
+            "2b": matmul_v2b,
             "3": matmul_v3,
         }[args.profile]
 
@@ -51,6 +54,9 @@ def main(args: argparse.Namespace):
             torch.accelerator.synchronize()
             torch.testing.assert_close(out, out_ref)
 
+            time.sleep(1.0)  # stabilize thermal
+            do_bench(lambda: f(A, B))  # throw away this value. warmup the GPU
+
             latency_us = do_bench(lambda: f(A, B)) * 1e3
             tflops = 2 * size * size * size / (latency_us * 1e-6) * 1e-12
             print(f"  {name}: {latency_us:.2f} us, {tflops:.2f} TFLOPS")
@@ -60,6 +66,7 @@ def main(args: argparse.Namespace):
         benchmark(matmul_v1, "v1")
         benchmark(matmul_v2, "v2")
         benchmark(matmul_v3, "v3")
+        benchmark(matmul_v2b, "v2b")
 
         print()
 

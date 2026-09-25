@@ -12,6 +12,7 @@ Resources:
   - https://github.com/ROCm/gfx950-gluon-tutorials/tree/main/kernels/gemm/inter_wave/a16w16: modified to inter-wave
   - https://github.com/ROCm/gfx950-gluon-tutorials/blob/main/docs/lds_throughput.md: mental modal of LDS performance
 - https://rocm.docs.amd.com/projects/FlyDSL/en/latest/kernel_tuning_guide.html
+- https://llvm.org/docs/AMDGPUUsage.html
 
 ```bash
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.14
@@ -30,11 +31,12 @@ Benchmark using Triton's `do_bench`
 
 Kernel name                  | 4096    | 8192    | 16384
 -----------------------------|---------|---------|--------
-PyTorch (2.14.0+rocm7.14)    | 1450.22 | 1589.08 | 1267.29
-v0 - Basic FlyDSL, FMA       |   53.97 |   29.31 |   22.37
-v1 - Buffer DMA, MFMA layout |  835.61 | 1016.57 |  949.97
-v2 - LDS swizzle             | 1103.81 | 1276.01 | 1190.64
-v3 - Double buffer G2S       | 1048.60 | 1085.61 | 1007.87
+PyTorch (2.14.0+rocm7.14)    | 1420.69 | 1568.50 | 1516.97
+v0 - Basic FlyDSL, FMA       |   53.34 |   29.74 |   22.47
+v1 - Buffer DMA, MFMA layout |  858.96 | 1003.89 |  935.53
+v2 - LDS swizzle             | 1092.32 | 1271.48 | 1183.53
+v3 - Double buffer G2S       | 1047.24 | 1071.21 | 1002.35
+v2b - Scheduling intrinsics  | 1144.30 | 1296.94 | 1190.24
 
 Learnings
 - There are scalar (SGPRs) and vector (VGPRs) registers. Scalar means wave-uniform (same value across all lanes), vector means lane-private data. This is analogous to NVIDIA's uniform and normal registers.
@@ -43,3 +45,12 @@ Learnings
 - MFMA layout: see `matmul_v1.py` for illustration.
 - There are 4 SIMDs per CU, hence we need at least 4 waves to saturate the execution units.
 - Use async version of DMA buffer load to implement double buffering. The async API (`asyncmark()` and `wait_asyncmark()`) is compiler helpers: the compiler tracks number of DMA issues and inserts `s_waitcnt vmcnt(X)` accordingly.
+- There are 512 registers per lane per SIMD. Using 4 waves matching 4 SIMD:
+  - Occupancy=1: 512 registers/thread
+  - Occupancy=2: 256 registers/thread
+  - Occpuancy=3: 168 registers/thread
+  - Occupancy=4: 128 registers/thread
+  - Careful when crossing the threshold, which reduces occupancy abruptly.
+- **Scheduling intrinsics**: There are intrinsics to influence instruction scheduling. See https://llvm.org/docs/AMDGPUUsage.html `llvm.amdgcn.sched` for more details.
+  - `sched_barrier(0)`: no instructions can cross the barrier. Change `0` to another mask values to select what instruction types can still cross the barrier.
+  - `sched_dsrd(M) / sched_mfma(N)`: schedule groups, enforcing ordering between groups. For example, `sched_dsrd(M) + sched_mfma(N)` means schedule M `ds_read` THEN schedule N `mfma`. It will schedule ANY instructions of that type appearing before the intrinsic, not necessarily the immediately preceding instructions.
