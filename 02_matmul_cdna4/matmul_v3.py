@@ -1,5 +1,3 @@
-import math
-
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch

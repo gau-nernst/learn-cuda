@@ -51,6 +51,7 @@ Learnings
   - Occpuancy=3: 168 registers/thread
   - Occupancy=4: 128 registers/thread
   - Careful when crossing the threshold, which reduces occupancy abruptly.
+- VGPRs and AGPRs share the same pool of registers. In addition, each thread can only have up to 256 VGPRs. Hence, we only need to use AGPRs when we target occupancy=1 i.e. 1 wave/SIMD, 256 VGPRs and AGPRs. Otherwise, there is no point using AGPRs (AGPRs can only be used as MFMA accumulator).
 - **Scheduling intrinsics**: There are intrinsics to influence instruction scheduling. See https://llvm.org/docs/AMDGPUUsage.html `llvm.amdgcn.sched` for more details.
   - `sched_barrier(0)`: no instructions can cross the barrier. Change `0` to another mask values to select what instruction types can still cross the barrier.
   - `sched_dsrd(M) / sched_mfma(N)`: schedule groups, enforcing ordering between groups. For example, `sched_dsrd(M) + sched_mfma(N)` means schedule M `ds_read` THEN schedule N `mfma`. It will schedule ANY instructions of that type appearing before the intrinsic, not necessarily the immediately preceding instructions.
