@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from attention_v6 import attn_v6
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.cpp_extension import load
 from triton.testing import do_bench
@@ -18,7 +19,7 @@ CURRENT_DIR = Path(__file__).parent
 
 module = load(
     "my_ext",
-    sources=list(CURRENT_DIR.glob("attention*")),
+    sources=list(CURRENT_DIR.glob("attention_*.cu")) + ["attention.cpp"],
     extra_cuda_cflags=["-lineinfo", "--ptxas-options=-v"],
     verbose=True,
 )
@@ -103,6 +104,8 @@ def main():
         out = f(Q, K, V)
         torch.testing.assert_close(out, out_ref)
         bench_and_print(f, f"v{i + 1}", Q, K, V)
+
+    bench_and_print(attn_v6, "v6", Q, K, V)
 
     df = pd.DataFrame(results, columns=["Kernel", "Latency (ms)", "TFLOPS", "% SOL"])
     print(df.to_markdown(index=False))
