@@ -21,7 +21,6 @@ Name | Description
 06\. [Box blur](06_box_blur/) | 2D CUDA blocks/threads. TODO: optimize with separable filters, moving average.
 07\. [Attention](07_attention/) | Flash attention
 08\. [Row-scaled matmul](08_row_scaled_mm/) | Simple epilogue
-09\. [Block-scaled matmul](09_block_scaled_mm_sm120/) | MXFP8
 
 ```bash
 # profile a CUDA kernel
