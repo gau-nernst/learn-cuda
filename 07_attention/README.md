@@ -29,11 +29,13 @@ TODO: add flash-attn and flash-attn-4 baseline
 
 | Kernel                |   Latency (ms) |   TFLOPS |   % SOL |
 |:----------------------|---------------:|---------:|--------:|
-| F.sdpa() - FA         |         2.9398 |   187.00 |   89.26 |
-| F.sdpa() - CuDNN      |         2.7842 |   197.45 |   94.25 |
-| v4 (cp.async 4-stage) |         2.7614 |   199.09 |   95.03 |
-| v5 (cp.async 3-stage) |         2.8017 |   196.22 |   93.66 |
-| v6 (TMA 3-stage)      |         2.6778 |   205.30 |   98.00 |
+| F.sdpa() - FA         |         2.9614 |   185.64 |   88.61 |
+| F.sdpa() - CuDNN      |         2.8187 |   195.04 |   93.1  |
+| flash-attn (FA2)      |         2.9000 |   189.57 |   90.49 |
+| flash-attn (CuteDSL)  |         2.8682 |   191.67 |   91.49 |
+| v4 (cp.async 4-stage) |         2.7992 |   196.4  |   93.75 |
+| v5 (cp.async 3-stage) |         2.8303 |   194.24 |   92.71 |
+| v6 (TMA 3-stage)      |         2.7064 |   203.13 |   96.96 |
 
 5090 @ 600W
 
@@ -41,6 +43,7 @@ TODO: add flash-attn and flash-attn-4 baseline
 |:----------------------|---------------:|---------:|--------:|
 | F.sdpa() - FA         |         2.8846 |   190.58 |   90.97 |
 | F.sdpa() - CuDNN      |         2.6952 |   203.98 |   97.36 |
+| flash-attn (FA2)      |         2.8336 |   194.02 |   92.61 |
 | flash-attn (CuteDSL)  |         2.7741 |   198.18 |   94.60 |
 | v4 (cp.async 4-stage) |         2.5470 |   215.84 |  103.03 |
 | v5 (cp.async 3-stage) |         2.6159 |   210.16 |  100.32 |

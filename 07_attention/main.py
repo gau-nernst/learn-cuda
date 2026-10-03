@@ -107,7 +107,7 @@ def main():
     if flash_attn_func is not None:
         out = flash_attn_func(Qt, Kt, Vt).transpose(1, 2)
         torch.testing.assert_close(out, out_ref)
-        bench_and_print(flash_attn_func, "flash-attn", Qt, Kt, Vt)
+        bench_and_print(flash_attn_func, "flash-attn (FA2)", Qt, Kt, Vt)
 
     if fa_cute is not None:
         out = fa_cute(Qt, Kt, Vt)[0].transpose(1, 2)
