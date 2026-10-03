@@ -15,6 +15,11 @@ try:
 except ImportError:
     flash_attn_func = None
 
+try:
+    from flash_attn.cute import flash_attn_func as fa_cute
+except ImportError:
+    fa_cute = None
+
 CURRENT_DIR = Path(__file__).parent
 
 module = load(
@@ -49,14 +54,25 @@ def main():
     K = generate_input(bs, nh, lkv, head_dim)
     V = generate_input(bs, nh, lkv, head_dim)
 
+    Qt, Kt, Vt = [x.transpose(1, 2) for x in (Q, K, V)]
+
     if args.profile is not None:
-        if args.profile == "fa":
+        if args.profile == "pt-fa":
             with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
                 F.scaled_dot_product_attention(Q, K, V)
 
-        elif args.profile == "cudnn":
+        elif args.profile == "pt-cudnn":
             with sdpa_kernel([SDPBackend.CUDNN_ATTENTION]):
                 F.scaled_dot_product_attention(Q, K, V)
+
+        elif args.profile == "fa":
+            flash_attn_func(Qt, Kt, Vt)
+
+        elif args.profile == "fa-cute":
+            fa_cute(Qt, Kt, Vt)
+
+        elif args.profile == "6":
+            attn_v6(Q, K, V)
 
         else:
             f = getattr(module, f"sdpa_v{args.profile}")
@@ -89,15 +105,14 @@ def main():
         bench_and_print(F.scaled_dot_product_attention, "F.sdpa() - CuDNN", Q, K, V)
 
     if flash_attn_func is not None:
-        out = flash_attn_func(Q.transpose(1, 2), K.transpose(1, 2), V.transpose(1, 2)).transpose(1, 2)
+        out = flash_attn_func(Qt, Kt, Vt).transpose(1, 2)
         torch.testing.assert_close(out, out_ref)
-        bench_and_print(
-            flash_attn_func,
-            "flash-attn",
-            Q.transpose(1, 2),
-            K.transpose(1, 2),
-            V.transpose(1, 2),
-        )
+        bench_and_print(flash_attn_func, "flash-attn", Qt, Kt, Vt)
+
+    if fa_cute is not None:
+        out = fa_cute(Qt, Kt, Vt)[0].transpose(1, 2)
+        torch.testing.assert_close(out, out_ref)
+        bench_and_print(fa_cute, "flash-attn (CuteDSL)", Qt, Kt, Vt)
 
     for i in range(5):
         f = getattr(module, f"sdpa_v{i + 1}")

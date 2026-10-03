@@ -20,7 +20,7 @@ v5 (better pipelining)         | 197.74 | 94.39%
 ## Update 2026/10/03
 
 We present a new table here because the previous optimization progression from v4 to v5 doesn't survive the new system setup. Hence, the old table is preserved as a historical artifact.
-- Setup: PyTorch 2.14.1+cu130, system CUDA 13.3, driver 615.71.09
+- Setup: PyTorch 2.14.1+cu130, system CUDA 13.3, driver 615.71.09, flash-attn-4 4.0.0b33
 - Shape: bs=4, num_heads=8, len_query=4096, len_kv = 8192
 
 TODO: add flash-attn and flash-attn-4 baseline
@@ -29,11 +29,11 @@ TODO: add flash-attn and flash-attn-4 baseline
 
 | Kernel                |   Latency (ms) |   TFLOPS |   % SOL |
 |:----------------------|---------------:|---------:|--------:|
-| F.sdpa() - FA         |         2.9398 |   187    |   89.26 |
+| F.sdpa() - FA         |         2.9398 |   187.00 |   89.26 |
 | F.sdpa() - CuDNN      |         2.7842 |   197.45 |   94.25 |
 | v4 (cp.async 4-stage) |         2.7614 |   199.09 |   95.03 |
 | v5 (cp.async 3-stage) |         2.8017 |   196.22 |   93.66 |
-| v6 (TMA 3-stage)      |         2.6778 |   205.3  |   98    |
+| v6 (TMA 3-stage)      |         2.6778 |   205.30 |   98.00 |
 
 5090 @ 600W
 
@@ -41,6 +41,7 @@ TODO: add flash-attn and flash-attn-4 baseline
 |:----------------------|---------------:|---------:|--------:|
 | F.sdpa() - FA         |         2.8846 |   190.58 |   90.97 |
 | F.sdpa() - CuDNN      |         2.6952 |   203.98 |   97.36 |
-| v4 (cp.async 4-stage) |         2.547  |   215.84 |  103.03 |
+| flash-attn (CuteDSL)  |         2.7741 |   198.18 |   94.60 |
+| v4 (cp.async 4-stage) |         2.5470 |   215.84 |  103.03 |
 | v5 (cp.async 3-stage) |         2.6159 |   210.16 |  100.32 |
 | v6 (TMA 3-stage)      |         2.5062 |   219.36 |  104.71 |
